@@ -18,7 +18,7 @@ export function doIt(itemId: string): Item | null {
     toDisposition: "human",
     category: item.category,
   });
-  recordOutcome(item.category, item.disposition, item.disposition); // 是認=agreed
+  if (item.disposition) recordOutcome(item.category, item.disposition, item.disposition); // 是認=agreed
   return items.update(itemId, { status: "in_progress" });
 }
 
