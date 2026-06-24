@@ -21,6 +21,10 @@ interface ExecuteOut {
 export async function requestExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
+  // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
+  // executionStatus は "none" 既定で null にならない (db.ts DEFAULT 'none')。
+  // failed のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
+  if (item.executionStatus && item.executionStatus !== "none" && item.executionStatus !== "failed") return item;
   if (item.kind !== "leaf") {
     return items.update(itemId, {
       executionResult: "ノードは直接実行できません。先に分解してください。",

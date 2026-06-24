@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
+import { classify } from "./classifier.js";
 import { promotePrompt } from "./ai/prompts.js";
 import type { Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
@@ -45,5 +46,11 @@ export async function judge(itemId: string): Promise<Item | null> {
   const d = res.data as { kind?: string; rung?: string; executable?: boolean };
   const rung: Rung = RUNGS.includes(d.rung as Rung) ? (d.rung as Rung) : item.rung;
   const kind = d.executable || d.kind === "leaf" ? "leaf" : "node";
-  return items.update(itemId, { kind, rung });
+  // 葉に降りてきたら三値を葉の文脈で付け直す (§3.3 '割る→実行可能?を付け直す').
+  // 放置すると node 時代の古いスコアが残り executor.requestExecution がそれで門番してしまう。
+  // decomposer.applyOption が子を再分類するのと同じ挙動を promote のみの経路にも揃える。
+  const updated = items.update(itemId, { kind, rung });
+  if (kind === "leaf" && (item.kind !== "leaf" || updated?.reversibility == null || updated?.stakes == null))
+    return await classify(updated!.id);
+  return updated;
 }

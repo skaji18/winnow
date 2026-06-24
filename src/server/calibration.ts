@@ -22,7 +22,13 @@ export function recordOutcome(
   if (aiDisposition === humanFinal) {
     categoryStats.bump(category, aiDisposition, "agreed");
   } else {
+    // 全方向の覆しは overturned に積む (全体の覆し率を正直に保つ)。
     categoryStats.bump(category, aiDisposition, "overturned");
+    // 緩める判定 (§3.6-3) は escalate→auto の覆しだけを数える。人間が上げた
+    // escalate→human を分子に混ぜると、安全側の判断が誤って自動へ倒してしまう。
+    if (aiDisposition === "escalate" && humanFinal === "auto") {
+      categoryStats.bump(category, aiDisposition, "overturnedToAuto");
+    }
   }
 
   // 締めるのは速く: 自動が事故ったら、そのカテゴリは即 escalate 固定の learned rule。
@@ -40,15 +46,17 @@ export function recordOutcome(
   const stats = categoryStats.forCategory(category);
   const esc = stats.find((s) => s.aiDisposition === "escalate");
   if (esc) {
+    // 分母は安全側 (agreed + 全方向の覆し)、分子は auto 方向の覆しだけ (§3.6-3)。
+    // escalate→human の覆しは分子に決して入れない。
     const total = esc.agreed + esc.overturned;
-    if (total >= MIN_SAMPLES && esc.overturned / total >= OVERTURN_TO_AUTO) {
+    if (total >= MIN_SAMPLES && esc.overturnedToAuto / total >= OVERTURN_TO_AUTO) {
       const existing = rules.forCategory(category);
       if (!existing) {
         rules.upsert({
           category,
           forcedDisposition: "auto",
           source: "learned",
-          note: `escalateの${Math.round((esc.overturned / total) * 100)}%が却下(n=${total})→自動に倒す`,
+          note: `escalateの${Math.round((esc.overturnedToAuto / total) * 100)}%がautoで足りた(n=${total})→自動に倒す`,
         });
       }
     }

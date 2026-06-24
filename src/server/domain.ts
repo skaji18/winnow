@@ -125,7 +125,8 @@ export interface CategoryStat {
   category: string;
   aiDisposition: Disposition;
   agreed: number; // 人間が是認
-  overturned: number; // 人間が覆した
+  overturned: number; // 人間が覆した (全方向)
+  overturnedToAuto: number; // escalate を auto へ覆した分だけ (§3.6-3 緩める判定の分子)
 }
 
 export interface ExecutionJob {

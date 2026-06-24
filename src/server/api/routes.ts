@@ -16,18 +16,44 @@ function background(fn: () => Promise<unknown>): void {
   fn().catch((e) => console.error("[winnow] background op failed:", e));
 }
 
+// 自動着火 (§3.4/§0): キューを開くたびに、未着手の可逆リーフ自動アイテムを
+// 点火する。overlapする /api/state ポーリングからの二重起動を防ぐため、
+// 起動中の id を保持して重複ディスパッチをスキップする。
+const igniting = new Set<string>();
+
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // One-shot snapshot powering the whole UI.
-  app.get("/api/state", async () => ({
-    items: items.all(),
-    queue: queue(),
-    autoFolded: autoFoldedCount(),
-    settings: settings.get(),
-    sessions: getDriver().listSessions(),
-    summary: weekly(),
-    rules: rules.all(),
-    recentJobs: jobs.recent(30),
-  }));
+  app.get("/api/state", async () => {
+    // 仕分け済みの自動アイテムはキューを開いた瞬間に走り出す (待ち行列を作らない)。
+    // requestExecution が自己ガードする: executionStatus!=="none" は弾き、
+    // 不可逆/高ステークスは proposed に回すので、ここでの追加ゲートは不要。
+    // 監査サンプル済みも除外しない: 自動実行しつつキューにも出して見分けの効く
+    // 監査を混入させる (§4-3, queue.ts のフィルタが面倒を見る)。
+    for (const it of items.all()) {
+      if (
+        it.status === "classified" &&
+        it.kind === "leaf" &&
+        it.disposition === "auto" &&
+        it.executionStatus === "none" &&
+        !igniting.has(it.id)
+      ) {
+        igniting.add(it.id);
+        background(() =>
+          executor.requestExecution(it.id).finally(() => igniting.delete(it.id)),
+        );
+      }
+    }
+    return {
+      items: items.all(),
+      queue: queue(),
+      autoFolded: autoFoldedCount(),
+      settings: settings.get(),
+      sessions: getDriver().listSessions(),
+      summary: weekly(),
+      rules: rules.all(),
+      recentJobs: jobs.recent(30),
+    };
+  });
 
   // --- items CRUD -----------------------------------------------------------
   const createSchema = z.object({
@@ -54,9 +80,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return item;
   });
 
+  // 汎用更新。監査/自動化/来歴フィールド (auditSampled, humanOverrode,
+  // autoExecuted, executionStatus, executionResult, createdAt, updatedAt, id) は
+  // 意図的に除外し、専用の action/audit/execute/cancel ルートからしか動かせない
+  // ようにする (簿記の信頼性を守る)。.strict() で未知キーも拒否。
+  const patchSchema = z
+    .object({
+      title: z.string().min(1).optional(),
+      body: z.string().optional(),
+      kind: z.enum(["node", "leaf"]).optional(),
+      rung: z.enum(["fog", "strategy", "tactic", "means", "execution"]).optional(),
+      parentId: z.string().nullable().optional(),
+      orderIndex: z.number().optional(),
+      status: z
+        .enum(["inbox", "classified", "in_progress", "done", "rejected", "blocked"])
+        .optional(),
+      disposition: z.enum(["auto", "escalate", "human"]).nullable().optional(),
+      confidence: z.number().min(0).max(1).nullable().optional(),
+      reason: z.string().nullable().optional(),
+      stakes: z.number().min(0).max(1).nullable().optional(),
+      reversibility: z.number().min(0).max(1).nullable().optional(),
+      category: z.string().nullable().optional(),
+      process: z.enum(["waterfall", "iterative"]).nullable().optional(),
+      domain: z.enum(["software", "general"]).optional(),
+      projectDir: z.string().nullable().optional(),
+    })
+    .strict();
   app.patch("/api/items/:id", async (req) => {
     const { id } = req.params as { id: string };
-    const patch = req.body as Record<string, unknown>;
+    const patch = patchSchema.parse(req.body);
     return items.update(id, patch);
   });
 
@@ -170,7 +222,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   const settingsSchema = z.object({
     auditRate: z.number().min(0).max(1).optional(),
     escalationTightness: z.number().min(0).max(1).optional(),
-    maxWorkers: z.number().int().min(0).max(8).optional(),
+    maxWorkers: z.number().int().min(1).max(8).optional(),
     claudeControlCmd: z.string().optional(),
     claudeWorkerCmd: z.string().optional(),
     useHeadless: z.boolean().optional(),

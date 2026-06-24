@@ -31,7 +31,7 @@ export function weekly(): WeeklySummary {
     since,
   );
   const overridden = count(
-    "SELECT COUNT(*) AS c FROM label_events WHERE action IN ('override','reclassify') AND createdAt>=?",
+    "SELECT COUNT(*) AS c FROM label_events WHERE action = 'override' AND createdAt>=?",
     since,
   );
   const audited = count(

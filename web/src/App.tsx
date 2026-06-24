@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { TerminalPane } from "./components/TerminalPane.js";
@@ -124,7 +124,9 @@ function QueueCard({
   };
 
   const proposed = item.executionStatus === "proposed";
-  const cls = `card${item.isAudit ? " audit" : ""}${proposed ? " proposed" : ""}`;
+  // 監査サンプルは通常アイテムと見分けがつかない (§4-3): カード枠に特別扱いを残さない。
+  const autoDone = item.autoExecuted && item.executionStatus === "succeeded";
+  const cls = `card${proposed ? " proposed" : ""}`;
 
   return (
     <div className={cls}>
@@ -142,19 +144,22 @@ function QueueCard({
         </details>
       )}
 
+      {autoDone && (
+        // 自動実行済みの安く取り消せる経路 (§4-4). 結果サマリは上の executionResult details が出している。
+        <div className="actions" style={{ marginTop: 10 }}>
+          <button className="danger" disabled={busy} onClick={() => run(() => api.cancel(item.id))}>
+            取り消す
+          </button>
+          <span className="muted" style={{ fontSize: 12 }}>
+            痕跡は履歴に残るが、副作用は自動では巻き戻されません。
+          </span>
+          {busy && <span className="spinner">実行中…</span>}
+        </div>
+      )}
+
+      {!autoDone && (
       <div className="actions" style={{ marginTop: 10 }}>
-        {item.isAudit ? (
-          // 監査: 自動処理の30秒確認 (§4-3). 見分けがつきにくい形でキューに混ざる。
-          <>
-            <span className="badge audit">確認(自動処理)</span>
-            <button className="primary" disabled={busy} onClick={() => run(() => api.audit(item.id, true))}>
-              問題なし
-            </button>
-            <button className="danger" disabled={busy} onClick={() => run(() => api.audit(item.id, false))}>
-              本当は上げるべきだった
-            </button>
-          </>
-        ) : proposed ? (
+        {proposed ? (
           // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
           <>
             <span className="badge disp-escalate">承認待ち</span>
@@ -166,8 +171,11 @@ function QueueCard({
             </button>
           </>
         ) : (
-          // 通常の処分=ラベル (§4-1)
+          // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3):
+          // 教師信号はこれら通常アクションからサーバ側で導出する (src/server/actions.ts)。
           <>
+            {/* DECISIONS.md L45: 枠なし・控えめなチップ1つだけ許容。アクション集合は通常と同一。 */}
+            {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
             <button disabled={busy} onClick={() => run(() => api.action(item.id, "do"))}>
               やる
             </button>
@@ -199,6 +207,7 @@ function QueueCard({
         )}
         {busy && <span className="spinner">実行中…</span>}
       </div>
+      )}
     </div>
   );
 }
@@ -316,12 +325,24 @@ function DecomposeModal({
   const [options, setOptions] = useState<DecomposeOption[] | null>(null);
   const [applying, setApplying] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // StrictMode の二重起動でも item.id ごとに分解リクエストを1回だけ発火させる ref ガード。
+  const requestedFor = useRef<string | null>(null);
 
   useEffect(() => {
+    if (requestedFor.current === item.id) return;
+    requestedFor.current = item.id;
+    let cancelled = false;
     api
       .decompose(item.id)
-      .then((r) => setOptions(r.options))
-      .catch((e) => setErr((e as Error).message));
+      .then((r) => {
+        if (!cancelled) setOptions(r.options);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr((e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [item.id]);
 
   const apply = async (opt: DecomposeOption) => {

@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS category_stats (
   aiDisposition TEXT NOT NULL,
   agreed INTEGER NOT NULL DEFAULT 0,
   overturned INTEGER NOT NULL DEFAULT 0,
+  overturnedToAuto INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (category, aiDisposition)
 );
 
@@ -95,6 +96,17 @@ CREATE TABLE IF NOT EXISTS settings (
   json TEXT NOT NULL
 );
 `);
+
+// 既存DBには overturnedToAuto 列が無い (§3.6-3 の信号非対称を正すための後付け列)。
+// 冪等マイグレーション: 無ければ足す。既にあれば SQLite がエラーを投げるので握り潰す。
+const hasOverturnedToAuto = (
+  db.prepare("PRAGMA table_info(category_stats)").all() as { name: string }[]
+).some((c) => c.name === "overturnedToAuto");
+if (!hasOverturnedToAuto) {
+  db.exec(
+    "ALTER TABLE category_stats ADD COLUMN overturnedToAuto INTEGER NOT NULL DEFAULT 0",
+  );
+}
 
 // Seed settings row once.
 const existing = db.prepare("SELECT json FROM settings WHERE id = 1").get() as

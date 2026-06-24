@@ -1,4 +1,5 @@
 import { recordOutcome } from "./calibration.js";
+import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
@@ -18,6 +19,11 @@ export function doIt(itemId: string): Item | null {
     toDisposition: "human",
     category: item.category,
   });
+  // 監査サンプルの auto を「やる」=自動処理を是認 → audit_ok の教師信号 (§4-3 見分けつかない混入).
+  // recordAudit が audit_ok の簿記(bump+label)を一手に出すので、ここで recordOutcome を二重に呼ばない。
+  if (item.auditSampled && item.disposition === "auto") {
+    return items.update(itemId, { status: "in_progress", ...recordAudit(item, true) });
+  }
   if (item.disposition) recordOutcome(item.category, item.disposition, item.disposition); // 是認=agreed
   return items.update(itemId, { status: "in_progress" });
 }
@@ -37,6 +43,14 @@ export function reclassify(itemId: string, to: Disposition): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
   const from = item.disposition;
+
+  // 監査サンプルの auto を非auto へ覆す = 監査が過小エスカレーションを捕まえた (§3.6-3, §4-3).
+  // recordAudit(false, to) が audit_bad の簿記(即締め learned rule + 覆し)を一手に出す。
+  // ここで reclassify/override の label_event や recordOutcome を別途出すと二重記録になるので出さない。
+  if (item.auditSampled && from === "auto" && to !== "auto") {
+    return items.update(itemId, recordAudit(item, false, to));
+  }
+
   labels.record({
     itemId,
     action: from === to ? "reclassify" : "override",
@@ -45,7 +59,11 @@ export function reclassify(itemId: string, to: Disposition): Item | null {
     category: item.category,
   });
   recordOutcome(item.category, from, to); // 覆し=overturned (一致なら agreed)
-  return items.update(itemId, { disposition: to, humanOverrode: from !== to });
+  // auto へ倒し込んだら監査対象に入れ直す (§4-3). auto→auto 再是認は既存フラグを保ち二重計上を避ける。
+  const intoAuto = to === "auto" && from !== "auto";
+  const patch: Partial<Item> = { disposition: to, humanOverrode: from !== to };
+  if (intoAuto) patch.auditSampled = rollAudit("auto");
+  return items.update(itemId, patch);
 }
 
 /** この種類はもう上げるな: カテゴリを自動に倒す明示ルール (§4-1, §3.6-1)。 */
@@ -65,7 +83,10 @@ export function muteCategory(itemId: string): Item | null {
     toDisposition: "auto",
     category: item.category,
   });
-  return items.update(itemId, { disposition: "auto" });
+  // カテゴリを auto に強制 → この項目も監査対象に入れ直す (§4-3).
+  // 既に auto で監査サンプル済みならフラグを保ち二重計上を避ける。
+  const auditSampled = item.disposition === "auto" && item.auditSampled ? true : rollAudit("auto");
+  return items.update(itemId, { disposition: "auto", auditSampled });
 }
 
 export function reject(itemId: string): Item | null {
@@ -83,28 +104,38 @@ export async function approve(itemId: string): Promise<Item | null> {
 }
 
 /**
+ * 監査の教師信号を記録する共通簿記 (§3.6-2, §4-3).
+ * auditConfirm と、通常処分アクション由来の監査確定(doIt/reclassify)が同一の
+ * label_event + recordOutcome を出すよう一本化する。二重記録を防ぐ唯一の経路。
+ * 返すのは「items.update に重ねるべき追加パッチ」。呼び出し側で他の更新と合成する。
+ *  ok=true : 自動は妥当だった (audit_ok). auditSampled を下ろすだけ。
+ *  ok=false: 過小エスカレーション検出 (audit_bad). 即締め(learned rule)+escalate へ覆す。
+ * to は ok=false 時の覆し先。標準の /api/audit は escalate、通常アクション由来は人間の選んだ段。
+ */
+function recordAudit(item: Item, ok: boolean, to: Disposition = "escalate"): Partial<Item> {
+  if (ok) {
+    labels.record({ itemId: item.id, action: "audit_ok", fromDisposition: "auto", category: item.category });
+    recordOutcome(item.category, "auto", "auto");
+    return { auditSampled: false };
+  }
+  labels.record({
+    itemId: item.id,
+    action: "audit_bad",
+    fromDisposition: "auto",
+    toDisposition: to,
+    category: item.category,
+  });
+  recordOutcome(item.category, "auto", to, { auditBad: true });
+  return { auditSampled: false, disposition: to, humanOverrode: true };
+}
+
+/**
  * 監査の確認 (§3.6-2, §4-3). 自動処理が妥当だったか/誤りだったか。
  * 過小エスカレーション(自動の誤り)は高く遅れて危険に出るので、見つけたら即締める。
+ * standalone な /api/audit 用に残置。UI からは通常処分アクションが同じ信号を出すので不要。
  */
 export function auditConfirm(itemId: string, ok: boolean): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
-  if (ok) {
-    labels.record({ itemId, action: "audit_ok", fromDisposition: "auto", category: item.category });
-    recordOutcome(item.category, "auto", "auto");
-    return items.update(itemId, { auditSampled: false });
-  }
-  labels.record({
-    itemId,
-    action: "audit_bad",
-    fromDisposition: "auto",
-    toDisposition: "escalate",
-    category: item.category,
-  });
-  recordOutcome(item.category, "auto", "escalate", { auditBad: true });
-  return items.update(itemId, {
-    auditSampled: false,
-    disposition: "escalate",
-    humanOverrode: true,
-  });
+  return items.update(itemId, recordAudit(item, ok));
 }

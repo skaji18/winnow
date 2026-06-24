@@ -219,12 +219,22 @@ export const rules = {
 };
 
 export const categoryStats = {
-  bump(category: string, aiDisposition: Disposition, field: "agreed" | "overturned"): void {
+  bump(
+    category: string,
+    aiDisposition: Disposition,
+    field: "agreed" | "overturned" | "overturnedToAuto",
+  ): void {
     db.prepare(
-      `INSERT INTO category_stats (category, aiDisposition, agreed, overturned)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO category_stats (category, aiDisposition, agreed, overturned, overturnedToAuto)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(category, aiDisposition) DO UPDATE SET ${field} = ${field} + 1`,
-    ).run(category, aiDisposition, field === "agreed" ? 1 : 0, field === "overturned" ? 1 : 0);
+    ).run(
+      category,
+      aiDisposition,
+      field === "agreed" ? 1 : 0,
+      field === "overturned" ? 1 : 0,
+      field === "overturnedToAuto" ? 1 : 0,
+    );
   },
   all(): CategoryStat[] {
     return db.prepare("SELECT * FROM category_stats").all() as CategoryStat[];

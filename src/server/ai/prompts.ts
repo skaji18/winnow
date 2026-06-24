@@ -99,11 +99,19 @@ body: ${item.body || "(なし)"}
 
 /** execute: リーフの実行。domain で挙動を変える (§3.4). */
 export function executePrompt(item: Item): string {
+  // Defense in depth (§ project isolation): even though the dispatcher pins the
+  // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
+  // 絶対パスをプロンプト本文にも書き、全ファイルI/Oをその配下に閉じ込める。
+  // projectDir が null の案件(一般/下書き)は既定の workspaces 配下で動くので
+  // ディレクティブを足さず、プロンプトは変えない。
+  const dirNote = item.projectDir
+    ? `\n作業ディレクトリは ${item.projectDir} です。ファイル読み書き・コマンド実行はこの絶対パス配下のみで行い、他ディレクトリへは触れないこと。`
+    : "";
   const softwareNote =
     item.domain === "software"
-      ? `これはソフトウェア開発タスクです。作業ディレクトリ内で実際に手を動かして構いません(編集/実行)。
+      ? `これはソフトウェア開発タスクです。作業ディレクトリ内で実際に手を動かして構いません(編集/実行)。${dirNote}
 ただし不可逆な操作(本番デプロイ・データ削除・外部送信など)はしないこと。それらが必要なら status を "needs_human" にして提案だけ返すこと。`
-      : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。`;
+      : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。${dirNote}`;
   return `${SPINE}
 
 # タスク: 実行(Executor)

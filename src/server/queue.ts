@@ -12,6 +12,9 @@ export interface QueueItem extends Item {
 export function queue(): QueueItem[] {
   const all = items.all();
   const visible = all.filter((it) => {
+    // 自動実行が成功した分は §4-4「安く取り消せる」ための取消ハンドルとして
+    // キューに残す (done でも畳まない)。cancelled は再浮上させない。
+    if (it.autoExecuted && it.executionStatus === "succeeded") return true;
     if (it.status === "done" || it.status === "rejected") return false;
     // 提案待ち(不可逆実行のワンタップ承認)は必ず出す
     if (it.executionStatus === "proposed") return true;

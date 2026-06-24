@@ -4,7 +4,16 @@ import { classifyPrompt } from "./ai/prompts.js";
 import { applyRulesAndCalibration } from "./calibration.js";
 import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
+import * as executor from "./executor.js";
 import { items, jobs, settings } from "./repo.js";
+
+/**
+ * 監査サンプリング判定 (§3.6-2, §4-3). auto 処分のみ N% を抽出。
+ * auto に倒す全経路が同一基準でサンプルできるよう共通化し actions.ts からも再利用する。
+ */
+export function rollAudit(disposition: Disposition): boolean {
+  return disposition === "auto" && Math.random() < settings.get().auditRate;
+}
 
 interface ClassifyOut {
   disposition: Disposition;
@@ -93,12 +102,9 @@ export async function classify(itemId: string): Promise<Item | null> {
   }
 
   // 監査サンプリング: 自動処理分の N% を、見分けのつかない形でキューへ (§4-3).
-  let auditSampled = false;
-  if (disposition === "auto" && Math.random() < cfg.auditRate) {
-    auditSampled = true;
-  }
+  const auditSampled = rollAudit(disposition);
 
-  return items.update(itemId, {
+  const updated = items.update(itemId, {
     status: "classified",
     disposition,
     confidence: out.confidence,
@@ -112,6 +118,15 @@ export async function classify(itemId: string): Promise<Item | null> {
     category: out.category,
     auditSampled,
   });
+
+  // 即時着火 (§0「回し」, routes.ts のキューopen掃き出しに次ぐ副次トリガ).
+  // 新たに分類された auto leaf を /api/state ポーリングを待たず発火させる。
+  // 掃き出しとの二重着火は requestExecution 冒頭の executionStatus ガードが吸収するため調整不要。
+  if (updated && updated.disposition === "auto" && updated.kind === "leaf") {
+    void executor.requestExecution(updated.id).catch(() => {});
+  }
+
+  return updated;
 }
 
 function normalize(d: Partial<ClassifyOut>): ClassifyOut {
