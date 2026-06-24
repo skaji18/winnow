@@ -10,7 +10,8 @@
     "dev:web": "vite",
     "build": "vite build",
     "start": "cross-env NODE_ENV=production tsx src/server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx scripts-seed.ts"
   },
   "dependencies": {
     "@fastify/static": "^7.0.4",
