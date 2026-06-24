@@ -100,6 +100,8 @@ export interface Project {
   // 案件ビューの見せ方: board=状態カンバン / flow=優先度・期日順リスト。
   mode: "board" | "flow";
   status: "active" | "archived";
+  // 案件固有の前提・文脈 (スタック/制約/関係者など)。分解・実行プロンプトに注入する。
+  context: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -197,6 +199,9 @@ export interface Settings {
   claudeWorkerCmd: string;
   // ヘッドレス(claude -p)で動かすdevモード。将来課金リスクありだが検証は速い。
   useHeadless: boolean;
+  // プロダクト全体の前提 (何を作っている/スタック/規約/方針)。上段への鋭い投資は
+  // 下段で複利で効く (§2.2)。分類・分解・実行プロンプト全部に注入する。
+  productContext: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -206,4 +211,5 @@ export const DEFAULT_SETTINGS: Settings = {
   claudeControlCmd: "claude --permission-mode acceptEdits",
   claudeWorkerCmd: "claude --permission-mode acceptEdits",
   useHeadless: false,
+  productContext: "",
 };

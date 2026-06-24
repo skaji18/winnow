@@ -87,5 +87,5 @@ export interface DecomposeOption {
   label: string;
   rationale: string;
   process: "waterfall" | "iterative";
-  children: { title: string; kind: "node" | "leaf"; rung: Item["rung"] }[];
+  children: { title: string; kind: "node" | "leaf"; rung: Item["rung"]; spec: string }[];
 }

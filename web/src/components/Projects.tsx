@@ -126,6 +126,19 @@ function ProjectDetail({
         </button>
       </div>
 
+      <details style={{ marginBottom: 14 }}>
+        <summary className="muted" style={{ fontSize: 12.5, cursor: "pointer" }}>
+          案件の前提・文脈（分解/実行に注入される）
+        </summary>
+        <textarea
+          rows={4}
+          style={{ width: "100%", marginTop: 8 }}
+          placeholder="この案件固有の前提・制約・関係者・参照先など。ここに書くとこの案件のタスクの分解・実行に効く。"
+          defaultValue={project.context}
+          onBlur={(e) => api.updateProject(project.id, { context: e.target.value }).then(onChange)}
+        />
+      </details>
+
       {project.mode === "board" ? (
         <ProjectBoard items={projectItems} state={state} onChange={onChange} />
       ) : (

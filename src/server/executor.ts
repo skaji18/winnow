@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
+import { buildContextBlock } from "./context.js";
 import type { Item } from "./domain.js";
 import { items, jobs } from "./repo.js";
 
@@ -68,7 +69,7 @@ export async function runExecution(itemId: string): Promise<Item | null> {
     id: randomUUID(),
     role: "worker",
     label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item),
+    prompt: executePrompt(item, buildContextBlock(item)),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
     timeoutMs: 600_000,

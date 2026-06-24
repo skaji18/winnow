@@ -55,6 +55,7 @@ export interface Project {
   description: string;
   mode: "board" | "flow"; // 案件ビューの見せ方
   status: "active" | "archived";
+  context: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -95,6 +96,7 @@ export interface Settings {
   claudeControlCmd: string;
   claudeWorkerCmd: string;
   useHeadless: boolean;
+  productContext: string;
 }
 
 export interface WeeklySummary {

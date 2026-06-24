@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
 import { classifyPrompt } from "./ai/prompts.js";
 import { applyRulesAndCalibration } from "./calibration.js";
+import { buildContextBlock } from "./context.js";
 import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
@@ -25,6 +26,7 @@ interface ClassifyOut {
   rung: Rung;
   process: Process;
   uncertaintyResolved: boolean;
+  executableReady: boolean;
   category: string;
 }
 
@@ -60,7 +62,7 @@ export async function classify(itemId: string): Promise<Item | null> {
     id: randomUUID(),
     role: "control",
     label: `分類: ${item.title.slice(0, 30)}`,
-    prompt: classifyPrompt(item),
+    prompt: classifyPrompt(item, buildContextBlock(item)),
     expectJson: true,
     timeoutMs: 90_000,
   });
@@ -99,6 +101,13 @@ export async function classify(itemId: string): Promise<Item | null> {
       disposition = "escalate";
       reason = `${reason}（tightnessにより自動を保留）`;
     }
+  }
+
+  // リーフ実行可能性ゲート: 受け入れ基準が曖昧なまま自動実行すると外す (§2.2).
+  // 詳細不足の leaf は自動着火させず「要詳細化」でキューに残す (締めるのは速く §3.6-3)。
+  if (out.kind === "leaf" && !out.executableReady && disposition === "auto") {
+    disposition = "escalate";
+    reason = `${reason}（要詳細化: 受け入れ基準が曖昧。分解か詳細追記を）`;
   }
 
   // 監査サンプリング: 自動処理分の N% を、見分けのつかない形でキューへ (§4-3).
@@ -143,6 +152,8 @@ function normalize(d: Partial<ClassifyOut>): ClassifyOut {
     rung,
     process: d.process === "waterfall" ? "waterfall" : "iterative",
     uncertaintyResolved: Boolean(d.uncertaintyResolved),
+    // 未指定は安全側=ready扱い(既存のauto動線を壊さない)。明示falseのときだけゲートする。
+    executableReady: d.executableReady !== false,
     category: typeof d.category === "string" && d.category ? d.category.trim() : "uncategorized",
   };
 }

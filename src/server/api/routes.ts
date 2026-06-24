@@ -183,6 +183,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           title: z.string(),
           kind: z.enum(["node", "leaf"]),
           rung: z.enum(["fog", "strategy", "tactic", "means", "execution"]),
+          spec: z.string().optional().default(""),
         }),
       ),
     }),
@@ -265,6 +266,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     claudeControlCmd: z.string().optional(),
     claudeWorkerCmd: z.string().optional(),
     useHeadless: z.boolean().optional(),
+    productContext: z.string().optional(),
   });
   app.patch("/api/settings", async (req) => {
     const patch = settingsSchema.parse(req.body);
@@ -280,6 +282,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     name: z.string().min(1),
     description: z.string().optional(),
     mode: z.enum(["board", "flow"]).optional(),
+    context: z.string().optional(),
   });
   app.post("/api/projects", async (req) => projects.create(projectSchema.parse(req.body)));
   app.patch("/api/projects/:id", async (req) => {
@@ -290,6 +293,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         description: z.string().optional(),
         mode: z.enum(["board", "flow"]).optional(),
         status: z.enum(["active", "archived"]).optional(),
+        context: z.string().optional(),
       })
       .strict()
       .parse(req.body);
