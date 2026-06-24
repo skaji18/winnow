@@ -11,12 +11,13 @@ export type Kind = "node" | "leaf";
  */
 export const RUNGS = ["fog", "strategy", "tactic", "means", "execution"] as const;
 export type Rung = (typeof RUNGS)[number];
+// 表示語彙は Agile/Jira 文脈に寄せる (内部キーは不変、ラベルだけ差し替え)。
 export const RUNG_LABEL: Record<Rung, string> = {
-  fog: "霧を照らす",
-  strategy: "戦略",
-  tactic: "戦術",
-  means: "具体手段",
-  execution: "実行",
+  fog: "テーマ",
+  strategy: "イニシアチブ",
+  tactic: "エピック",
+  means: "ストーリー",
+  execution: "タスク",
 };
 
 /** 三値仕分け (§3.2). 二値にすると「分からない」を表現できず盲点へ流す. */
@@ -25,10 +26,15 @@ export type Disposition = "auto" | "escalate" | "human";
 /** プロセス軸 (§2.3) — ラダーと直交. */
 export type Process = "waterfall" | "iterative";
 
+/** 優先度。人間が手付けする (AIは触らない)。 */
+export const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
+export type Priority = (typeof PRIORITIES)[number];
+
 export type ItemStatus =
   | "inbox" // 登録直後、未分類
   | "classified" // 分類済み、さばき待ち
   | "in_progress"
+  | "review" // レビュー段 (§3.5 レビューをパイプラインに戻す)
   | "done"
   | "rejected"
   | "blocked";
@@ -76,8 +82,38 @@ export interface Item {
   domain: "software" | "general";
   projectDir: string | null; // software実行時の作業ディレクトリ
 
+  // タスク管理の器 (PjM要素)。
+  projectId: string | null; // 所属する案件
+  sprintId: string | null; // 割り当てられたスプリント (mode=sprint の案件のみ)
+  dueDate: number | null; // 期日 (epoch ms)
+  priority: Priority;
+
   createdAt: number;
   updatedAt: number;
+}
+
+/** 案件 (プロジェクト) — 最上位の束ね。関連する木をまとめる。 */
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  // 進め方を案件ごとに切替 (§2.3 プロセス軸): sprint=時間箱で回す / flow=継続フロー。
+  mode: "sprint" | "flow";
+  status: "active" | "archived";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** スプリント (時間箱) — 反復の単位 (§2.3 "学ぶために回し、出すために束ねる")。 */
+export interface Sprint {
+  id: string;
+  projectId: string;
+  name: string;
+  goal: string;
+  startDate: number | null;
+  endDate: number | null;
+  status: "planned" | "active" | "completed";
+  createdAt: number;
 }
 
 /**

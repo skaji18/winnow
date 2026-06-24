@@ -26,9 +26,20 @@ export function queue(): QueueItem[] {
     return false;
   });
 
-  // 並び: 確信度の低いもの・ステークスの高いものを上に(人間の注意を寄せる §2.2)。
+  // 並び: 人間の注意を寄せる (§2.2)。ステークス高・確信度低を基本に、
+  // 優先度と期日(超過/間近)を加点する。
+  const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -0.4 };
+  const dueBoost = (x: Item): number => {
+    if (x.dueDate == null) return 0;
+    const days = (x.dueDate - Date.now()) / 86_400_000;
+    if (days < 0) return 1.2; // 期限超過
+    if (days < 2) return 0.6; // 間近
+    if (days < 7) return 0.2;
+    return 0;
+  };
   visible.sort((a, b) => {
-    const score = (x: Item) => (x.stakes ?? 0.5) + (1 - (x.confidence ?? 0.5));
+    const score = (x: Item) =>
+      (x.stakes ?? 0.5) + (1 - (x.confidence ?? 0.5)) + (PRIO[x.priority] ?? 0) + dueBoost(x);
     return score(b) - score(a);
   });
 

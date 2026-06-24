@@ -7,7 +7,7 @@ import * as decomposer from "../decomposer.js";
 import * as executor from "../executor.js";
 import * as promotion from "../promotion.js";
 import { autoFoldedCount, queue } from "../queue.js";
-import { items, jobs, labels, rules, settings } from "../repo.js";
+import { items, jobs, labels, projects, rules, settings, sprints } from "../repo.js";
 import { weekly } from "../summary.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
@@ -52,6 +52,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       summary: weekly(),
       rules: rules.all(),
       recentJobs: jobs.recent(30),
+      projects: projects.all(),
+      sprints: sprints.all(),
     };
   });
 
@@ -63,6 +65,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     kind: z.enum(["node", "leaf"]).optional(),
     domain: z.enum(["software", "general"]).optional(),
     projectDir: z.string().nullable().optional(),
+    projectId: z.string().nullable().optional(),
+    sprintId: z.string().nullable().optional(),
+    priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
+    dueDate: z.number().nullable().optional(),
     classify: z.boolean().optional(),
   });
   app.post("/api/items", async (req) => {
@@ -74,6 +80,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       kind: b.kind ?? "node",
       domain: b.domain ?? "general",
       projectDir: b.projectDir ?? null,
+      projectId: b.projectId ?? null,
+      sprintId: b.sprintId ?? null,
+      priority: b.priority ?? "normal",
+      dueDate: b.dueDate ?? null,
     });
     // 新規アイテムが着いたら分類器が disposition を書く (§4 利用動線)。
     if (b.classify !== false) background(() => classify(item.id));
@@ -93,7 +103,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentId: z.string().nullable().optional(),
       orderIndex: z.number().optional(),
       status: z
-        .enum(["inbox", "classified", "in_progress", "done", "rejected", "blocked"])
+        .enum(["inbox", "classified", "in_progress", "review", "done", "rejected", "blocked"])
         .optional(),
       disposition: z.enum(["auto", "escalate", "human"]).nullable().optional(),
       confidence: z.number().min(0).max(1).nullable().optional(),
@@ -104,6 +114,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       process: z.enum(["waterfall", "iterative"]).nullable().optional(),
       domain: z.enum(["software", "general"]).optional(),
       projectDir: z.string().nullable().optional(),
+      projectId: z.string().nullable().optional(),
+      sprintId: z.string().nullable().optional(),
+      dueDate: z.number().nullable().optional(),
+      priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
     })
     .strict();
   app.patch("/api/items/:id", async (req) => {
@@ -235,6 +249,65 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/summary", async () => weekly());
+
+  // --- 案件 (projects) ------------------------------------------------------
+  const projectSchema = z.object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    mode: z.enum(["sprint", "flow"]).optional(),
+  });
+  app.post("/api/projects", async (req) => projects.create(projectSchema.parse(req.body)));
+  app.patch("/api/projects/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    const patch = z
+      .object({
+        name: z.string().min(1).optional(),
+        description: z.string().optional(),
+        mode: z.enum(["sprint", "flow"]).optional(),
+        status: z.enum(["active", "archived"]).optional(),
+      })
+      .strict()
+      .parse(req.body);
+    return projects.update(id, patch);
+  });
+  app.delete("/api/projects/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    projects.remove(id);
+    return { ok: true };
+  });
+
+  // --- スプリント (sprints) -------------------------------------------------
+  app.post("/api/sprints", async (req) => {
+    const b = z
+      .object({
+        projectId: z.string(),
+        name: z.string().min(1),
+        goal: z.string().optional(),
+        startDate: z.number().nullable().optional(),
+        endDate: z.number().nullable().optional(),
+      })
+      .parse(req.body);
+    return sprints.create(b);
+  });
+  app.patch("/api/sprints/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    const patch = z
+      .object({
+        name: z.string().min(1).optional(),
+        goal: z.string().optional(),
+        startDate: z.number().nullable().optional(),
+        endDate: z.number().nullable().optional(),
+        status: z.enum(["planned", "active", "completed"]).optional(),
+      })
+      .strict()
+      .parse(req.body);
+    return sprints.update(id, patch);
+  });
+  app.delete("/api/sprints/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    sprints.remove(id);
+    return { ok: true };
+  });
 
   // --- rules ----------------------------------------------------------------
   app.get("/api/rules", async () => rules.all());

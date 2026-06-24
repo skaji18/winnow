@@ -6,8 +6,10 @@ import {
   type Item,
   type LabelAction,
   type LabelEvent,
+  type Project,
   type Rule,
   type Settings,
+  type Sprint,
   type ExecutionJob,
   DEFAULT_SETTINGS,
 } from "./domain.js";
@@ -43,6 +45,10 @@ function mapItem(r: Row): Item {
     executionResult: (r.executionResult as string) ?? null,
     domain: r.domain as Item["domain"],
     projectDir: (r.projectDir as string) ?? null,
+    projectId: (r.projectId as string) ?? null,
+    sprintId: (r.sprintId as string) ?? null,
+    dueDate: r.dueDate === null || r.dueDate === undefined ? null : (r.dueDate as number),
+    priority: (r.priority as Item["priority"]) ?? "normal",
     createdAt: r.createdAt as number,
     updatedAt: r.updatedAt as number,
   };
@@ -106,12 +112,16 @@ export const items = {
       executionResult: input.executionResult ?? null,
       domain: input.domain ?? "general",
       projectDir: input.projectDir ?? null,
+      projectId: input.projectId ?? null,
+      sprintId: input.sprintId ?? null,
+      dueDate: input.dueDate ?? null,
+      priority: input.priority ?? "normal",
       createdAt: ts,
       updatedAt: ts,
     };
     db.prepare(
-      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,domain,projectDir,createdAt,updatedAt)
-       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@domain,@projectDir,@createdAt,@updatedAt)`,
+      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,domain,projectDir,projectId,sprintId,dueDate,priority,createdAt,updatedAt)
+       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@domain,@projectDir,@projectId,@sprintId,@dueDate,@priority,@createdAt,@updatedAt)`,
     ).run({
       ...item,
       uncertaintyResolved: item.uncertaintyResolved ? 1 : 0,
@@ -126,7 +136,7 @@ export const items = {
     if (!current) return null;
     const merged = { ...current, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,domain=@domain,projectDir=@projectDir,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
     ).run({
       ...merged,
       uncertaintyResolved: merged.uncertaintyResolved ? 1 : 0,
@@ -267,6 +277,96 @@ export const jobs = {
     return db
       .prepare("SELECT * FROM jobs ORDER BY createdAt DESC LIMIT ?")
       .all(limit) as ExecutionJob[];
+  },
+};
+
+export const projects = {
+  all(): Project[] {
+    return db.prepare("SELECT * FROM projects ORDER BY createdAt ASC").all() as Project[];
+  },
+  get(id: string): Project | null {
+    return (db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Project) ?? null;
+  },
+  create(input: { name: string; description?: string; mode?: "sprint" | "flow" }): Project {
+    const p: Project = {
+      id: randomUUID(),
+      name: input.name,
+      description: input.description ?? "",
+      mode: input.mode ?? "flow",
+      status: "active",
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    db.prepare(
+      `INSERT INTO projects (id,name,description,mode,status,createdAt,updatedAt)
+       VALUES (@id,@name,@description,@mode,@status,@createdAt,@updatedAt)`,
+    ).run(p);
+    return p;
+  },
+  update(id: string, patch: Partial<Project>): Project | null {
+    const cur = projects.get(id);
+    if (!cur) return null;
+    const merged = { ...cur, ...patch, id, updatedAt: now() };
+    db.prepare(
+      `UPDATE projects SET name=@name,description=@description,mode=@mode,status=@status,updatedAt=@updatedAt WHERE id=@id`,
+    ).run(merged);
+    return merged;
+  },
+  remove(id: string): void {
+    // 案件を消したらアイテムは孤児にせず案件参照だけ外す (タスクは残す)。
+    db.prepare("UPDATE items SET projectId = NULL, sprintId = NULL WHERE projectId = ?").run(id);
+    db.prepare("DELETE FROM sprints WHERE projectId = ?").run(id);
+    db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+  },
+};
+
+export const sprints = {
+  all(): Sprint[] {
+    return db.prepare("SELECT * FROM sprints ORDER BY createdAt ASC").all() as Sprint[];
+  },
+  forProject(projectId: string): Sprint[] {
+    return db
+      .prepare("SELECT * FROM sprints WHERE projectId = ? ORDER BY createdAt ASC")
+      .all(projectId) as Sprint[];
+  },
+  get(id: string): Sprint | null {
+    return (db.prepare("SELECT * FROM sprints WHERE id = ?").get(id) as Sprint) ?? null;
+  },
+  create(input: {
+    projectId: string;
+    name: string;
+    goal?: string;
+    startDate?: number | null;
+    endDate?: number | null;
+  }): Sprint {
+    const s: Sprint = {
+      id: randomUUID(),
+      projectId: input.projectId,
+      name: input.name,
+      goal: input.goal ?? "",
+      startDate: input.startDate ?? null,
+      endDate: input.endDate ?? null,
+      status: "planned",
+      createdAt: now(),
+    };
+    db.prepare(
+      `INSERT INTO sprints (id,projectId,name,goal,startDate,endDate,status,createdAt)
+       VALUES (@id,@projectId,@name,@goal,@startDate,@endDate,@status,@createdAt)`,
+    ).run(s);
+    return s;
+  },
+  update(id: string, patch: Partial<Sprint>): Sprint | null {
+    const cur = sprints.get(id);
+    if (!cur) return null;
+    const merged = { ...cur, ...patch, id };
+    db.prepare(
+      `UPDATE sprints SET name=@name,goal=@goal,startDate=@startDate,endDate=@endDate,status=@status WHERE id=@id`,
+    ).run(merged);
+    return merged;
+  },
+  remove(id: string): void {
+    db.prepare("UPDATE items SET sprintId = NULL WHERE sprintId = ?").run(id);
+    db.prepare("DELETE FROM sprints WHERE id = ?").run(id);
   },
 };
 

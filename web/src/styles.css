@@ -83,8 +83,31 @@ nav.tabs button.active { background: var(--accent); color: #08111f; border-color
 .badge.disp-escalate { color: var(--escalate); border-color: #a80; }
 .badge.disp-human { color: var(--human); border-color: #a44; }
 .badge.kind { background: var(--panel-2); }
+.badge.proj { color: var(--accent); border-color: #3a567e; }
+.badge.prio-high { color: var(--escalate); border-color: #a80; }
+.badge.prio-urgent { color: var(--human); border-color: #a44; }
+.badge.prio-low { color: var(--muted); }
+.badge.due-soon { color: var(--escalate); border-color: #a80; }
+.badge.due-over { color: var(--human); border-color: #a44; }
 /* DECISIONS.md L45: 控えめで枠なしのインラインチップ1つだけ許容 (§4-3の妥協)。 */
 .chip-audit { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+/* 案件ビュー */
+.proj-layout { display: grid; grid-template-columns: 230px 1fr; gap: 14px; }
+.proj-side { display: flex; flex-direction: column; gap: 6px; }
+.new-proj { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 6px; }
+.new-proj input { width: 100%; }
+.proj-pick { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; }
+.proj-pick.sel { border-color: var(--accent); }
+.proj-main { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; padding: 16px; min-height: 300px; }
+
+/* カンバンボード */
+.board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.board-col { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 8px; min-height: 120px; }
+.board-col-head { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
+.board-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 7px; }
+.board-card-title { font-size: 13px; margin-bottom: 5px; }
+.board-card select { font-size: 11px; padding: 3px 5px; }
 
 .conf-wrap { display: flex; align-items: center; gap: 7px; }
 .conf-bar { width: 70px; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }

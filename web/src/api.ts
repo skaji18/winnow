@@ -1,4 +1,4 @@
-import type { AppState, Disposition, Item, Settings } from "./types.js";
+import type { AppState, Disposition, Item, Priority, Project, Settings, Sprint } from "./types.js";
 
 async function j<T>(url: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -18,6 +18,10 @@ export const api = {
     parentId?: string | null;
     domain?: "software" | "general";
     projectDir?: string | null;
+    projectId?: string | null;
+    sprintId?: string | null;
+    priority?: Priority;
+    dueDate?: number | null;
   }) => j<Item>("/api/items", { method: "POST", body: JSON.stringify(input) }),
 
   updateItem: (id: string, patch: Partial<Item>) =>
@@ -58,6 +62,23 @@ export const api = {
     j<Settings>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }),
 
   deactivateRule: (id: string) => j(`/api/rules/${id}/deactivate`, { method: "POST" }),
+
+  createProject: (input: { name: string; description?: string; mode?: "sprint" | "flow" }) =>
+    j<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) }),
+  updateProject: (id: string, patch: Partial<Project>) =>
+    j<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteProject: (id: string) => j(`/api/projects/${id}`, { method: "DELETE" }),
+
+  createSprint: (input: {
+    projectId: string;
+    name: string;
+    goal?: string;
+    startDate?: number | null;
+    endDate?: number | null;
+  }) => j<Sprint>("/api/sprints", { method: "POST", body: JSON.stringify(input) }),
+  updateSprint: (id: string, patch: Partial<Sprint>) =>
+    j<Sprint>(`/api/sprints/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteSprint: (id: string) => j(`/api/sprints/${id}`, { method: "DELETE" }),
 };
 
 export interface DecomposeOption {

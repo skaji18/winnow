@@ -8,7 +8,7 @@ export function ScoreBadges({ item }: { item: Item }) {
   return (
     <div className="badges">
       <span className="badge kind">
-        {item.kind === "node" ? "問い" : "実行"}・{RUNG_LABEL[item.rung]}
+        {item.kind === "node" ? `親・${RUNG_LABEL[item.rung]}` : RUNG_LABEL[item.rung]}
       </span>
       {item.disposition && (
         <span className={`badge disp-${item.disposition}`}>

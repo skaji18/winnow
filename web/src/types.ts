@@ -2,6 +2,7 @@
 export type Kind = "node" | "leaf";
 export type Rung = "fog" | "strategy" | "tactic" | "means" | "execution";
 export type Disposition = "auto" | "escalate" | "human";
+export type Priority = "low" | "normal" | "high" | "urgent";
 export type ExecutionStatus =
   | "none"
   | "queued"
@@ -36,12 +37,37 @@ export interface Item {
   executionResult: string | null;
   domain: "software" | "general";
   projectDir: string | null;
+  projectId: string | null;
+  sprintId: string | null;
+  dueDate: number | null;
+  priority: Priority;
   createdAt: number;
   updatedAt: number;
 }
 
 export interface QueueItem extends Item {
   isAudit: boolean;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  mode: "sprint" | "flow";
+  status: "active" | "archived";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Sprint {
+  id: string;
+  projectId: string;
+  name: string;
+  goal: string;
+  startDate: number | null;
+  endDate: number | null;
+  status: "planned" | "active" | "completed";
+  createdAt: number;
 }
 
 export interface SessionInfo {
@@ -101,18 +127,38 @@ export interface AppState {
   summary: WeeklySummary;
   rules: Rule[];
   recentJobs: Job[];
+  projects: Project[];
+  sprints: Sprint[];
 }
 
+// Agile/Jira 文脈の語彙 (内部キーは不変)。
 export const RUNG_LABEL: Record<Rung, string> = {
-  fog: "霧",
-  strategy: "戦略",
-  tactic: "戦術",
-  means: "手段",
-  execution: "実行",
+  fog: "テーマ",
+  strategy: "イニシアチブ",
+  tactic: "エピック",
+  means: "ストーリー",
+  execution: "タスク",
 };
 
 export const DISPOSITION_LABEL: Record<Disposition, string> = {
   auto: "自動",
-  escalate: "上げる",
-  human: "人間",
+  escalate: "要確認",
+  human: "要判断",
+};
+
+export const PRIORITY_LABEL: Record<Priority, string> = {
+  urgent: "緊急",
+  high: "高",
+  normal: "中",
+  low: "低",
+};
+
+export const STATUS_LABEL: Record<string, string> = {
+  inbox: "受信",
+  classified: "未着手",
+  in_progress: "進行中",
+  review: "レビュー",
+  done: "完了",
+  rejected: "却下",
+  blocked: "停滞",
 };

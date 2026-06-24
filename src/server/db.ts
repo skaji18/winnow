@@ -95,6 +95,28 @@ CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'flow',
+  status TEXT NOT NULL DEFAULT 'active',
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sprints (
+  id TEXT PRIMARY KEY,
+  projectId TEXT NOT NULL,
+  name TEXT NOT NULL,
+  goal TEXT NOT NULL DEFAULT '',
+  startDate INTEGER,
+  endDate INTEGER,
+  status TEXT NOT NULL DEFAULT 'planned',
+  createdAt INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sprints_project ON sprints(projectId);
 `);
 
 // 既存DBには overturnedToAuto 列が無い (§3.6-3 の信号非対称を正すための後付け列)。
@@ -107,6 +129,18 @@ if (!hasOverturnedToAuto) {
     "ALTER TABLE category_stats ADD COLUMN overturnedToAuto INTEGER NOT NULL DEFAULT 0",
   );
 }
+
+// PjM要素の後付け列 (案件/スプリント/期日/優先度)。冪等に足す。
+function ensureColumn(table: string, column: string, ddl: string): void {
+  const has = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some(
+    (c) => c.name === column,
+  );
+  if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+ensureColumn("items", "projectId", "projectId TEXT");
+ensureColumn("items", "sprintId", "sprintId TEXT");
+ensureColumn("items", "dueDate", "dueDate INTEGER");
+ensureColumn("items", "priority", "priority TEXT NOT NULL DEFAULT 'normal'");
 
 // Seed settings row once.
 const existing = db.prepare("SELECT json FROM settings WHERE id = 1").get() as

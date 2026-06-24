@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
+import { DueBadge, PriorityBadge, ProjectChip, parseDate } from "./components/Bits.js";
+import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { TerminalPane } from "./components/TerminalPane.js";
-import type { AppState, Disposition, Item, QueueItem } from "./types.js";
-import { RUNG_LABEL } from "./types.js";
+import type { AppState, Disposition, Item, Priority, QueueItem } from "./types.js";
+import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "./types.js";
 
-type Tab = "queue" | "tree" | "sessions" | "settings";
+type Tab = "queue" | "projects" | "backlog" | "sessions" | "settings";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -49,7 +51,8 @@ export default function App() {
         {(
           [
             ["queue", `キュー (${state.queue.length})`],
-            ["tree", "木"],
+            ["projects", `案件 (${state.projects.length})`],
+            ["backlog", "バックログ"],
             ["sessions", `セッション (${state.sessions.length})`],
             ["settings", "再調律・設定"],
           ] as [Tab, string][]
@@ -63,7 +66,8 @@ export default function App() {
       {error && <div className="cold-banner">通信エラー: {error}</div>}
 
       {tab === "queue" && <QueueView state={state} onChange={refresh} />}
-      {tab === "tree" && <TreeView state={state} onChange={refresh} />}
+      {tab === "projects" && <ProjectsView state={state} onChange={refresh} />}
+      {tab === "backlog" && <TreeView state={state} onChange={refresh} />}
       {tab === "sessions" && <SessionsView state={state} onChange={refresh} />}
       {tab === "settings" && <SettingsView state={state} onChange={refresh} />}
     </div>
@@ -78,7 +82,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
 
   return (
     <>
-      <AddItem onChange={onChange} />
+      <AddItem state={state} onChange={onChange} />
 
       {/* コールドスタート=Jカーブの期待値管理 (§4 末, §5) */}
       {state.autoFolded > 0 && (
@@ -92,7 +96,13 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         <div className="empty">キューは空です。新しいアイテムを登録すると分類されます。</div>
       ) : (
         state.queue.map((q) => (
-          <QueueCard key={q.id} item={q} onChange={onChange} onDecompose={() => setDecomposeFor(q)} />
+          <QueueCard
+            key={q.id}
+            item={q}
+            state={state}
+            onChange={onChange}
+            onDecompose={() => setDecomposeFor(q)}
+          />
         ))
       )}
 
@@ -105,10 +115,12 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
 
 function QueueCard({
   item,
+  state,
   onChange,
   onDecompose,
 }: {
   item: QueueItem;
+  state: AppState;
   onChange: () => void;
   onDecompose: () => void;
 }) {
@@ -133,6 +145,16 @@ function QueueCard({
       <div className="card-head">
         <span className="card-title">{item.title}</span>
         <ScoreBadges item={item} />
+      </div>
+      <div className="badges" style={{ marginTop: 6 }}>
+        <ProjectChip
+          projectId={item.projectId}
+          projects={state.projects}
+          sprints={state.sprints}
+          sprintId={item.sprintId}
+        />
+        <PriorityBadge priority={item.priority} />
+        <DueBadge due={item.dueDate} />
       </div>
       {item.reason && <div className="reason">{item.reason}</div>}
       <MiniScores item={item} />
@@ -189,7 +211,7 @@ function QueueCard({
               </button>
             )}
             <button disabled={busy} onClick={() => run(() => api.action(item.id, "demote"))}>
-              下段へ降ろす
+              粒度を下げる
             </button>
             <Reclassify itemId={item.id} current={item.disposition} run={run} />
             <button
@@ -228,18 +250,21 @@ function Reclassify({
       onChange={(e) => run(() => api.action(itemId, "reclassify", e.target.value as Disposition))}
     >
       <option value="auto">→自動</option>
-      <option value="escalate">→上げる</option>
-      <option value="human">→人間</option>
+      <option value="escalate">→要確認</option>
+      <option value="human">→要判断</option>
     </select>
   );
 }
 
 // ---------------------------------------------------------------------------
-function AddItem({ onChange }: { onChange: () => void }) {
+function AddItem({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [domain, setDomain] = useState<"software" | "general">("general");
   const [projectDir, setProjectDir] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [priority, setPriority] = useState<Priority>("normal");
+  const [due, setDue] = useState("");
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -252,10 +277,15 @@ function AddItem({ onChange }: { onChange: () => void }) {
         body: body.trim(),
         domain,
         projectDir: domain === "software" && projectDir.trim() ? projectDir.trim() : null,
+        projectId: projectId || null,
+        priority,
+        dueDate: parseDate(due),
       });
       setTitle("");
       setBody("");
       setProjectDir("");
+      setDue("");
+      setPriority("normal");
       setOpen(false);
       await onChange();
     } finally {
@@ -287,6 +317,31 @@ function AddItem({ onChange }: { onChange: () => void }) {
               rows={3}
               onChange={(e) => setBody(e.target.value)}
             />
+            <div className="row">
+              <label className="muted">
+                案件:{" "}
+                <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                  <option value="">なし</option>
+                  {state.projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="muted">
+                優先度:{" "}
+                <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
+                  <option value="urgent">緊急</option>
+                  <option value="high">高</option>
+                  <option value="normal">中</option>
+                  <option value="low">低</option>
+                </select>
+              </label>
+              <label className="muted">
+                期日: <input type="date" value={due} onChange={(e) => setDue(e.target.value)} />
+              </label>
+            </div>
             <div className="row">
               <label className="muted">
                 領域:{" "}
@@ -396,10 +451,29 @@ function DecomposeModal({
 
 // ---------------------------------------------------------------------------
 function TreeView({ state, onChange }: { state: AppState; onChange: () => void }) {
-  const roots = state.items.filter((i) => !i.parentId);
+  const [projFilter, setProjFilter] = useState("");
+  const scope = projFilter
+    ? state.items.filter((i) => i.projectId === projFilter)
+    : state.items;
+  const scopeIds = new Set(scope.map((i) => i.id));
+  // フィルタ時は、その案件のアイテムのうち親がスコープ外なものをルート扱いにする。
+  const roots = scope.filter((i) => !i.parentId || !scopeIds.has(i.parentId));
   return (
     <div className="panel">
-      <h3>木（ラダー高度つき）</h3>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <h3 style={{ margin: 0, flex: 1 }}>バックログ（粒度つき）</h3>
+        <label className="muted">
+          案件:{" "}
+          <select value={projFilter} onChange={(e) => setProjFilter(e.target.value)}>
+            <option value="">すべて</option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       {roots.length === 0 ? (
         <p className="muted">アイテムがありません。</p>
       ) : (
@@ -421,10 +495,14 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
             [{RUNG_LABEL[item.rung]}]
           </span>
         </span>
+        <PriorityBadge priority={item.priority} />
+        <DueBadge due={item.dueDate} />
         {item.disposition && (
-          <span className={`badge disp-${item.disposition}`}>{item.disposition}</span>
+          <span className={`badge disp-${item.disposition}`}>
+            {DISPOSITION_LABEL[item.disposition]}
+          </span>
         )}
-        <span className="badge">{item.status}</span>
+        <span className="badge">{STATUS_LABEL[item.status] ?? item.status}</span>
         <button
           className="danger"
           onClick={async () => {
@@ -550,9 +628,9 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
             .map((r) => (
               <div className="tree-row" key={r.id}>
                 <span style={{ flex: 1 }}>
-                  <b>{r.category}</b> → {r.forcedDisposition}{" "}
+                  <b>{r.category}</b> → {DISPOSITION_LABEL[r.forcedDisposition]}{" "}
                   <span className="muted" style={{ fontSize: 11 }}>
-                    ({r.source}) {r.note}
+                    ({r.source === "learned" ? "学習" : "手動"}) {r.note}
                   </span>
                 </span>
                 <button onClick={() => api.deactivateRule(r.id).then(onChange)}>解除</button>
