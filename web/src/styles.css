@@ -103,11 +103,15 @@ nav.tabs button.active { background: var(--accent); color: #08111f; border-color
 
 /* カンバンボード */
 .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.board-col { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 8px; min-height: 120px; }
+.board-col { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 8px; min-height: 140px; transition: background 0.1s, border-color 0.1s; }
+.board-col.drag-over { border-color: var(--accent); background: #12203a; }
 .board-col-head { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
-.board-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 7px; }
+.board-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 7px; cursor: grab; }
+.board-card:active { cursor: grabbing; }
+.board-card:hover { border-color: #3a4150; }
 .board-card-title { font-size: 13px; margin-bottom: 5px; }
-.board-card select { font-size: 11px; padding: 3px 5px; }
+.board-card select { font-size: 11px; padding: 3px 5px; width: 100%; }
+.board-empty { font-size: 11px; text-align: center; padding: 16px 4px; border: 1px dashed var(--border); border-radius: 7px; }
 
 .conf-wrap { display: flex; align-items: center; gap: 7px; }
 .conf-bar { width: 70px; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }

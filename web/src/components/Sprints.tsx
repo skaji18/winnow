@@ -3,17 +3,10 @@ import { api } from "../api.js";
 import type { AppState, Item, Sprint } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DueBadge, PriorityBadge, ProjectChip } from "./Bits.js";
+import { Kanban } from "./Kanban.js";
 
 // スプリント = グローバルな時間箱。カンバンは「その期間の全タスク」を案件横断で
-// 表示する (案件ごとではない)。各カードに所属案件チップを出す。
-
-const COLUMNS: { key: string; label: string; statuses: string[] }[] = [
-  { key: "todo", label: "未着手", statuses: ["inbox", "classified"] },
-  { key: "doing", label: "進行中", statuses: ["in_progress"] },
-  { key: "review", label: "レビュー", statuses: ["review", "blocked"] },
-  { key: "done", label: "完了", statuses: ["done"] },
-];
-const STATUSES = ["inbox", "classified", "in_progress", "review", "done", "blocked"];
+// 表示する (案件ごとではない)。各カードに所属案件チップを出す。ドラッグで status 変更。
 
 export function SprintsView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [sel, setSel] = useState<string | null>(
@@ -63,21 +56,14 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
         <div className="empty">スプリント期間を選ぶと、その期間の横断カンバンが出ます。</div>
       ) : (
         <>
-          <div className="board">
-            {COLUMNS.map((col) => {
-              const cards = inSprint.filter((i) => col.statuses.includes(i.status));
-              return (
-                <div className="board-col" key={col.key}>
-                  <div className="board-col-head">
-                    {col.label} <span className="muted">{cards.length}</span>
-                  </div>
-                  {cards.map((it) => (
-                    <SprintCard key={it.id} item={it} state={state} onChange={onChange} />
-                  ))}
-                </div>
-              );
-            })}
-          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+            カードをドラッグして列(状態)を移動できます。
+          </p>
+          <Kanban
+            items={inSprint}
+            onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
+            renderCard={(it) => <SprintCard item={it} state={state} onChange={onChange} />}
+          />
 
           <div className="panel" style={{ marginTop: 14 }}>
             <h3>このスプリントに引き込む（未割当 {backlog.length}・案件横断）</h3>
@@ -128,6 +114,8 @@ function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => 
   );
 }
 
+// Kanban が board-card でラップ＆ドラッグを担うので、ここは中身だけ描画する。
+// status はドラッグで変える。スプリント移動(別の軸)だけ select を残す。
 function SprintCard({
   item,
   state,
@@ -138,7 +126,7 @@ function SprintCard({
   onChange: () => void;
 }) {
   return (
-    <div className="board-card">
+    <>
       <div className="board-card-title">{item.title}</div>
       <div className="badges" style={{ marginBottom: 6 }}>
         <ProjectChip projectId={item.projectId} projects={state.projects} />
@@ -146,30 +134,18 @@ function SprintCard({
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
       </div>
-      <div className="row" style={{ gap: 6 }}>
-        <select
-          value={item.status}
-          onChange={(e) => api.updateItem(item.id, { status: e.target.value }).then(onChange)}
-        >
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {STATUS_LABEL[s] ?? s}
-            </option>
-          ))}
-        </select>
-        <select
-          value={item.sprintId ?? ""}
-          title="スプリント移動"
-          onChange={(e) => api.updateItem(item.id, { sprintId: e.target.value || null }).then(onChange)}
-        >
-          <option value="">外す</option>
-          {state.sprints.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
+      <select
+        value={item.sprintId ?? ""}
+        title="スプリント移動"
+        onChange={(e) => api.updateItem(item.id, { sprintId: e.target.value || null }).then(onChange)}
+      >
+        <option value="">スプリントから外す</option>
+        {state.sprints.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.name}
+          </option>
+        ))}
+      </select>
+    </>
   );
 }

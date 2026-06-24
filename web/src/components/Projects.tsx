@@ -3,16 +3,11 @@ import { api } from "../api.js";
 import type { AppState, Item, Project } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
+import { Kanban } from "./Kanban.js";
 
 // 案件(プロジェクト)ビュー = 案件ごとの状態確認。見せ方は案件ごとに切替:
-// board=状態カンバン / flow=優先度・期日順リスト。スプリント(期間)は別タブ(横断)。
+// board=状態カンバン(ドラッグで移動) / flow=優先度・期日順リスト。スプリント(期間)は別タブ(横断)。
 
-const COLUMNS: { key: string; label: string; statuses: string[] }[] = [
-  { key: "todo", label: "未着手", statuses: ["inbox", "classified"] },
-  { key: "doing", label: "進行中", statuses: ["in_progress"] },
-  { key: "review", label: "レビュー", statuses: ["review", "blocked"] },
-  { key: "done", label: "完了", statuses: ["done"] },
-];
 const STATUSES = ["inbox", "classified", "in_progress", "review", "done", "blocked"];
 
 export function ProjectsView({ state, onChange }: { state: AppState; onChange: () => void }) {
@@ -129,7 +124,7 @@ function ProjectDetail({
   );
 }
 
-// 案件の状態カンバン (全タスクを status で。スプリント横断)。
+// 案件の状態カンバン (全タスクを status で。スプリント横断)。ドラッグで status 変更。
 function ProjectBoard({
   items,
   state,
@@ -141,43 +136,42 @@ function ProjectBoard({
 }) {
   if (items.length === 0) return <p className="muted">この案件のタスクはまだありません。</p>;
   return (
-    <div className="board">
-      {COLUMNS.map((col) => {
-        const cards = items.filter((i) => col.statuses.includes(i.status));
-        return (
-          <div className="board-col" key={col.key}>
-            <div className="board-col-head">
-              {col.label} <span className="muted">{cards.length}</span>
+    <>
+      <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+        カードをドラッグして列(状態)を移動できます。
+      </p>
+      <Kanban
+        items={items}
+        onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
+        renderCard={(it) => (
+          <>
+            <div className="board-card-title">{it.title}</div>
+            <div className="badges" style={{ marginBottom: 6 }}>
+              <span className="badge kind">{RUNG_LABEL[it.rung]}</span>
+              {it.sprintId && (
+                <span className="badge proj">
+                  {state.sprints.find((s) => s.id === it.sprintId)?.name ?? "SP"}
+                </span>
+              )}
+              <PriorityBadge priority={it.priority} />
+              <DueBadge due={it.dueDate} />
             </div>
-            {cards.map((it) => (
-              <div className="board-card" key={it.id}>
-                <div className="board-card-title">{it.title}</div>
-                <div className="badges" style={{ marginBottom: 6 }}>
-                  <span className="badge kind">{RUNG_LABEL[it.rung]}</span>
-                  {it.sprintId && (
-                    <span className="badge proj">
-                      {state.sprints.find((s) => s.id === it.sprintId)?.name ?? "SP"}
-                    </span>
-                  )}
-                  <PriorityBadge priority={it.priority} />
-                  <DueBadge due={it.dueDate} />
-                </div>
-                <select
-                  value={it.status}
-                  onChange={(e) => api.updateItem(it.id, { status: e.target.value }).then(onChange)}
-                >
-                  {STATUSES.map((s) => (
-                    <option key={s} value={s}>
-                      {STATUS_LABEL[s] ?? s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
-          </div>
-        );
-      })}
-    </div>
+            <select
+              value={it.sprintId ?? ""}
+              title="スプリントへ割当"
+              onChange={(e) => api.updateItem(it.id, { sprintId: e.target.value || null }).then(onChange)}
+            >
+              <option value="">スプリント未割当</option>
+              {state.sprints.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+      />
+    </>
   );
 }
 
