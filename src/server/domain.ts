@@ -1,0 +1,170 @@
+// Domain model — REQUIREMENTS §2 (ノード/リーフ, 抽象度ラダー, プロセス軸) and §3.1
+// (item metadata). The vocabulary here is load-bearing: the whole point is that
+// "task" is split so the classifier and executor don't misfire.
+
+/** ノード=問い/意図 (割れるが直接実行不可) / リーフ=実行可能タスク (§2.1). */
+export type Kind = "node" | "leaf";
+
+/**
+ * 抽象度ラダーの高度 (§2.2). 上段ほど量は少なく不可逆で人間的、下段ほど
+ * 量が爆発し基準照合でさばける。数値が小さいほど上段(霧)。
+ */
+export const RUNGS = ["fog", "strategy", "tactic", "means", "execution"] as const;
+export type Rung = (typeof RUNGS)[number];
+export const RUNG_LABEL: Record<Rung, string> = {
+  fog: "霧を照らす",
+  strategy: "戦略",
+  tactic: "戦術",
+  means: "具体手段",
+  execution: "実行",
+};
+
+/** 三値仕分け (§3.2). 二値にすると「分からない」を表現できず盲点へ流す. */
+export type Disposition = "auto" | "escalate" | "human";
+
+/** プロセス軸 (§2.3) — ラダーと直交. */
+export type Process = "waterfall" | "iterative";
+
+export type ItemStatus =
+  | "inbox" // 登録直後、未分類
+  | "classified" // 分類済み、さばき待ち
+  | "in_progress"
+  | "done"
+  | "rejected"
+  | "blocked";
+
+export type ExecutionStatus =
+  | "none"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "proposed" // 不可逆/高ステークス: 提案済み、人間のワンタップ承認待ち (§3.4)
+  | "approved"
+  | "cancelled"; // 取り消された自動実行 (§4-4 安く取り消せる)
+
+export interface Item {
+  id: string;
+  title: string;
+  body: string;
+  kind: Kind;
+  rung: Rung;
+  parentId: string | null;
+  orderIndex: number;
+  status: ItemStatus;
+
+  // 分類器の出力 (§3.2). null = 未分類.
+  disposition: Disposition | null;
+  confidence: number | null; // 0..1, 必ず出す (§4-2)
+  reason: string | null; // 一行理由 (glanceable)
+  stakes: number | null; // 0..1
+  reversibility: number | null; // 0..1 (1=完全に可逆)
+  category: string | null; // 基準率補正のバケット (§3.6-1)
+
+  process: Process | null;
+  uncertaintyResolved: boolean;
+
+  // 監査・履歴用 (§3.1)
+  autoExecuted: boolean;
+  humanOverrode: boolean;
+  auditSampled: boolean;
+
+  executionStatus: ExecutionStatus;
+  executionResult: string | null;
+
+  // domain: ソフト開発タスクは実際にコードを動かす / 一般タスクは下書き提案 (§3.4)
+  domain: "software" | "general";
+  projectDir: string | null; // software実行時の作業ディレクトリ
+
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * 人間のさばき=ラベル (§4-1). 普段の一手がそのまま教師信号になる。
+ * これがバイアスの少ない教師信号の唯一の源 (§3.6).
+ */
+export type LabelAction =
+  | "do" // やる (= disposition human/escalate を是認して着手)
+  | "demote" // 下段へ降ろす
+  | "reclassify" // 分類し直す
+  | "mute_category" // この種類はもう上げるな
+  | "approve" // 不可逆実行を承認
+  | "reject" // 却下
+  | "override" // AI の仕分けを覆した
+  | "audit_ok" // 監査: 自動処理は妥当だった
+  | "audit_bad"; // 監査: 自動処理は誤りだった (過小エスカレーション検出)
+
+export interface LabelEvent {
+  id: string;
+  itemId: string;
+  action: LabelAction;
+  fromDisposition: Disposition | null;
+  toDisposition: Disposition | null;
+  category: string | null;
+  note: string | null;
+  createdAt: number;
+}
+
+/**
+ * 明示ルール (§3.6-1). 先にルールを置き、残差だけ学ぶ。
+ * source=learned は基準率補正がカウントから倒したもの。
+ */
+export interface Rule {
+  id: string;
+  category: string;
+  forcedDisposition: Disposition;
+  source: "manual" | "learned";
+  active: boolean;
+  note: string | null;
+  createdAt: number;
+}
+
+/** カテゴリ別 基準率補正のカウント (§3.6-1 "浅くて頑健"). */
+export interface CategoryStat {
+  category: string;
+  aiDisposition: Disposition;
+  agreed: number; // 人間が是認
+  overturned: number; // 人間が覆した
+}
+
+export interface ExecutionJob {
+  id: string;
+  itemId: string;
+  role: "control" | "worker";
+  kindOfWork: "classify" | "decompose" | "promote" | "execute";
+  sessionName: string | null;
+  status: "queued" | "running" | "succeeded" | "failed";
+  startedAt: number | null;
+  finishedAt: number | null;
+  output: string | null;
+  error: string | null;
+  createdAt: number;
+}
+
+export interface Settings {
+  // 監査サンプル率 N% (§3.6-2, §4-3). 節約したい注意を意図的に少額払う。
+  auditRate: number; // 0..1
+  // 再調律スライダー (§4 末). 高いほど締める(エスカレ寄り)、低いほど緩める(自動寄り).
+  // 信号の非対称 (§3.6-3): 締めるのは速く、緩めるのは慎重に。
+  escalationTightness: number; // 0..1
+  // worker セッション上限 (§6 クォータ天井).
+  maxWorkers: number;
+  // claude 起動コマンド (ローカル環境ごとに調整可能).
+  // ファイルI/Oプロトコルは Write ツールしか使わないので acceptEdits で無人化できる。
+  // セッションが許可プロンプトで止まる場合は GUI からこの値を
+  // "claude --dangerously-skip-permissions" 等に変更する。
+  claudeControlCmd: string;
+  claudeWorkerCmd: string;
+  // ヘッドレス(claude -p)で動かすdevモード。将来課金リスクありだが検証は速い。
+  useHeadless: boolean;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  auditRate: 0.15,
+  escalationTightness: 0.7, // コールドスタートは保守的=締め気味 (§4 末, §5)
+  maxWorkers: 2,
+  claudeControlCmd: "claude --permission-mode acceptEdits",
+  claudeWorkerCmd: "claude --permission-mode acceptEdits",
+  useHeadless: false,
+};

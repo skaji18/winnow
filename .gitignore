@@ -1,0 +1,11 @@
+node_modules/
+web/dist/
+*.log
+.DS_Store
+
+# Local runtime state (created at runtime in ~/.winnow by default)
+.winnow/
+winnow.db
+winnow.db-*
+scratch/
+*.local
