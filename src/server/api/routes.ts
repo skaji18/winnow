@@ -254,7 +254,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   const projectSchema = z.object({
     name: z.string().min(1),
     description: z.string().optional(),
-    mode: z.enum(["sprint", "flow"]).optional(),
+    mode: z.enum(["board", "flow"]).optional(),
   });
   app.post("/api/projects", async (req) => projects.create(projectSchema.parse(req.body)));
   app.patch("/api/projects/:id", async (req) => {
@@ -263,7 +263,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       .object({
         name: z.string().min(1).optional(),
         description: z.string().optional(),
-        mode: z.enum(["sprint", "flow"]).optional(),
+        mode: z.enum(["board", "flow"]).optional(),
         status: z.enum(["active", "archived"]).optional(),
       })
       .strict()
@@ -280,7 +280,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/sprints", async (req) => {
     const b = z
       .object({
-        projectId: z.string(),
         name: z.string().min(1),
         goal: z.string().optional(),
         startDate: z.number().nullable().optional(),

@@ -287,7 +287,7 @@ export const projects = {
   get(id: string): Project | null {
     return (db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Project) ?? null;
   },
-  create(input: { name: string; description?: string; mode?: "sprint" | "flow" }): Project {
+  create(input: { name: string; description?: string; mode?: "board" | "flow" }): Project {
     const p: Project = {
       id: randomUUID(),
       name: input.name,
@@ -324,16 +324,10 @@ export const sprints = {
   all(): Sprint[] {
     return db.prepare("SELECT * FROM sprints ORDER BY createdAt ASC").all() as Sprint[];
   },
-  forProject(projectId: string): Sprint[] {
-    return db
-      .prepare("SELECT * FROM sprints WHERE projectId = ? ORDER BY createdAt ASC")
-      .all(projectId) as Sprint[];
-  },
   get(id: string): Sprint | null {
     return (db.prepare("SELECT * FROM sprints WHERE id = ?").get(id) as Sprint) ?? null;
   },
   create(input: {
-    projectId: string;
     name: string;
     goal?: string;
     startDate?: number | null;
@@ -341,7 +335,6 @@ export const sprints = {
   }): Sprint {
     const s: Sprint = {
       id: randomUUID(),
-      projectId: input.projectId,
       name: input.name,
       goal: input.goal ?? "",
       startDate: input.startDate ?? null,
@@ -349,9 +342,10 @@ export const sprints = {
       status: "planned",
       createdAt: now(),
     };
+    // projectId 列は廃止 (グローバル化)。後方互換のため空文字で埋める。
     db.prepare(
       `INSERT INTO sprints (id,projectId,name,goal,startDate,endDate,status,createdAt)
-       VALUES (@id,@projectId,@name,@goal,@startDate,@endDate,@status,@createdAt)`,
+       VALUES (@id,'',@name,@goal,@startDate,@endDate,@status,@createdAt)`,
     ).run(s);
     return s;
   },

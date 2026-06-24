@@ -53,15 +53,15 @@ export interface Project {
   id: string;
   name: string;
   description: string;
-  mode: "sprint" | "flow";
+  mode: "board" | "flow"; // 案件ビューの見せ方
   status: "active" | "archived";
   createdAt: number;
   updatedAt: number;
 }
 
+/** グローバルな時間箱（案件に属さない）。 */
 export interface Sprint {
   id: string;
-  projectId: string;
   name: string;
   goal: string;
   startDate: number | null;

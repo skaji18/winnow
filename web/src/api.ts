@@ -63,14 +63,13 @@ export const api = {
 
   deactivateRule: (id: string) => j(`/api/rules/${id}/deactivate`, { method: "POST" }),
 
-  createProject: (input: { name: string; description?: string; mode?: "sprint" | "flow" }) =>
+  createProject: (input: { name: string; description?: string; mode?: "board" | "flow" }) =>
     j<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) }),
   updateProject: (id: string, patch: Partial<Project>) =>
     j<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteProject: (id: string) => j(`/api/projects/${id}`, { method: "DELETE" }),
 
   createSprint: (input: {
-    projectId: string;
     name: string;
     goal?: string;
     startDate?: number | null;

@@ -3,11 +3,12 @@ import { api, type DecomposeOption } from "./api.js";
 import { DueBadge, PriorityBadge, ProjectChip, parseDate } from "./components/Bits.js";
 import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
+import { SprintsView } from "./components/Sprints.js";
 import { TerminalPane } from "./components/TerminalPane.js";
 import type { AppState, Disposition, Item, Priority, QueueItem } from "./types.js";
 import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "./types.js";
 
-type Tab = "queue" | "projects" | "backlog" | "sessions" | "settings";
+type Tab = "queue" | "sprints" | "projects" | "backlog" | "sessions" | "settings";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -51,6 +52,7 @@ export default function App() {
         {(
           [
             ["queue", `キュー (${state.queue.length})`],
+            ["sprints", `スプリント (${state.sprints.length})`],
             ["projects", `案件 (${state.projects.length})`],
             ["backlog", "バックログ"],
             ["sessions", `セッション (${state.sessions.length})`],
@@ -66,6 +68,7 @@ export default function App() {
       {error && <div className="cold-banner">通信エラー: {error}</div>}
 
       {tab === "queue" && <QueueView state={state} onChange={refresh} />}
+      {tab === "sprints" && <SprintsView state={state} onChange={refresh} />}
       {tab === "projects" && <ProjectsView state={state} onChange={refresh} />}
       {tab === "backlog" && <TreeView state={state} onChange={refresh} />}
       {tab === "sessions" && <SessionsView state={state} onChange={refresh} />}

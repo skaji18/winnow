@@ -10,9 +10,10 @@ function mk(patch: Parameters<typeof items.update>[1] & { title: string }) {
 }
 
 // === 案件 ===
-const pay = projects.create({ name: "決済リニューアル", mode: "sprint", description: "返金まわりの刷新" });
+const pay = projects.create({ name: "決済リニューアル", mode: "board", description: "返金まわりの刷新" });
 const ops = projects.create({ name: "社内運用", mode: "flow", description: "雑務・運用タスク" });
-const s1 = sprints.create({ projectId: pay.id, name: "Sprint 1", goal: "返金フローMVP" });
+// スプリントはグローバルな時間箱 (案件に属さない)。
+const s1 = sprints.create({ name: "Sprint 1 (6/23-6/30)", goal: "返金フローMVP" });
 sprints.update(s1.id, { status: "active", startDate: now - 3 * DAY, endDate: now + 4 * DAY });
 
 // === キューに出る案件群 ===
@@ -25,7 +26,7 @@ mk({
 });
 mk({
   title: "顧客Aへの再提案をどう進めるか",
-  kind: "node", rung: "strategy", status: "classified", projectId: ops.id,
+  kind: "node", rung: "strategy", status: "classified", projectId: ops.id, sprintId: s1.id,
   disposition: "escalate", confidence: 0.5, stakes: 0.7, reversibility: 0.5,
   category: "顧客対応", reason: "顧客関係のステークスがあり、AIだけでは確信が持てない。",
   priority: "high", dueDate: now + 5 * DAY,

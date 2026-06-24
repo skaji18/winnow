@@ -97,17 +97,19 @@ export interface Project {
   id: string;
   name: string;
   description: string;
-  // 進め方を案件ごとに切替 (§2.3 プロセス軸): sprint=時間箱で回す / flow=継続フロー。
-  mode: "sprint" | "flow";
+  // 案件ビューの見せ方: board=状態カンバン / flow=優先度・期日順リスト。
+  mode: "board" | "flow";
   status: "active" | "archived";
   createdAt: number;
   updatedAt: number;
 }
 
-/** スプリント (時間箱) — 反復の単位 (§2.3 "学ぶために回し、出すために束ねる")。 */
+/**
+ * スプリント (時間箱) — 反復の単位 (§2.3 "学ぶために回し、出すために束ねる")。
+ * 案件に属さない**グローバルな期間**。1スプリントに複数案件のタスクが混ざる。
+ */
 export interface Sprint {
   id: string;
-  projectId: string;
   name: string;
   goal: string;
   startDate: number | null;
