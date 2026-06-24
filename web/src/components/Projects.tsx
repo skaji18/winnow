@@ -53,11 +53,15 @@ function NewProject({
   onCreated: (id: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<"board" | "flow">("board");
   const submit = async () => {
     if (!name.trim()) return;
     const p = await api.createProject({ name: name.trim(), mode });
+    // 「新しい案件＋最初の問い」を1ステップで (任意)。問いはAIが分類する。
+    if (question.trim()) await api.createItem({ title: question.trim(), projectId: p.id });
     setName("");
+    setQuestion("");
     onCreated(p.id);
     await onChange();
   };
@@ -68,6 +72,13 @@ function NewProject({
         placeholder="新規案件名"
         value={name}
         onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        type="text"
+        placeholder="最初の問い (任意)"
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <div className="row" style={{ gap: 6 }}>

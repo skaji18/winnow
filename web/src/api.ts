@@ -31,6 +31,9 @@ export const api = {
 
   classify: (id: string) => j<Item>(`/api/items/${id}/classify`, { method: "POST" }),
 
+  toProject: (id: string) =>
+    j<{ project: Project; assigned: number }>(`/api/items/${id}/to-project`, { method: "POST" }),
+
   decompose: (id: string) =>
     j<{ options: DecomposeOption[] }>(`/api/items/${id}/decompose`, { method: "POST" }),
 

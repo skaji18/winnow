@@ -137,6 +137,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return labels.forItem(id);
   });
 
+  // この項目を案件に昇格 (§3.3 上流の問いを案件の入れ物に格上げ)。
+  // 案件(入れ物)を項目名で作り、その項目とサブツリー全部を新案件に紐付ける。
+  app.post("/api/items/:id/to-project", async (req) => {
+    const { id } = req.params as { id: string };
+    const item = items.get(id);
+    if (!item) return { error: "not found" };
+    const project = projects.create({ name: item.title, mode: "board" });
+    // サブツリー収集
+    const all = items.all();
+    const childrenOf = new Map<string, string[]>();
+    for (const it of all) {
+      if (it.parentId) {
+        const arr = childrenOf.get(it.parentId) ?? [];
+        arr.push(it.id);
+        childrenOf.set(it.parentId, arr);
+      }
+    }
+    const ids: string[] = [id];
+    for (let i = 0; i < ids.length; i++) {
+      for (const c of childrenOf.get(ids[i]!) ?? []) ids.push(c);
+    }
+    for (const itemId of ids) items.update(itemId, { projectId: project.id });
+    return { project, assigned: ids.length };
+  });
+
   // --- AI ops ---------------------------------------------------------------
   app.post("/api/items/:id/classify", async (req) => {
     const { id } = req.params as { id: string };
