@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
 import { classify } from "./classifier.js";
+import { buildContextBlock } from "./context.js";
 import { promotePrompt } from "./ai/prompts.js";
 import type { Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
@@ -29,7 +30,7 @@ export async function judge(itemId: string): Promise<Item | null> {
     id: randomUUID(),
     role: "control",
     label: `昇格判定: ${item.title.slice(0, 30)}`,
-    prompt: promotePrompt(item),
+    prompt: promotePrompt(item, buildContextBlock(item)),
     expectJson: true,
     timeoutMs: 90_000,
   });

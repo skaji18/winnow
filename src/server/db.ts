@@ -141,6 +141,7 @@ ensureColumn("items", "projectId", "projectId TEXT");
 ensureColumn("items", "sprintId", "sprintId TEXT");
 ensureColumn("items", "dueDate", "dueDate INTEGER");
 ensureColumn("items", "priority", "priority TEXT NOT NULL DEFAULT 'normal'");
+ensureColumn("projects", "context", "context TEXT NOT NULL DEFAULT ''");
 
 // Seed settings row once.
 const existing = db.prepare("SELECT json FROM settings WHERE id = 1").get() as

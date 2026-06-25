@@ -53,11 +53,15 @@ function NewProject({
   onCreated: (id: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<"board" | "flow">("board");
   const submit = async () => {
     if (!name.trim()) return;
     const p = await api.createProject({ name: name.trim(), mode });
+    // 「新しい案件＋最初の問い」を1ステップで (任意)。問いはAIが分類する。
+    if (question.trim()) await api.createItem({ title: question.trim(), projectId: p.id });
     setName("");
+    setQuestion("");
     onCreated(p.id);
     await onChange();
   };
@@ -68,6 +72,13 @@ function NewProject({
         placeholder="新規案件名"
         value={name}
         onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        type="text"
+        placeholder="最初の問い (任意)"
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <div className="row" style={{ gap: 6 }}>
@@ -114,6 +125,19 @@ function ProjectDetail({
           案件を削除
         </button>
       </div>
+
+      <details style={{ marginBottom: 14 }}>
+        <summary className="muted" style={{ fontSize: 12.5, cursor: "pointer" }}>
+          案件の前提・文脈（分解/実行に注入される）
+        </summary>
+        <textarea
+          rows={4}
+          style={{ width: "100%", marginTop: 8 }}
+          placeholder="この案件固有の前提・制約・関係者・参照先など。ここに書くとこの案件のタスクの分解・実行に効く。"
+          defaultValue={project.context}
+          onBlur={(e) => api.updateProject(project.id, { context: e.target.value }).then(onChange)}
+        />
+      </details>
 
       {project.mode === "board" ? (
         <ProjectBoard items={projectItems} state={state} onChange={onChange} />

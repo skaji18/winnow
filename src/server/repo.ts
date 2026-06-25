@@ -287,19 +287,25 @@ export const projects = {
   get(id: string): Project | null {
     return (db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Project) ?? null;
   },
-  create(input: { name: string; description?: string; mode?: "board" | "flow" }): Project {
+  create(input: {
+    name: string;
+    description?: string;
+    mode?: "board" | "flow";
+    context?: string;
+  }): Project {
     const p: Project = {
       id: randomUUID(),
       name: input.name,
       description: input.description ?? "",
       mode: input.mode ?? "flow",
       status: "active",
+      context: input.context ?? "",
       createdAt: now(),
       updatedAt: now(),
     };
     db.prepare(
-      `INSERT INTO projects (id,name,description,mode,status,createdAt,updatedAt)
-       VALUES (@id,@name,@description,@mode,@status,@createdAt,@updatedAt)`,
+      `INSERT INTO projects (id,name,description,mode,status,context,createdAt,updatedAt)
+       VALUES (@id,@name,@description,@mode,@status,@context,@createdAt,@updatedAt)`,
     ).run(p);
     return p;
   },
@@ -308,7 +314,7 @@ export const projects = {
     if (!cur) return null;
     const merged = { ...cur, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE projects SET name=@name,description=@description,mode=@mode,status=@status,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE projects SET name=@name,description=@description,mode=@mode,status=@status,context=@context,updatedAt=@updatedAt WHERE id=@id`,
     ).run(merged);
     return merged;
   },

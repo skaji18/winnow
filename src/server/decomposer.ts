@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
 import { decomposePrompt } from "./ai/prompts.js";
 import { classify } from "./classifier.js";
+import { buildContextBlock } from "./context.js";
 import type { Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import { items, jobs } from "./repo.js";
@@ -13,6 +14,7 @@ export interface DecomposeOptionChild {
   title: string;
   kind: "node" | "leaf";
   rung: Rung;
+  spec: string; // スコープ・前提・受け入れ基準。子の body になる (詳細を下段へ積む §2.2)。
 }
 export interface DecomposeOption {
   label: string;
@@ -42,7 +44,7 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
     id: randomUUID(),
     role: "control",
     label: `分解: ${item.title.slice(0, 30)}`,
-    prompt: decomposePrompt(item),
+    prompt: decomposePrompt(item, buildContextBlock(item)),
     expectJson: true,
     timeoutMs: 120_000,
   });
@@ -65,6 +67,7 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
       title: c.title ?? "(無題)",
       kind: c.kind === "leaf" ? "leaf" : "node",
       rung: RUNGS.includes(c.rung) ? c.rung : "means",
+      spec: typeof c.spec === "string" ? c.spec : "",
     })),
   }));
 }
@@ -83,12 +86,14 @@ export async function applyOption(
   for (const child of option.children) {
     const item = items.create({
       title: child.title,
+      body: child.spec ?? "", // 子に詳細(spec=受け入れ基準)を持たせる。リーフ実行時に効く。
       kind: child.kind,
       rung: child.rung,
       parentId,
       process: option.process,
       domain: parent.domain,
       projectDir: parent.projectDir,
+      projectId: parent.projectId, // 案件もサブツリーに継承する
     });
     created.push(item);
   }

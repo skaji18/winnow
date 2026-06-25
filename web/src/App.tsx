@@ -67,6 +67,9 @@ export default function App() {
 
       {error && <div className="cold-banner">通信エラー: {error}</div>}
 
+      {/* どこからでも即キャプチャ (新規儀式ゼロ §4)。全タブ共通の登録口。 */}
+      <AddItem state={state} onChange={refresh} />
+
       {tab === "queue" && <QueueView state={state} onChange={refresh} />}
       {tab === "sprints" && <SprintsView state={state} onChange={refresh} />}
       {tab === "projects" && <ProjectsView state={state} onChange={refresh} />}
@@ -85,8 +88,6 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
 
   return (
     <>
-      <AddItem state={state} onChange={onChange} />
-
       {/* コールドスタート=Jカーブの期待値管理 (§4 末, §5) */}
       {state.autoFolded > 0 && (
         <div className="cold-banner">
@@ -211,6 +212,15 @@ function QueueCard({
             ) : (
               <button disabled={busy} onClick={() => run(() => api.execute(item.id))}>
                 実行する
+              </button>
+            )}
+            {item.kind === "node" && !item.projectId && (
+              <button
+                disabled={busy}
+                title="この問いを案件(入れ物)に格上げし、サブツリーごと紐付ける"
+                onClick={() => run(() => api.toProject(item.id))}
+              >
+                案件に昇格
               </button>
             )}
             <button disabled={busy} onClick={() => run(() => api.action(item.id, "demote"))}>
@@ -439,9 +449,19 @@ function DecomposeModal({
             <div className="reason">{opt.rationale}</div>
             <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
               {opt.children.map((c, j) => (
-                <li key={j} className="muted" style={{ fontSize: 12.5 }}>
-                  {c.kind === "leaf" ? "▸" : "◆"} {c.title}{" "}
-                  <span className="badge kind">{RUNG_LABEL[c.rung]}</span>
+                <li key={j} style={{ fontSize: 12.5, marginBottom: 6 }}>
+                  <span className="muted">
+                    {c.kind === "leaf" ? "▸" : "◆"} {c.title}{" "}
+                    <span className="badge kind">{RUNG_LABEL[c.rung]}</span>
+                  </span>
+                  {c.spec && (
+                    <div
+                      className="muted"
+                      style={{ fontSize: 11.5, marginLeft: 14, opacity: 0.85, whiteSpace: "pre-wrap" }}
+                    >
+                      {c.spec}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -506,6 +526,17 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
           </span>
         )}
         <span className="badge">{STATUS_LABEL[item.status] ?? item.status}</span>
+        {item.kind === "node" && !item.parentId && !item.projectId && (
+          <button
+            title="この問いを案件に格上げ"
+            onClick={async () => {
+              await api.toProject(item.id);
+              await onChange();
+            }}
+          >
+            案件に昇格
+          </button>
+        )}
         <button
           className="danger"
           onClick={async () => {
@@ -589,6 +620,21 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
 
   return (
     <>
+      <div className="panel">
+        <h3>プロダクトの前提（分解・実行の文脈）</h3>
+        <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+          何を作っているか・スタック・規約・方針。ここに書いた前提が分類/分解/実行すべての
+          プロンプトに注入され、リーフまで文脈が降りる（上段の鋭い投資は下段で複利 §2.2）。
+        </p>
+        <textarea
+          rows={5}
+          style={{ width: "100%" }}
+          placeholder="例: BtoB SaaSの請求管理。TS/Node/Postgres。決済はStripe。本番操作は必ず人間承認。命名は…"
+          defaultValue={s.productContext}
+          onBlur={(e) => set({ productContext: e.target.value })}
+        />
+      </div>
+
       <div className="panel">
         <h3>再調律スライダー</h3>
         <label className="field">
