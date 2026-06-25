@@ -6,8 +6,8 @@ import { buildContextBlock } from "./context.js";
 import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
-import { items, jobs, settings } from "./repo.js";
-import { isProvisionalTitle } from "./text.js";
+import { categories, items, jobs, settings } from "./repo.js";
+import { isProvisionalTitle, normalizeCategory } from "./text.js";
 
 /**
  * 監査サンプリング判定 (§3.6-2, §4-3). auto 処分のみ N% を抽出。
@@ -64,7 +64,7 @@ export async function classify(itemId: string): Promise<Item | null> {
     id: randomUUID(),
     role: "control",
     label: `分類: ${item.title.slice(0, 30)}`,
-    prompt: classifyPrompt(item, buildContextBlock(item)),
+    prompt: classifyPrompt(item, buildContextBlock(item), categories.known()),
     expectJson: true,
     timeoutMs: 90_000,
   });
@@ -164,6 +164,9 @@ function normalize(d: Partial<ClassifyOut>): ClassifyOut {
     uncertaintyResolved: Boolean(d.uncertaintyResolved),
     // 未指定は安全側=ready扱い(既存のauto動線を壊さない)。明示falseのときだけゲートする。
     executableReady: d.executableReady !== false,
-    category: typeof d.category === "string" && d.category ? d.category.trim() : "uncategorized",
+    // 機械的な表記揺れを正規化(案B)。空に潰れたら uncategorized へ。書き込み口はここに
+    // 一本化されているので、下流(rules/category_stats)のキーは常に正規化済みになる。
+    category:
+      (typeof d.category === "string" ? normalizeCategory(d.category) : "") || "uncategorized",
   };
 }
