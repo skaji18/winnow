@@ -156,6 +156,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           kind: z.enum(["node", "leaf"]),
           rung: z.enum(["fog", "strategy", "tactic", "means", "execution"]),
           spec: z.string().optional().default(""),
+          projectDir: z.string().optional(), // polyrepo: 別repoの子だけ作業ディレクトリ。省略=親継承。
         }),
       ),
     }),

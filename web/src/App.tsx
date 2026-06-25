@@ -474,6 +474,11 @@ function DecomposeModal({
                   <span className="muted">
                     {c.kind === "leaf" ? "▸" : "◆"} {c.title}{" "}
                     <span className="badge kind">{RUNG_LABEL[c.rung]}</span>
+                    {c.projectDir && (
+                      <span className="badge" title={c.projectDir}>
+                        📁 {c.projectDir.split("/").pop() || c.projectDir}
+                      </span>
+                    )}
                   </span>
                   {c.spec && (
                     <div
