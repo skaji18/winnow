@@ -7,6 +7,7 @@
 自動分は実行まで回し、**あなたのキューにはエスカレーションだけが残る**。
 普段のさばきがそのまま分類器の教師信号になり、境界線を日々較正していく。
 
+日々の使い方（タスクを登録・さばく人向け）は [`docs/USER_GUIDE.md`](./docs/USER_GUIDE.md) を参照。
 設計の詳細は [`REQUIREMENTS.md`](./REQUIREMENTS.md)（背骨）と
 [`docs/DECISIONS.md`](./docs/DECISIONS.md)（実装の選択）を参照。
 
