@@ -17,3 +17,23 @@ export function isProvisionalTitle(title: string, body: string): boolean {
   if (!b) return false; // 本文なし(=一行タスク)は暫定でない。タイトルを尊重する。
   return (title ?? "").trim() === provisionalTitle(b);
 }
+
+/**
+ * カテゴリ名の機械的な表記揺れを吸収する正規化 (揺れ補正の軽量層)。
+ * 完全一致SQL (rules/category_stats) でバケットが割れるのを防ぐ。AI不要・決定論的。
+ * ここがやるのは「機械的な揺れ」だけ — 意味の寄せ込み(同義語の統合)はしない。
+ * それは分類プロンプトに既存カテゴリ一覧を見せて再利用させる側(案A)の仕事。
+ * - Unicode NFKC: 全角英数/記号・互換文字を統一 (「ＡＰＩ」→「API」)。
+ * - 連続空白を1つに畳み、前後を trim。
+ * - 前後の引用符・括弧の装飾を剥がす (AIが時々付けてくる「…」や"…")。
+ * 大文字小文字は畳まない(英字頭字語の表示を壊さない/意味の寄せ込みは案A側)。
+ */
+export function normalizeCategory(raw: string): string {
+  return (raw ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'`「『（(\[]+/, "")
+    .replace(/["'`」』）)\]]+$/, "")
+    .trim();
+}

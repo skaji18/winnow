@@ -228,6 +228,29 @@ export const rules = {
   },
 };
 
+export const categories = {
+  /**
+   * これまでに使われたカテゴリ語彙 (揺れ補正の案A: 分類プロンプトに見せて再利用を促す)。
+   * items/rules/category_stats を横断して重複なく集める。新しい命名を「発生源で」抑え、
+   * 基準率補正の母数(category_stats)やルールのバケットが表記揺れで割れるのを防ぐ。
+   * 表記は正規化(normalizeCategory)済みの前提 — 書き込み口が classifier に一本化されている。
+   */
+  known(): string[] {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT category FROM (
+           SELECT category FROM items WHERE category IS NOT NULL AND category <> ''
+           UNION SELECT category FROM rules
+           UNION SELECT category FROM category_stats
+         ) WHERE category IS NOT NULL AND category <> ''
+           AND category NOT IN ('uncategorized','unclassified')
+         ORDER BY category`,
+      )
+      .all() as { category: string }[];
+    return rows.map((r) => r.category);
+  },
+};
+
 export const categoryStats = {
   bump(
     category: string,
