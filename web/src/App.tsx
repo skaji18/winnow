@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
-import { DueBadge, PriorityBadge, ProjectChip, parseDate } from "./components/Bits.js";
+import { DueBadge, PriorityBadge, ProjectChip, parseDate, provisionalTitle } from "./components/Bits.js";
 import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { SprintsView } from "./components/Sprints.js";
@@ -282,12 +282,29 @@ function AddItem({ state, onChange }: { state: AppState; onChange: () => void })
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
-    if (!title.trim()) return;
+    const raw = body.trim();
+    const typed = title.trim();
+    if (!raw && !typed) return;
+    // 「雑に貼る」: タイトル未記入なら本文から派生する。
+    //  - 一行タスク(改行なし・短い)はそれ自体をタイトルにし本文は空(重複させない)。
+    //  - 会話ログ/メモの貼り付けは先頭から暫定タイトルを作り、全文は本文に残す。
+    //    暫定タイトルは分類時にAIの要約見出しで上書きされる(サーバ側)。
+    let finalTitle = typed;
+    let finalBody = raw;
+    if (!finalTitle) {
+      const oneLiner = !raw.includes("\n") && raw.length <= 80;
+      if (oneLiner) {
+        finalTitle = raw;
+        finalBody = "";
+      } else {
+        finalTitle = provisionalTitle(raw);
+      }
+    }
     setBusy(true);
     try {
       await api.createItem({
-        title: title.trim(),
-        body: body.trim(),
+        title: finalTitle,
+        body: finalBody,
         domain,
         projectDir: domain === "software" && projectDir.trim() ? projectDir.trim() : null,
         projectId: projectId || null,
@@ -309,14 +326,18 @@ function AddItem({ state, onChange }: { state: AppState; onChange: () => void })
   return (
     <div className="panel">
       <div className="add-form">
+        {/* 本文(会話ログ/メモ)を主役に。雑に貼るだけで登録できる(新規儀式ゼロ §3.1)。 */}
+        <textarea
+          placeholder="会話・メモ・タスクを雑に貼る（タイトルは空でOK。Ctrl/⌘+Enterで登録）"
+          value={body}
+          rows={3}
+          onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && submit()}
+        />
         <div className="row">
-          <input
-            type="text"
-            placeholder="アイテムを登録（普段のさばきがそのまま教師信号になる）"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && submit()}
-          />
+          <span className="muted" style={{ flex: 1, fontSize: "0.85em" }}>
+            大きい塊は1件のまま「要確認」で残ります。割るかどうかはあなたが決めます。
+          </span>
           <button className="primary" disabled={busy} onClick={submit}>
             登録して分類
           </button>
@@ -324,11 +345,11 @@ function AddItem({ state, onChange }: { state: AppState; onChange: () => void })
         </div>
         {open && (
           <>
-            <textarea
-              placeholder="詳細・スペック（上段への鋭い投資は下段で複利で効く §2.2）"
-              value={body}
-              rows={3}
-              onChange={(e) => setBody(e.target.value)}
+            <input
+              type="text"
+              placeholder="タイトル（空なら本文先頭から自動。AIが要約で差し替え）"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
             />
             <div className="row">
               <label className="muted">

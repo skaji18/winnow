@@ -1,0 +1,19 @@
+// 「雑に貼る」入口の小道具。本文(会話ログ/メモ)の先頭から暫定タイトルを機械生成する。
+// クライアント(AddItem)とサーバ(routes/classifier)で同一ロジックを使い、
+// 「このタイトルは暫定か?」の判定がドリフトしないようにする。web 側にも同じ関数を置く。
+
+/** 本文の先頭の非空行を trim して 60 字に切る。空なら空文字。AI不要・決定論的。 */
+export function provisionalTitle(text: string): string {
+  const line = (text ?? "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find(Boolean);
+  return (line ?? "").slice(0, 60);
+}
+
+/** タイトルが本文先頭からの機械切り出し(=暫定)に一致するか。AI要約での上書き可否に使う。 */
+export function isProvisionalTitle(title: string, body: string): boolean {
+  const b = (body ?? "").trim();
+  if (!b) return false; // 本文なし(=一行タスク)は暫定でない。タイトルを尊重する。
+  return (title ?? "").trim() === provisionalTitle(b);
+}
