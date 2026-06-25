@@ -7,6 +7,7 @@ import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
 import { items, jobs, settings } from "./repo.js";
+import { isProvisionalTitle } from "./text.js";
 
 /**
  * 監査サンプリング判定 (§3.6-2, §4-3). auto 処分のみ N% を抽出。
@@ -17,6 +18,7 @@ export function rollAudit(disposition: Disposition): boolean {
 }
 
 interface ClassifyOut {
+  title: string;
   disposition: Disposition;
   confidence: number;
   reason: string;
@@ -113,7 +115,14 @@ export async function classify(itemId: string): Promise<Item | null> {
   // 監査サンプリング: 自動処理分の N% を、見分けのつかない形でキューへ (§4-3).
   const auditSampled = rollAudit(disposition);
 
+  // 「雑に貼る」入口: 登録時タイトルが本文先頭の機械切り出し(暫定)なら、AI要約見出しで
+  // 上書きする。これは同一 dispatch のJSONに相乗りしており追加往復ゼロ (§6)。
+  // 暫定でない(=ユーザが書いた一行タスク/明示タイトル)なら尊重して触らない。
+  const titlePatch =
+    out.title && isProvisionalTitle(item.title, item.body) ? { title: out.title } : {};
+
   const updated = items.update(itemId, {
+    ...titlePatch,
     status: "classified",
     disposition,
     confidence: out.confidence,
@@ -143,6 +152,7 @@ function normalize(d: Partial<ClassifyOut>): ClassifyOut {
     d.disposition === "auto" || d.disposition === "human" ? d.disposition : "escalate";
   const rung: Rung = RUNGS.includes(d.rung as Rung) ? (d.rung as Rung) : "tactic";
   return {
+    title: typeof d.title === "string" ? d.title.trim() : "",
     disposition: disp,
     confidence: clamp01(d.confidence),
     reason: typeof d.reason === "string" && d.reason ? d.reason : "(理由なし)",

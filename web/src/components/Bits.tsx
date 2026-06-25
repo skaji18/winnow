@@ -44,6 +44,18 @@ export function ProjectChip({
   );
 }
 
+/**
+ * 「雑に貼る」入口の暫定タイトル生成。本文先頭の非空行を trim して 60 字に切る。
+ * サーバ側 src/server/text.ts と同一ロジック(ドリフトさせない)。
+ */
+export function provisionalTitle(text: string): string {
+  const line = (text ?? "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find(Boolean);
+  return (line ?? "").slice(0, 60);
+}
+
 /** 期日入力(date)をepoch msに。空なら null。 */
 export function parseDate(v: string): number | null {
   if (!v) return null;
