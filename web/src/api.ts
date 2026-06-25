@@ -87,5 +87,11 @@ export interface DecomposeOption {
   label: string;
   rationale: string;
   process: "waterfall" | "iterative";
-  children: { title: string; kind: "node" | "leaf"; rung: Item["rung"]; spec: string }[];
+  children: {
+    title: string;
+    kind: "node" | "leaf";
+    rung: Item["rung"];
+    spec: string;
+    projectDir?: string; // polyrepo: 別repoの子だけ。省略=親継承。
+  }[];
 }

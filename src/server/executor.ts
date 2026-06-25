@@ -11,6 +11,35 @@ import { items, jobs } from "./repo.js";
 
 const REVERSIBLE_THRESHOLD = 0.6;
 
+/**
+ * cross-repo 協調ガード (§3.6-3 締めるのは速く / §2.2). 同一案件で projectDir の異なる
+ * leaf が他にも auto/実行中で並んでいるなら、repoをまたぐアトミック変更の暴発(契約の
+ * 受け渡し不整合・順序破綻)を疑い、自動着火を止めて人間のワンタップ承認に回す。
+ * cross-repo性はテキストから構造的に観測できない (§3.2) ので、推論ではなく
+ * 「同一案件×異projectDir×auto/実行中」という決定論的な代理シグナルで安全側に倒す。
+ * 独立な多repoタスクも巻き込みうるが、過剰エスカレーションは安く速く可逆 (§3.6-3) なので
+ * その側に倒す。承認(approveExecution)はこのガードを通らず実行できる=ワンタップの逃げ道。
+ */
+function crossRepoSiblingPending(item: Item): boolean {
+  if (!item.projectId || !item.projectDir) return false;
+  return items.all().some(
+    (o) =>
+      o.id !== item.id &&
+      o.projectId === item.projectId &&
+      o.kind === "leaf" &&
+      o.projectDir != null &&
+      o.projectDir !== item.projectDir &&
+      // まだ片付いていない auto/実行中の兄弟だけを対象に。完了/取消済みは外す
+      // (古い成功が延々とガードを引かないように)。proposed(auto)同士は互いに
+      // マッチし続けるので、同時バーストは両方そろって承認待ちに倒れ対称性が保たれる。
+      o.executionStatus !== "succeeded" &&
+      o.executionStatus !== "cancelled" &&
+      (o.disposition === "auto" ||
+        o.executionStatus === "running" ||
+        o.executionStatus === "queued"),
+  );
+}
+
 interface ExecuteOut {
   status: "succeeded" | "failed" | "needs_human";
   summary: string;
@@ -40,6 +69,14 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
     return items.update(itemId, {
       executionStatus: "proposed",
       executionResult: "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。",
+    });
+  }
+  if (crossRepoSiblingPending(item)) {
+    // 同一案件で複数repoの自動実行が並んでいる: 横断変更の暴発を防ぎ承認待ちに回す。
+    return items.update(itemId, {
+      executionStatus: "proposed",
+      executionResult:
+        "同一案件で複数リポジトリにまたがる自動実行が並んでいます。横断変更の暴発(契約不整合・順序破綻)を防ぐため承認待ち(独立した変更なら、そのままワンタップで実行)。",
     });
   }
   // 可逆: 自動着火。

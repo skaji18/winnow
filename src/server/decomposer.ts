@@ -15,6 +15,9 @@ export interface DecomposeOptionChild {
   kind: "node" | "leaf";
   rung: Rung;
   spec: string; // スコープ・前提・受け入れ基準。子の body になる (詳細を下段へ積む §2.2)。
+  // polyrepo: この子が親と別リポジトリで作業する場合だけ、その作業ディレクトリ(絶対パス)。
+  // 省略時は親の projectDir を継承 (monorepo/同一repoは省略=継承が正)。
+  projectDir?: string;
 }
 export interface DecomposeOption {
   label: string;
@@ -68,6 +71,9 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
       kind: c.kind === "leaf" ? "leaf" : "node",
       rung: RUNGS.includes(c.rung) ? c.rung : "means",
       spec: typeof c.spec === "string" ? c.spec : "",
+      // 別repo明示のみ拾う。空文字/非文字列は継承扱い(undefined)に落とす。
+      projectDir:
+        typeof c.projectDir === "string" && c.projectDir.trim() ? c.projectDir.trim() : undefined,
     })),
   }));
 }
@@ -92,7 +98,8 @@ export async function applyOption(
       parentId,
       process: option.process,
       domain: parent.domain,
-      projectDir: parent.projectDir,
+      // polyrepo: 子が別repoを明示したらそれを、無ければ親を継承 (後方互換)。
+      projectDir: child.projectDir ?? parent.projectDir,
       projectId: parent.projectId, // 案件もサブツリーに継承する
     });
     created.push(item);
