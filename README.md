@@ -112,6 +112,38 @@ tmux attach -t winnow:worker-0
 
 ---
 
+## MCP連携（Claudeで作業中に放り込む口）
+
+別ツールで作業している最中にタスクやより上位の問いが見つかったとき、Web UIへ離脱せず
+その場で winnow に捕獲するための **MCP** エンドポイントを内蔵しています。実体は Web の
+「雑に貼る入口」と同じ捕獲口（`captureItem`）で、登録後はいつもどおり分類器が仕分けます。
+
+- 動いている winnow サーバ（`http://localhost:8787`）にそのまま `POST /mcp`
+  （MCP Streamable-HTTP）が生えています。別プロセス・別DBは不要。
+- 公開ツールは **`winnow_capture` 1個だけ**。設計上わざと「口」に徹し、キュー閲覧や
+  仕分けの書き戻し（分類し直す/実行する等）は出しません。判断は winnow と人間の側に
+  残す——MCPは口であって目や手ではない（§4/§5）。
+- 「より上位のもの」（問い・テーマ・案件級）は `kind:"node"` で渡せば、分類器が高度を付けます。
+
+### Claude Code への登録
+
+winnow サーバと Claude Code が **同じマシン** で動いている前提（loopback が信頼境界。
+既存の REST API と同じく認証なし）:
+
+```sh
+claude mcp add --transport http winnow http://127.0.0.1:8787/mcp
+```
+
+`--scope user` を付ければどのリポジトリからでも捕獲できます。`tools/call` の引数は
+`title?`（省略時は本文先頭から自動生成）・`body`（文脈を丸ごと。リッチなほど分類と分解が
+効く）・`kind?`(node|leaf ヒント)・`domain?`・`projectDir?`・`priority?`・`dueDate?`・
+`parentId?`・`classify?`(既定 true、bulk 投入時のみ false)。
+
+> リモート（claude.ai/code 等、別マシン/コンテナの Claude）からは `127.0.0.1` に届きません。
+> その場合は winnow を loopback 外へ公開（Tailscale/トンネル）＋認証が必要になります。
+
+---
+
 ## 非目標・限界
 
 この最適化は収束しません。明示基準に乗る「真ん中」は速くさばけますが、

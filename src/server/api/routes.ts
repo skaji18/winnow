@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as actions from "../actions.js";
 import { ensureDriver, getDriver, resetDriver } from "../ai/index.js";
+import { captureItem, captureSchema } from "../capture.js";
 import { classify } from "../classifier.js";
 import * as decomposer from "../decomposer.js";
 import * as executor from "../executor.js";
@@ -9,7 +10,6 @@ import * as promotion from "../promotion.js";
 import { autoFoldedCount, queue } from "../queue.js";
 import { items, jobs, labels, projects, rules, settings, sprints } from "../repo.js";
 import { weekly } from "../summary.js";
-import { provisionalTitle } from "../text.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -59,47 +59,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // --- items CRUD -----------------------------------------------------------
-  // 「雑に貼る」入口: title は任意。本文(会話ログ/メモ)だけ貼ってもよく、
-  // title 未指定なら本文先頭から暫定タイトルを派生する(下の refine + ハンドラ)。
-  const createSchema = z
-    .object({
-      title: z.string().optional(),
-      body: z.string().optional(),
-      parentId: z.string().nullable().optional(),
-      kind: z.enum(["node", "leaf"]).optional(),
-      domain: z.enum(["software", "general"]).optional(),
-      projectDir: z.string().nullable().optional(),
-      projectId: z.string().nullable().optional(),
-      sprintId: z.string().nullable().optional(),
-      priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
-      dueDate: z.number().nullable().optional(),
-      classify: z.boolean().optional(),
-    })
-    // title か body のどちらかは必要(空登録は弾く)。
-    .refine((d) => Boolean(d.title?.trim() || d.body?.trim()), {
-      message: "title か body のいずれかが必要です",
-    });
-  app.post("/api/items", async (req) => {
-    const b = createSchema.parse(req.body);
-    // UI をバイパスした登録でも壊れないサーバ側フォールバック: title 未指定なら
-    // 本文先頭から暫定タイトルを派生する(クライアントと同一ロジック)。
-    const title = b.title?.trim() || provisionalTitle(b.body ?? "");
-    const item = items.create({
-      title,
-      body: b.body ?? "",
-      parentId: b.parentId ?? null,
-      kind: b.kind ?? "node",
-      domain: b.domain ?? "general",
-      projectDir: b.projectDir ?? null,
-      projectId: b.projectId ?? null,
-      sprintId: b.sprintId ?? null,
-      priority: b.priority ?? "normal",
-      dueDate: b.dueDate ?? null,
-    });
-    // 新規アイテムが着いたら分類器が disposition を書く (§4 利用動線)。
-    if (b.classify !== false) background(() => classify(item.id));
-    return item;
-  });
+  // 「雑に貼る」入口は capture サービスに一本化 (REST と MCP が同じ経路を通る)。
+  app.post("/api/items", async (req) => captureItem(captureSchema.parse(req.body)));
 
   // 汎用更新。監査/自動化/来歴フィールド (auditSampled, humanOverrode,
   // autoExecuted, executionStatus, executionResult, createdAt, updatedAt, id) は
