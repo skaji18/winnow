@@ -7,6 +7,7 @@ import fastifyWebsocket from "@fastify/websocket";
 import { ensureDirs, SERVER_PORT } from "./config.js";
 import "./db.js"; // initialize schema
 import { registerRoutes } from "./api/routes.js";
+import { registerMcp } from "./mcp/transport.js";
 import { getDriver } from "./ai/index.js";
 
 ensureDirs();
@@ -15,6 +16,8 @@ const app = Fastify({ logger: { level: "warn" } });
 
 await app.register(fastifyWebsocket);
 await registerRoutes(app);
+// Claude 等の MCP クライアントが作業中に直接アイテムを捕獲できる口 (§8 「MCPで寄生」)。
+await registerMcp(app);
 
 // Live terminal theater (§4 "ワンクリックで端末を開いて結果も出し切る").
 // Streams `tmux capture-pane` for a session over WebSocket.
@@ -48,7 +51,11 @@ const webDist = path.resolve(__dirname, "../../web/dist");
 if (fs.existsSync(webDist)) {
   await app.register(fastifyStatic, { root: webDist });
   app.setNotFoundHandler((req, reply) => {
-    if (req.url.startsWith("/api") || req.url.startsWith("/ws")) {
+    if (
+      req.url.startsWith("/api") ||
+      req.url.startsWith("/ws") ||
+      req.url.startsWith("/mcp")
+    ) {
       reply.code(404).send({ error: "not found" });
     } else {
       reply.sendFile("index.html");
