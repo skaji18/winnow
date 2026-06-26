@@ -140,6 +140,19 @@ export async function approve(itemId: string): Promise<Item | null> {
 }
 
 /**
+ * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用して完了へ進める。
+ * 人間が成果物に責任を引き取った痕跡を label_event に残す(receive)。採用(マージ/送信)自体は
+ * winnow がやらない=人間が外で行う。較正母数(recordOutcome)には積まない: 引き取りは
+ * 「分類が正しかったか」の信号ではなく「成果物を受領したか」の儀式/レビューだから(過剰計上を避ける)。
+ */
+export async function acceptHandoff(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+  labels.record({ itemId, action: "receive", category: item.category });
+  return executor.acceptHandoff(itemId);
+}
+
+/**
  * 監査の教師信号を記録する共通簿記 (§3.6-2, §4-3).
  * auditConfirm と、通常処分アクション由来の監査確定(doIt/reclassify)が同一の
  * label_event + recordOutcome を出すよう一本化する。二重記録を防ぐ唯一の経路。

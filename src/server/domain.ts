@@ -47,6 +47,9 @@ export type ExecutionStatus =
   | "failed"
   | "proposed" // 不可逆/高ステークス: 提案済み、人間のワンタップ承認待ち (§3.4)
   | "approved"
+  // 実行は完了したが、成果物に人間の引き取り(レビュー/採用)責任が残る (§3.5 継ぎ目)。
+  // やって終わり(none)でない=done に沈めずキュー前面に出し、人間の受領で done に進む。
+  | "awaiting_handoff"
   | "cancelled"; // 取り消された自動実行 (§4-4 安く取り消せる)
 
 export interface Item {
@@ -150,6 +153,7 @@ export type LabelAction =
   | "reclassify" // 分類し直す
   | "mute_category" // この種類はもう上げるな
   | "approve" // 不可逆実行を承認
+  | "receive" // 引き取り: 成果物を確認/採用し handoff を完了にした (§3.5)
   | "reject" // 却下
   | "override" // AI の仕分けを覆した
   | "audit_ok" // 監査: 自動処理は妥当だった
@@ -252,6 +256,12 @@ export interface Settings {
   claudeAllowedFlags: string[];
   // 過負荷時に capture を即 classify せず inbox 保留にする閾値。0 で無効=現状維持。
   captureInboxHoldThreshold: number;
+  // 外部送信(push/PR作成)の解禁スイッチ (§3.4)。false=既定では、人間がワンタップ承認しても
+  // worker に外部送信ゴーサイン(externalApproved)を渡さない=従来どおり push/PR は実行されない。
+  // true にすると承認時のみ「このアイテムに限り push/PR 作成を実行してよい(マージ/デプロイ/削除は不可)」を
+  // worker に伝える。緩め方向(外部副作用解禁)なので既定 OFF・明示オプトイン (締めるは速く緩めるは慎重に §3.6-3)。
+  // ※ winnow 本体は push しない。実行主体は worker セッションで、その ambient 権限の技術的制約は別レイヤ。
+  allowExternalSend: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -284,4 +294,5 @@ export const DEFAULT_SETTINGS: Settings = {
     "default",
   ],
   captureInboxHoldThreshold: 24,
+  allowExternalSend: false, // 緩め方向=既定 OFF。push/PR 作成は明示オプトイン (§3.6-3)。
 };

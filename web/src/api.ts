@@ -71,6 +71,8 @@ export const api = {
     j(`/api/items/${id}/execute`, { method: "POST", body: JSON.stringify({ instruction }) }),
   approve: (id: string) => j(`/api/items/${id}/approve`, { method: "POST" }),
   cancel: (id: string) => j<Item>(`/api/items/${id}/cancel`, { method: "POST" }),
+  // 引き取り(handoff)の受領: awaiting_handoff の成果物を確認/採用して完了へ。
+  accept: (id: string) => j<Item>(`/api/items/${id}/accept`, { method: "POST" }),
 
   action: (id: string, action: string, to?: Disposition) =>
     j<Item>(`/api/items/${id}/action`, {

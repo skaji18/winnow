@@ -147,13 +147,17 @@ function HeaderCounts({ state }: { state: AppState }) {
     state.inFlight?.running ?? state.items.filter((i) => i.executionStatus === "running").length;
   const proposed =
     state.inFlight?.proposed ?? state.items.filter((i) => i.executionStatus === "proposed").length;
+  // 引き取り待ち K (§3.5): 実行完了・人間の受領/採用待ち。ブラウザを開けば必ず目に入るよう常時表示。
+  const handoff =
+    state.inFlight?.awaitingHandoff ??
+    state.items.filter((i) => i.executionStatus === "awaiting_handoff").length;
   const over = running > state.settings.maxWorkers;
   return (
     <span
       className={`header-counts${over ? " over" : ""}`}
-      title={over ? "実行中が worker 上限を超えています(止めはしません)" : "実行中 / 承認待ち"}
+      title={over ? "実行中が worker 上限を超えています(止めはしません)" : "実行中 / 承認待ち / 引き取り待ち"}
     >
-      実行中 {running} / 承認待ち {proposed}
+      実行中 {running} / 承認待ち {proposed} / 引き取り待ち {handoff}
     </span>
   );
 }
@@ -279,10 +283,13 @@ function QueueCard({
 
   const proposed = item.executionStatus === "proposed";
   const failed = item.executionStatus === "failed" || item.status === "blocked";
+  // 引き取り待ち (§3.5): 実行完了・人間の受領/採用が必要。done に沈めず前面に出す。
+  const handoff = item.executionStatus === "awaiting_handoff";
   // 監査サンプルは通常アイテムと見分けがつかない (§4-3): カード枠に特別扱いを残さない。
   const autoDone = item.autoExecuted && item.executionStatus === "succeeded";
   const autoDoneGeneral = autoDone && item.domain === "general";
-  const cls = `card${proposed ? " proposed" : ""}`;
+  // 承認待ち/引き取り待ちは前面強調を共有(専用CSSは増やさない)。
+  const cls = `card${proposed || handoff ? " proposed" : ""}`;
 
   // general 成果物の summary/output 分離: executionSummary/Output があればそれを優先、
   // 無ければ executionResult を `summary\n\noutput` で分割(executor の連結形)。
@@ -386,7 +393,32 @@ function QueueCard({
         </div>
       )}
 
-      {!autoDone && !failed && (
+      {/* 引き取り待ち: 実行は完了。成果物(PR/リンク等は上の ArtifactChips、詳細は実行結果)を
+          人間が確認/採用(マージ等は外で)し、『受け取る』で完了へ。winnow は採用自体は実行しない。 */}
+      {handoff && (
+        <div className="actions" style={{ marginTop: 10 }}>
+          <span className="badge disp-escalate">引き取り待ち</span>
+          <button
+            className="primary"
+            disabled={busy}
+            title="成果物を確認/採用した。完了にする(マージ等の採用操作は別途あなたが外で行う)"
+            onClick={() => run(() => api.accept(item.id), "受け取って完了にしました")}
+          >
+            受け取る(完了)
+          </button>
+          <button
+            className="danger"
+            disabled={busy}
+            title="成果物を取り消す(痕跡は履歴に残る。巻き戻し手順があれば提示)"
+            onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+          >
+            取り消す
+          </button>
+          {busy && <span className="spinner">実行中…</span>}
+        </div>
+      )}
+
+      {!autoDone && !failed && !handoff && (
         <div className="actions" style={{ marginTop: 10 }}>
           {proposed ? (
             // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
@@ -1049,6 +1081,18 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
             step={0.01}
             value={s.auditRate}
             onChange={(e) => set({ auditRate: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          <span>
+            外部送信(push/PR作成)を承認時に解禁: {s.allowExternalSend ? "ON" : "OFF"} — ON にすると
+            ワンタップ承認した実装タスクで worker が push / PR 作成まで実行できる(マージ・本番デプロイ・
+            削除はしない=人間)。緩め方向なので既定 OFF・明示オプトイン (§3.4/§3.6-3)
+          </span>
+          <input
+            type="checkbox"
+            checked={s.allowExternalSend}
+            onChange={(e) => set({ allowExternalSend: e.target.checked })}
           />
         </label>
       </div>

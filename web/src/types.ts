@@ -11,6 +11,7 @@ export type ExecutionStatus =
   | "failed"
   | "proposed"
   | "approved"
+  | "awaiting_handoff" // 実行完了・人間の引き取り(レビュー/採用)待ち (§3.5)
   | "cancelled";
 
 export interface Item {
@@ -65,6 +66,7 @@ export type LabelAction =
   | "reclassify"
   | "mute_category"
   | "approve"
+  | "receive"
   | "reject"
   | "override"
   | "audit_ok"
@@ -138,6 +140,8 @@ export interface Settings {
   productContext: string;
   // 自動実行の一時停止スイッチ (server domain.ts と整合。ヘッダトグルが消費)。
   pauseAuto: boolean;
+  // 外部送信(push/PR作成)の解禁スイッチ。既定 OFF。承認時のみ worker に外部送信を許可する (§3.4)。
+  allowExternalSend: boolean;
 }
 
 export interface WeeklySummary {
@@ -155,6 +159,8 @@ export interface WeeklySummary {
   failed: number;
   // 要棚卸し件数 (server summary.ts と整合)。
   needsReview: number;
+  // 引き取り待ち件数 (§3.5)。
+  awaitingHandoff: number;
   line: string;
 }
 
@@ -198,7 +204,7 @@ export interface AppState {
   sprints: Sprint[];
   // 起動時 preflight/reconcile 痕跡 + in-flight 集計 (server /api/state)。
   runtime?: RuntimeState;
-  inFlight?: { running: number; proposed: number };
+  inFlight?: { running: number; proposed: number; awaitingHandoff?: number };
   // AI 未接続→トップバナー用。ok=false のとき reason を出す。サーバ未提供時 undefined=非表示。
   preflight?: { ok: boolean; reason: string | null };
   // 全期間 LabelEvent 総数 (cold-banner 初日=実績ゼロ判定)。
