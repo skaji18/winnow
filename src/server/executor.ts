@@ -100,6 +100,23 @@ interface ExecuteOut {
   reversible?: boolean; // この実行が安く巻き戻せるか (可逆性自己申告)
 }
 
+/**
+ * 引き取り要否の導出 (handoff, §3.5 継ぎ目)。新しい申告軸は立てず、既存 stakes/reversibility と
+ * worker 自己申告(out)から「やって終わり(none) / 人間が拾う(required)」を決める従属次元。
+ * required 条件(OR):
+ *  (a) 外部に観測可能な成果物を作った (artifacts 非空) — PR/送信物/公開物。
+ *  (b) 不可逆を自己申告した (reversible===false)。
+ *  (c) 高ステークス。
+ * いずれも無く純ローカル・低ステークス・可逆なら none(=やって終わり、done に沈める)。
+ * (a) は本文の自己申告でなく実態痕跡なので過小申告の詐称に強い安全弁 (§3.2)。
+ */
+function handoffRequired(item: Item, out: Partial<ExecuteOut>): boolean {
+  const hasArtifacts = Array.isArray(out.artifacts) && out.artifacts.length > 0;
+  const declaredIrreversible = out.reversible === false;
+  const highStakes = (item.stakes ?? 0) > 0.7;
+  return hasArtifacts || declaredIrreversible || highStakes;
+}
+
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
 export async function requestExecution(
   itemId: string,
@@ -200,10 +217,20 @@ function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | nu
   const item = items.get(itemId);
   if (!item) return null;
   const succeeded = out.status === "succeeded";
+  // 引き取り要否 (§3.5): 成功かつ責任が残る成果物なら done に沈めず awaiting_handoff へ。
+  const handoff = succeeded && handoffRequired(item, out);
   const updated = items.update(itemId, {
-    executionStatus: out.status === "needs_human" ? "proposed" : succeeded ? "succeeded" : "failed",
-    // succeeded→done。それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
-    status: succeeded ? "done" : "in_progress",
+    executionStatus:
+      out.status === "needs_human"
+        ? "proposed"
+        : !succeeded
+          ? "failed"
+          : handoff
+            ? "awaiting_handoff"
+            : "succeeded",
+    // 成功かつ引き取り要 → done にせず review(引き取り待ち)。やって終わりの成功のみ done。
+    // それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
+    status: succeeded ? (handoff ? "review" : "done") : "in_progress",
     autoExecuted: true,
     // executionResult は後方互換で連結文字列を維持(UI/キュー一行が参照)。
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
@@ -232,8 +259,18 @@ function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | nu
   return updated;
 }
 
-/** 実際に worker セッションへ投げて実行する。instruction は「この方向で直す」の一行指示(任意)。 */
-export async function runExecution(itemId: string, instruction = ""): Promise<Item | null> {
+/**
+ * 実際に worker セッションへ投げて実行する。instruction は「この方向で直す」の一行指示(任意)。
+ * opts.externalApproved=true は「人間がこのアイテムを明示ワンタップ承認済み=外部送信(push/PR作成)を
+ * 実行してよい」を worker に伝える (approveExecution からのみ立つ)。これが無いと worker は外部送信を
+ * needs_human で再拒否し続ける(承認しても push されない再拒否ループ)ため、承認の意味論を
+ * 「ゲート解除」だけでなく「外部送信ゴーサインの伝達」まで広げる (§3.4 人間が明示で押したものは流す)。
+ */
+export async function runExecution(
+  itemId: string,
+  instruction = "",
+  opts: { externalApproved?: boolean } = {},
+): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
 
@@ -271,7 +308,7 @@ export async function runExecution(itemId: string, instruction = ""): Promise<It
     id: ipcId,
     role: "worker",
     label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item), instruction),
+    prompt: executePrompt(item, buildContextBlock(item), instruction, opts.externalApproved === true),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
     timeoutMs: 600_000,
@@ -302,17 +339,20 @@ export async function runExecution(itemId: string, instruction = ""): Promise<It
 /**
  * WIP/worker 天井のための in-flight 集計。DB から決定論で算出する(状態の二重持ちを
  * 避けるため runtime-state には保持しない)。routes の掃き出しループと /api/state が使う。
- *   running  = 実行中 N
- *   proposed = 承認待ち M
+ *   running         = 実行中 N
+ *   proposed        = 承認待ち M
+ *   awaitingHandoff = 引き取り待ち K (§3.5)
  */
-export function inFlightCount(): { running: number; proposed: number } {
+export function inFlightCount(): { running: number; proposed: number; awaitingHandoff: number } {
   let running = 0;
   let proposed = 0;
+  let awaitingHandoff = 0;
   for (const it of items.all()) {
     if (it.executionStatus === "running") running++;
     else if (it.executionStatus === "proposed") proposed++;
+    else if (it.executionStatus === "awaiting_handoff") awaitingHandoff++;
   }
-  return { running, proposed };
+  return { running, proposed, awaitingHandoff };
 }
 
 /**
@@ -378,7 +418,25 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   if (item.executionStatus !== "proposed") return item;
-  return runExecution(itemId);
+  // 人間が明示で押した=外部送信(push/PR作成)ゴーサイン。再拒否ループを断つ (§3.4)。
+  return runExecution(itemId, "", { externalApproved: true });
+}
+
+/**
+ * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用し、完了へ進める。
+ * winnow は採用(マージ/送信)自体は実行しない=人間が外で採用したことの記録＝状態遷移のみ
+ * (DECISIONS: winnow は外部副作用を能動的にやらない。PR作成=可逆な提示、マージ=不可逆な採用の非対称)。
+ * awaiting_handoff 以外は no-op(冪等)。
+ */
+export async function acceptHandoff(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+  if (item.executionStatus !== "awaiting_handoff") return item;
+  return items.update(itemId, {
+    executionStatus: "succeeded",
+    status: "done",
+    executionResult: `${item.executionResult ?? ""}\n\n[引き取り済み]`.trim(),
+  });
 }
 
 /**

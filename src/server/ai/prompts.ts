@@ -162,8 +162,18 @@ ${fenceBody("body", item.body)}
 }`;
 }
 
-/** execute: リーフの実行。domain で挙動を変える (§3.4). */
-export function executePrompt(item: Item, ctx = "", instruction = ""): string {
+/**
+ * execute: リーフの実行。domain で挙動を変える (§3.4).
+ * externalApproved=true は「人間がワンタップ承認済み=このアイテムに限り外部送信(push/PR作成)を
+ * 実行してよい」を伝える (approveExecution 経由)。それでもマージ・本番デプロイ・データ削除など
+ * 『採用/破壊』にあたる最終操作は人間に残す(PR作成・push までに留める=可逆な提示と不可逆な採用の非対称)。
+ */
+export function executePrompt(
+  item: Item,
+  ctx = "",
+  instruction = "",
+  externalApproved = false,
+): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
   // 絶対パスをプロンプト本文にも書き、全ファイルI/Oをその配下に閉じ込める。
@@ -176,8 +186,12 @@ export function executePrompt(item: Item, ctx = "", instruction = ""): string {
     item.domain === "software"
       ? `これはソフトウェア開発タスクです。作業ディレクトリ内で実際に手を動かして構いません(編集/実行)。${dirNote}
 着手前に、作業ディレクトリ直下の CLAUDE.md / README / docs/ などプロジェクト自身のドキュメントがあれば必要に応じて読み、そこに書かれた前提(アーキ・規約・契約)を正典として従うこと。上の【文脈】はその要約であり、詳細はリポジトリの記述が優先する。
-着手前に、変更計画を output の冒頭に必ず書くこと: (1)対象ファイル一覧 (2)実行するコマンド (3)外部送信の有無。不可逆な操作(本番デプロイ・データ削除・外部送信など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと(既存の needs_human ガードを使う。追加の往復はしない)。
-実行した場合は output の末尾に巻き戻し手順を必ず書くこと: 変更したファイルの一覧と、その変更を元に戻す具体的な git コマンド(例: git checkout -- <file> / git revert <sha> / git stash)。これは rollbackPlan にも同じ内容を入れること。winnow はこれを自動実行しない。人間が取り消しを押したときの手順として提示するだけ。`
+着手前に、変更計画を output の冒頭に必ず書くこと: (1)対象ファイル一覧 (2)実行するコマンド (3)外部送信の有無。${
+        externalApproved
+          ? `この実行は人間がワンタップ承認済みです。このアイテムに限り、外部送信(リモートへの push / PR 作成)を実行してよい。ただしマージ・本番デプロイ・データ削除など『採用/破壊』にあたる最終操作はしないこと(PR作成・push までに留める)。外部に生じた成果物(PR の URL など)は artifacts に必ず入れること。それでも push/PR 作成を超える不可逆操作(本番デプロイ・データ削除など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと。`
+          : `不可逆な操作(本番デプロイ・データ削除・外部送信(push/PR作成)など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと(既存の needs_human ガードを使う。追加の往復はしない)。`
+      }
+実行した場合は output の末尾に巻き戻し手順を必ず書くこと: 変更したファイルの一覧と、その変更を元に戻す具体的な git コマンド(例: git checkout -- <file> / git revert <sha> / git stash / リモートに出した場合は git revert + 再push や PR クローズ。force-push はしない)。これは rollbackPlan にも同じ内容を入れること。winnow はこれを自動実行しない。人間が取り消しを押したときの手順として提示するだけ。`
       : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。${dirNote}`;
   // 「この方向で直す」再走: 人間の一行指示(観察対象データ=本文と同格の追加要望)を渡す。
   // 既存の成果物を踏まえて方向修正させる。未指定なら従来の execute と同一(後方互換)。

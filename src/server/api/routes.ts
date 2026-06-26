@@ -277,6 +277,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     return (await executor.cancelExecution(id)) ?? { error: "not found" };
   });
+  // 引き取り(handoff)の受領: awaiting_handoff の成果物を人間が確認/採用し完了へ進める (§3.5)。
+  app.post("/api/items/:id/accept", async (req) => {
+    const { id } = req.params as { id: string };
+    return (await actions.acceptHandoff(id)) ?? { error: "not found" };
+  });
 
   // --- 処分=ラベル -----------------------------------------------------------
   const actionSchema = z.object({

@@ -47,6 +47,9 @@ export type ExecutionStatus =
   | "failed"
   | "proposed" // 不可逆/高ステークス: 提案済み、人間のワンタップ承認待ち (§3.4)
   | "approved"
+  // 実行は完了したが、成果物に人間の引き取り(レビュー/採用)責任が残る (§3.5 継ぎ目)。
+  // やって終わり(none)でない=done に沈めずキュー前面に出し、人間の受領で done に進む。
+  | "awaiting_handoff"
   | "cancelled"; // 取り消された自動実行 (§4-4 安く取り消せる)
 
 export interface Item {
@@ -150,6 +153,7 @@ export type LabelAction =
   | "reclassify" // 分類し直す
   | "mute_category" // この種類はもう上げるな
   | "approve" // 不可逆実行を承認
+  | "receive" // 引き取り: 成果物を確認/採用し handoff を完了にした (§3.5)
   | "reject" // 却下
   | "override" // AI の仕分けを覆した
   | "audit_ok" // 監査: 自動処理は妥当だった

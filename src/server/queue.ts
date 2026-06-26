@@ -63,6 +63,8 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
   const prioC = PRIO[x.priority] ?? 0;
   const dueC = dueBoost(x);
   const orderC = -x.orderIndex * ORDER_COEF;
+  // 引き取り待ち(実行完了・人間の受領/採用が必要)は前面に出す (§3.5)。止まった項目と同格で浮上。
+  const handoffC = x.executionStatus === "awaiting_handoff" ? 1.0 : 0;
   // auto-done general を僅かに前出し: 監査サンプル抽出が summary を glance しやすいよう
   // 取消ハンドルを上位に寄せる (Batch2 サンプラ優先抽出の土台。topReason には出さない)。
   const auditGlanceC =
@@ -72,7 +74,7 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
     x.auditSampled
       ? 0.3
       : 0;
-  const score = stakesC + confC + prioC + dueC + orderC + auditGlanceC;
+  const score = stakesC + confC + prioC + dueC + orderC + auditGlanceC + handoffC;
 
   // 最大寄与カテゴリを決定論で選ぶ(添字アクセスを避け reduce で max を取る)。
   const contribs: { label: Exclude<TopReason, null>; value: number }[] = [
@@ -90,7 +92,13 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
 /** キュー一行理由。blocked が「実行失敗」か「人手保留」かを見分けられるようにする。 */
 function surfaceReasonOf(it: Item, ageDays: number | null): string {
   let base: string;
-  if (it.executionStatus === "failed") {
+  if (it.executionStatus === "awaiting_handoff") {
+    // 引き取り待ち: 実行は完了。外部成果物(PR/リンク)があれば採用を、無ければ確認を促す (§3.5)。
+    const hasArt = !!(it.artifacts && it.artifacts.trim() && it.artifacts.trim() !== "[]");
+    base = hasArt
+      ? "引き取り待ち: 成果物(PR/リンク等)を確認し、採用(マージ等)してください"
+      : "引き取り待ち: 成果物を確認してください";
+  } else if (it.executionStatus === "failed") {
     const trace = (it.executionResult ?? "").trim().slice(0, 60);
     base = `実行失敗(再実行/エスカレ/却下)${trace ? `（${trace}）` : ""}`;
   } else if (it.status === "blocked") {
@@ -104,6 +112,7 @@ function surfaceReasonOf(it: Item, ageDays: number | null): string {
   // 2日以上で末尾に付す。
   if (ageDays != null && ageDays >= 2) {
     if (it.executionStatus === "proposed") base += `（${ageDays}日承認待ち）`;
+    else if (it.executionStatus === "awaiting_handoff") base += `（${ageDays}日引き取り待ち）`;
     else if (it.status === "classified") base += `（${ageDays}日滞留）`;
   }
   return base;
@@ -115,6 +124,9 @@ export function queue(): QueueItem[] {
     // 1) cancelled は常に再浮上させない(cancelExecution は status='rejected' にもするが
     //    executionStatus でも二重に保険)。
     if (it.executionStatus === "cancelled") return false;
+    // 1.5) 【最優先】引き取り待ち(実行完了・人間の受領/採用が必要)は必ず前面に出す (§3.5)。
+    //      status='review' なので下の classified/done フィルタには拾われない。明示で出す。
+    if (it.executionStatus === "awaiting_handoff") return true;
     // 2) 自動実行が成功した分は §4-4「安く取り消せる」取消ハンドルとしてキューに残す。
     if (it.autoExecuted && it.executionStatus === "succeeded") return true;
     // 3) 【最優先】止まった項目の再浮上: 実行失敗・人手保留は必ず出す(cancelled は 1) で除外済み)。
@@ -154,6 +166,7 @@ export function queue(): QueueItem[] {
     // 滞留経過 ageDays: proposed と classified(escalate/human) のみ。
     const ageDays =
       it.executionStatus === "proposed" ||
+      it.executionStatus === "awaiting_handoff" ||
       (it.status === "classified" && (it.disposition === "escalate" || it.disposition === "human"))
         ? Math.floor((Date.now() - it.updatedAt) / DAY_MS)
         : null;

@@ -11,6 +11,7 @@ export type ExecutionStatus =
   | "failed"
   | "proposed"
   | "approved"
+  | "awaiting_handoff" // 実行完了・人間の引き取り(レビュー/採用)待ち (§3.5)
   | "cancelled";
 
 export interface Item {
@@ -65,6 +66,7 @@ export type LabelAction =
   | "reclassify"
   | "mute_category"
   | "approve"
+  | "receive"
   | "reject"
   | "override"
   | "audit_ok"
@@ -198,7 +200,7 @@ export interface AppState {
   sprints: Sprint[];
   // 起動時 preflight/reconcile 痕跡 + in-flight 集計 (server /api/state)。
   runtime?: RuntimeState;
-  inFlight?: { running: number; proposed: number };
+  inFlight?: { running: number; proposed: number; awaitingHandoff?: number };
   // AI 未接続→トップバナー用。ok=false のとき reason を出す。サーバ未提供時 undefined=非表示。
   preflight?: { ok: boolean; reason: string | null };
   // 全期間 LabelEvent 総数 (cold-banner 初日=実績ゼロ判定)。
