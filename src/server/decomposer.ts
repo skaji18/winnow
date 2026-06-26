@@ -41,6 +41,7 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
     finishedAt: null,
     output: null,
     error: null,
+    ipcId: null,
   });
 
   const res = await driver.dispatch({

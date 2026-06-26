@@ -100,6 +100,8 @@ export async function runExecution(itemId: string): Promise<Item | null> {
     finishedAt: null,
     output: null,
     error: null,
+    // Batch3 が dispatch の req.id を相関IDとして渡す。本バッチは後方互換の null。
+    ipcId: null,
   });
 
   const res = await driver.dispatch({

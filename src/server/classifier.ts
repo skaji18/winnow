@@ -58,6 +58,7 @@ export async function classify(itemId: string): Promise<Item | null> {
     finishedAt: null,
     output: null,
     error: null,
+    ipcId: null,
   });
 
   const res = await driver.dispatch({

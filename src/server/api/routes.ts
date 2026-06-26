@@ -100,8 +100,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete("/api/items/:id", async (req) => {
     const { id } = req.params as { id: string };
-    items.remove(id);
-    return { ok: true };
+    const r = items.remove(id);
+    return { ok: true, deleted: r.deleted };
   });
 
   app.get("/api/items/:id/labels", async (req) => {
