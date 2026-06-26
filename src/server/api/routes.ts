@@ -131,7 +131,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       for (const c of childrenOf.get(ids[i]!) ?? []) ids.push(c);
     }
     for (const itemId of ids) items.update(itemId, { projectId: project.id });
-    return { project, assigned: ids.length };
+    // 案件に属したことで案件文脈(project.context)が分類に効くようになる。
+    // まださばかれていない(inbox/classified)かつ未実行の項目だけ再分類に流し、
+    // 案件前提を踏まえた仕分けへ更新する。done/in_progress/実行済みは触らない
+    // (進行中の作業や履歴・教師信号を乱さない)。control は直列なので背景で順に処理。
+    let reclassified = 0;
+    for (const itemId of ids) {
+      const it = items.get(itemId);
+      if (
+        it &&
+        (it.status === "inbox" || it.status === "classified") &&
+        it.executionStatus === "none"
+      ) {
+        reclassified++;
+        background(() => classify(itemId));
+      }
+    }
+    return { project, assigned: ids.length, reclassified };
   });
 
   // --- AI ops ---------------------------------------------------------------

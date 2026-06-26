@@ -131,9 +131,12 @@ function ProjectDetail({
           案件の前提・文脈（分解/実行に注入される）
         </summary>
         <textarea
-          rows={4}
+          rows={6}
           style={{ width: "100%", marginTop: 8 }}
-          placeholder="この案件固有の前提・制約・関係者・参照先など。ここに書くとこの案件のタスクの分解・実行に効く。"
+          placeholder={
+            "この案件固有の前提。書いた内容が分類/分解/実行のプロンプトに注入されます。見出しは目安(自由文でも可):\n" +
+            "## 決定・方針\n## 用語\n## 制約\n## 参照・repo（clone先のパスなど。詳細はそのrepoのdocsへ）\n## やらないこと"
+          }
           defaultValue={project.context}
           onBlur={(e) => api.updateProject(project.id, { context: e.target.value }).then(onChange)}
         />

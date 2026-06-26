@@ -649,13 +649,15 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
       <div className="panel">
         <h3>プロダクトの前提（分解・実行の文脈）</h3>
         <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-          何を作っているか・スタック・規約・方針。ここに書いた前提が分類/分解/実行すべての
-          プロンプトに注入され、リーフまで文脈が降りる（上段の鋭い投資は下段で複利 §2.2）。
+          分類/分解(control)が判断するのに要る<b>要約と運用方針</b>を書く場所。ここに書いた前提が
+          分類/分解/実行すべてのプロンプトに注入される（上段の鋭い投資は下段で複利 §2.2）。
+          アーキ・規約・契約の<b>詳細はコードと一緒に各repoのdocs(CLAUDE.md/README/docs)に置き</b>、
+          実行時はworkerがそれを正典として読む。ここに詳細を転記するとrepoとドリフトするので避ける。
         </p>
         <textarea
           rows={5}
           style={{ width: "100%" }}
-          placeholder="例: BtoB SaaSの請求管理。TS/Node/Postgres。決済はStripe。本番操作は必ず人間承認。命名は…"
+          placeholder="例: BtoB SaaSの請求管理。TS/Node/Postgres。決済はStripe。本番操作は必ず人間承認。詳細は各repoのdocs参照。"
           defaultValue={s.productContext}
           onBlur={(e) => set({ productContext: e.target.value })}
         />
