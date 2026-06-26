@@ -218,9 +218,13 @@ export interface Settings {
   // worker セッション上限 (§6 クォータ天井).
   maxWorkers: number;
   // claude 起動コマンド (ローカル環境ごとに調整可能).
-  // ファイルI/Oプロトコルは Write ツールしか使わないので acceptEdits で無人化できる。
-  // セッションが許可プロンプトで止まる場合は GUI からこの値を
-  // "claude --dangerously-skip-permissions" 等に変更する。
+  // 既定は --permission-mode auto。許可プロンプトなしで自動実行しつつ、claude 側の
+  // 分類器が各アクションを事前審査し危険操作 (curl|bash, main への force push,
+  // git reset --hard, 機微データ送信, 本番デプロイ等) はブロックする安全網付き automode。
+  // tmux 常駐セッションがプロンプト待ちで詰まる事故を避けつつ事故も抑えられる。
+  // auto は Claude Code v2.1.83+ / Opus 4.6+ ・Sonnet 4.6+ 等が要件 (Sonnet 4.5/Haiku 非対応)。
+  // 許可確認を残したい場合は GUI から "claude --permission-mode acceptEdits"、
+  // 逆に安全網ごと全バイパスしたい隔離環境では "claude --dangerously-skip-permissions" に変更する。
   claudeControlCmd: string;
   claudeWorkerCmd: string;
   // ヘッドレス(claude -p)で動かすdevモード。将来課金リスクありだが検証は速い。
@@ -254,8 +258,8 @@ export const DEFAULT_SETTINGS: Settings = {
   auditRate: 0.15,
   escalationTightness: 0.7, // コールドスタートは保守的=締め気味 (§4 末, §5)
   maxWorkers: 2,
-  claudeControlCmd: "claude --permission-mode acceptEdits",
-  claudeWorkerCmd: "claude --permission-mode acceptEdits",
+  claudeControlCmd: "claude --permission-mode auto",
+  claudeWorkerCmd: "claude --permission-mode auto",
   useHeadless: false,
   productContext: "",
   pauseAuto: false,
@@ -266,6 +270,7 @@ export const DEFAULT_SETTINGS: Settings = {
   binOverturnGap: 0.25,
   claudeAllowedFlags: [
     "--permission-mode",
+    "auto",
     "acceptEdits",
     "--dangerously-skip-permissions",
     "-p",

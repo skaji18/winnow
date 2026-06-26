@@ -80,17 +80,19 @@ tmux kill-session -t winnow       # セッションごと停止
 control/worker いずれも既定の起動コマンドは:
 
 ```
-claude --permission-mode acceptEdits
+claude --permission-mode auto
 ```
 
-`acceptEdits` を使うのは、ファイルI/Oプロトコルが Write ツールしか使わないため、これで無人運用が成立するという設計判断による。**既定では `--dangerously-skip-permissions` は使われていない。** コードのどこからも自動でこのフラグが付くことはない。
+`auto`（automode）を使うのは、許可プロンプトなしで無人実行しつつ、claude 側の分類器が各アクションを事前審査して危険操作（`curl|bash`、`main` への force push、`git reset --hard`、機微データ送信、本番デプロイ等）をブロックする**安全網付きの全自動**だから。tmux 常駐セッションがプロンプト待ちで詰まる事故を避けつつ、`--dangerously-skip-permissions`（全バイパス）の危険を負わずに済む。**既定では `--dangerously-skip-permissions` は使われていない。** コードのどこからも自動でこのフラグが付くことはない。
+
+`auto` は Claude Code v2.1.83+ かつ Opus 4.6+ / Sonnet 4.6+ / Opus 4.7-4.8 等が要件（Sonnet 4.5・Haiku は非対応）。要件を満たさない環境では、許可確認を残す `claude --permission-mode acceptEdits`（ファイルI/Oプロトコルは Write ツールしか使わないため概ね無人運用が成立）に変更する。
 
 ### 起動コマンドの許可リスト（RCE 面の封鎖）
 
 `claudeControlCmd` / `claudeWorkerCmd` は任意コマンド注入（ローカル RCE）面になりうるため、**許可リストで封鎖されている**（`validateClaudeCmd`）。
 
 - 先頭トークンは **`claude` 固定**、以降の各トークンは `settings.claudeAllowedFlags` 集合に含まれること。
-- 既定の `claudeAllowedFlags`: `--permission-mode` / `acceptEdits` / `--dangerously-skip-permissions` / `-p` / `--output-format` / `json` / `--model` / `sonnet` / `opus` / `haiku` / `plan` / `default`。
+- 既定の `claudeAllowedFlags`: `--permission-mode` / `auto` / `acceptEdits` / `--dangerously-skip-permissions` / `-p` / `--output-format` / `json` / `--model` / `sonnet` / `opus` / `haiku` / `plan` / `default`。
 - 範囲外トークンを含む `PATCH /api/settings` は `400 {error:"disallowed command tokens in <key>"}` で拒否される。`POST /api/import` 経路でも同じ検証が掛かり、不正なら `DEFAULT_SETTINGS` へ落とす（許可リストを import で迂回する穴を塞ぐ）。
 - `claudeAllowedFlags` 自体は `PATCH /api/settings` の対象に含まれない（許可リストを緩める穴を作らない）。緩めたい場合はコード/DB を直接編集する。
 

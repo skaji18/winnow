@@ -39,10 +39,12 @@
 
 **原因**
 - ペイン内の `claude` が許可・信頼プロンプトで停止すると、バックエンドの file-IO プロトコル（リクエスト/レスポンス/done ファイル）が進まず、done ファイルの検知待ちがタイムアウトします。
-- 既定の起動コマンドは `claude --permission-mode acceptEdits` です。file-IO プロトコルは Write ツールしか使わないため通常は無人運転できますが、環境によってはプロンプトで詰まることがあります。
+- 既定の起動コマンドは `claude --permission-mode auto`（安全網付きの automode）です。許可プロンプトでは止まりませんが、`auto` の要件（Claude Code v2.1.83+・Opus 4.6+/Sonnet 4.6+ 等）を満たさない環境では `auto` が無効になり、プロンプトで詰まることがあります。
+- `claude --permission-mode acceptEdits` に変更している場合も、file-IO プロトコルは Write ツールしか使わないため通常は無人運転できますが、環境によってはプロンプトで詰まることがあります。
 
 **対処**
-- 設定画面の「control 起動コマンド」「worker 起動コマンド」（`claudeControlCmd` / `claudeWorkerCmd`）を `claude --dangerously-skip-permissions` に切り替える。これはコード内コメントとエラーメッセージでも、プロンプトで詰まる場合の回避策として案内されています。
+- まず `auto` の要件を満たす Claude Code / モデルか確認する。満たさない場合は設定画面の「control 起動コマンド」「worker 起動コマンド」（`claudeControlCmd` / `claudeWorkerCmd`）を `claude --permission-mode acceptEdits` に変更する。
+- それでも詰まる隔離環境では、安全網ごと全バイパスする `claude --dangerously-skip-permissions` に切り替える。これはコード内コメントとエラーメッセージでも、プロンプトで詰まる場合の回避策として案内されています。
 - 既存セッションは再起動では再構成されないため、設定変更後は `tmux kill-session -t winnow` で一度落としてから起動し直す（次項も参照）。
 - タイムアウト値の意味は [CONFIG.md](./CONFIG.md) を参照（control 既定 90s / worker 既定 300s / 実行 dispatch 600s / セッション獲得 120s）。
 
