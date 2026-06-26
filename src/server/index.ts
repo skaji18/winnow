@@ -5,12 +5,32 @@ import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import { ensureDirs, SERVER_PORT } from "./config.js";
-import "./db.js"; // initialize schema
+import "./db.js"; // initialize schema (quick_check 失敗時はここで throw して listen 前に落ちる)
 import { registerRoutes } from "./api/routes.js";
 import { registerMcp } from "./mcp/transport.js";
 import { getDriver } from "./ai/index.js";
+import { reconcileOnBoot, inFlightCount } from "./executor.js";
+import { preflightCheck } from "./ai/preflight.js";
+import { getRuntimeState, setReconcile, setPreflight } from "./runtime-state.js";
 
 ensureDirs();
+
+// 起動時 reconcile/preflight は db 初期化直後・listen 前に一度だけ。reconcile は AI を
+// 起動せず DB と IPC sentinel のみ参照する決定論処理(背骨§1.3, winnow は read-only 痕跡のみ)。
+// reconcile/preflight の例外は握り潰してサーバ起動を止めない(db quick_check 失敗のみ起動停止)。
+try {
+  const r = reconcileOnBoot();
+  setReconcile({ ranAt: Date.now(), recovered: r.recovered, failedOver: r.failedOver });
+} catch (e) {
+  console.error("[winnow] reconcile failed:", e);
+}
+try {
+  // tmux -V / claude --version の軽い1回チェックのみ。AI セッションは起動しない。
+  const pf = await preflightCheck();
+  setPreflight(pf);
+} catch (e) {
+  console.error("[winnow] preflight failed:", e);
+}
 
 const app = Fastify({ logger: { level: "warn" } });
 
@@ -18,6 +38,19 @@ await app.register(fastifyWebsocket);
 await registerRoutes(app);
 // Claude 等の MCP クライアントが作業中に直接アイテムを捕獲できる口 (§8 「MCPで寄生」)。
 await registerMcp(app);
+
+// 機械向け最小ヘルスチェック (人間向けUIなし)。ready/busy/直近の reconcile failed数。
+// Batch5 は security フック対象外パスとして扱う(秘密不要で叩ける)。
+app.get("/healthz", async () => {
+  const rt = getRuntimeState();
+  const { running } = inFlightCount();
+  return {
+    ready: true,
+    busy: running > 0,
+    recentFailedOver: rt.reconcile.failedOver,
+    preflightOk: rt.preflight.tmuxOk && rt.preflight.claudeOk,
+  };
+});
 
 // Live terminal theater (§4 "ワンクリックで端末を開いて結果も出し切る").
 // Streams `tmux capture-pane` for a session over WebSocket.

@@ -398,6 +398,14 @@ export const jobs = {
       .prepare("SELECT * FROM jobs ORDER BY createdAt DESC LIMIT ?")
       .all(limit) as ExecutionJob[];
   },
+  /** 前回プロセスで running のまま中断した execute ジョブ (起動時 reconcile が決着させる)。 */
+  runningExecuteJobs(): ExecutionJob[] {
+    return db
+      .prepare(
+        "SELECT * FROM jobs WHERE role='worker' AND kindOfWork='execute' AND status='running' ORDER BY createdAt ASC",
+      )
+      .all() as ExecutionJob[];
+  },
   /** classify/execute の失敗ジョブ数 (summary の failed 集計)。finishedAt 基準。 */
   failedSince(ts: number): number {
     return (

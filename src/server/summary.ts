@@ -27,6 +27,8 @@ export interface WeeklySummary {
   stale: number;
   // 環境不全由来 escalate + 失敗ジョブ件数。
   failed: number;
+  // 要棚卸し: updatedAt 14日以上前 × in_progress/blocked、または子なし node(放置された問い)。
+  needsReview: number;
   line: string;
 }
 
@@ -107,6 +109,17 @@ export function weekly(): WeeklySummary {
   );
   const failed = failedJobs + envEsc;
 
+  // --- 要棚卸し (GTD 棚卸し): updatedAt 14日以上前 × in_progress/blocked、または
+  // 子なし node(放置された問い)。決定論カウント。子なし node の NOT IN サブクエリは
+  // NULL 混入で全件 false になる SQLite の罠を避けるため parentId IS NOT NULL で絞る。
+  const reviewCutoff = now - 14 * 24 * 60 * 60 * 1000;
+  const needsReview = count(
+    `SELECT COUNT(*) AS c FROM items
+       WHERE (updatedAt < ? AND status IN ('in_progress','blocked'))
+          OR (kind='node' AND id NOT IN (SELECT parentId FROM items WHERE parentId IS NOT NULL))`,
+    reviewCutoff,
+  );
+
   const tip = tippedCategories.length > 0 ? ` / 自動較正: ${tippedCategories.join(", ")}` : "";
   const delta = (() => {
     const d = auto - autoPrevAdj;
@@ -114,10 +127,11 @@ export function weekly(): WeeklySummary {
     return d > 0 ? `+${d}` : `${d}`;
   })();
   const accident = auditBad > 0 ? `事故${auditBad}` : "事故0(今週は自動事故の検出なし)";
+  const review = needsReview > 0 ? ` / 要棚卸し${needsReview}件` : "";
   const line =
     `今週: 自動${auto}(先週比${delta}) / 上げ${escalated} / 覆し${overridden} / ` +
     `締め${tightenedCount}・緩め${loosenedCount} / 監査${audited} / ${accident} / ` +
-    `塩漬け${stale} / 失敗${failed}${tip}`;
+    `塩漬け${stale} / 失敗${failed}${review}${tip}`;
 
   return {
     auto,
@@ -132,6 +146,7 @@ export function weekly(): WeeklySummary {
     auditBad,
     stale,
     failed,
+    needsReview,
     line,
   };
 }

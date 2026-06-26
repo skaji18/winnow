@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
+import { parseJson } from "./ai/tmux-driver.js";
+import { PATHS } from "./config.js";
 import { buildContextBlock } from "./context.js";
 import type { Item } from "./domain.js";
 import { items, jobs } from "./repo.js";
@@ -54,6 +58,8 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
   // executionStatus は "none" 既定で null にならない (db.ts DEFAULT 'none')。
   // failed のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
+  // 再浮上した failed 項目の再実行 (Batch5 のワンタップ / 起動時 reconcile が failed に倒した
+  // 項目) はここを通って再着火する。
   if (item.executionStatus && item.executionStatus !== "none" && item.executionStatus !== "failed") return item;
   if (item.kind !== "leaf") {
     return items.update(itemId, {
@@ -83,58 +89,23 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
   return runExecution(itemId);
 }
 
-/** 実際に worker セッションへ投げて実行する。 */
-export async function runExecution(itemId: string): Promise<Item | null> {
+/**
+ * ExecuteOut を解釈して item を更新し、必要ならレビュータスクを戻す共通ヘルパ。
+ * runExecution の成功パスと起動時 reconcile の done sentinel 取り込みパスの両方から
+ * 呼ぶ(挙動一致・重複排除)。Batch4 はこのヘルパ内に新カラム(executionSummary/
+ * Output/rollbackPlan/declaredReversible/artifacts)の書き込みを足す前提。
+ *
+ * blocked語義整理: 失敗(out.status==='failed')は status を blocked にせず in_progress に
+ * 保ち、再浮上は executionStatus==='failed' で表す(queue の visible が拾う)。
+ */
+function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
-
-  items.update(itemId, { executionStatus: "running", status: "in_progress" });
-  const driver = await ensureDriver();
-  const job = jobs.create({
-    itemId,
-    role: "worker",
-    kindOfWork: "execute",
-    sessionName: null,
-    status: "running",
-    startedAt: Date.now(),
-    finishedAt: null,
-    output: null,
-    error: null,
-    // Batch3 が dispatch の req.id を相関IDとして渡す。本バッチは後方互換の null。
-    ipcId: null,
-  });
-
-  const res = await driver.dispatch({
-    id: randomUUID(),
-    role: "worker",
-    label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item)),
-    cwd: item.projectDir ?? undefined,
-    expectJson: true,
-    timeoutMs: 600_000,
-  });
-
-  jobs.update(job.id, {
-    sessionName: res.sessionName,
-    status: res.ok ? "succeeded" : "failed",
-    finishedAt: Date.now(),
-    output: res.raw,
-    error: res.error ?? null,
-  });
-
-  if (!res.ok) {
-    return items.update(itemId, {
-      executionStatus: "failed",
-      status: "blocked",
-      executionResult: `実行失敗: ${res.error ?? "unknown"}`,
-    });
-  }
-
-  const out = res.data as Partial<ExecuteOut>;
   const succeeded = out.status === "succeeded";
   const updated = items.update(itemId, {
     executionStatus: out.status === "needs_human" ? "proposed" : succeeded ? "succeeded" : "failed",
-    status: succeeded ? "done" : "blocked",
+    // succeeded→done。それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
+    status: succeeded ? "done" : "in_progress",
     autoExecuted: true,
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
   });
@@ -152,6 +123,135 @@ export async function runExecution(itemId: string): Promise<Item | null> {
     });
   }
   return updated;
+}
+
+/** 実際に worker セッションへ投げて実行する。 */
+export async function runExecution(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+
+  items.update(itemId, { executionStatus: "running", status: "in_progress" });
+  const driver = await ensureDriver();
+  // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
+  // reconcile が done sentinel (PATHS.ipc/${ipcId}.done) と res.json を決定論で特定できる。
+  const ipcId = randomUUID();
+  const job = jobs.create({
+    itemId,
+    role: "worker",
+    kindOfWork: "execute",
+    sessionName: null,
+    status: "running",
+    startedAt: Date.now(),
+    finishedAt: null,
+    output: null,
+    error: null,
+    ipcId,
+  });
+
+  const res = await driver.dispatch({
+    id: ipcId,
+    role: "worker",
+    label: `実行: ${item.title.slice(0, 30)}`,
+    prompt: executePrompt(item, buildContextBlock(item)),
+    cwd: item.projectDir ?? undefined,
+    expectJson: true,
+    timeoutMs: 600_000,
+  });
+
+  jobs.update(job.id, {
+    sessionName: res.sessionName,
+    status: res.ok ? "succeeded" : "failed",
+    finishedAt: Date.now(),
+    output: res.raw,
+    error: res.error ?? null,
+  });
+
+  if (!res.ok) {
+    // blocked語義整理: 実行失敗は status を blocked にせず in_progress に保つ。
+    // 可視性は queue の executionStatus==='failed' フィルタが担保する。
+    return items.update(itemId, {
+      executionStatus: "failed",
+      status: "in_progress",
+      executionResult: `実行失敗: ${res.error ?? "unknown"}`,
+    });
+  }
+
+  return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>);
+}
+
+/**
+ * WIP/worker 天井のための in-flight 集計。DB から決定論で算出する(状態の二重持ちを
+ * 避けるため runtime-state には保持しない)。routes の掃き出しループと /api/state が使う。
+ *   running  = 実行中 N
+ *   proposed = 承認待ち M
+ */
+export function inFlightCount(): { running: number; proposed: number } {
+  let running = 0;
+  let proposed = 0;
+  for (const it of items.all()) {
+    if (it.executionStatus === "running") running++;
+    else if (it.executionStatus === "proposed") proposed++;
+  }
+  return { running, proposed };
+}
+
+/**
+ * 起動時 reconcile(index.ts が db 初期化直後・listen 前に一度だけ呼ぶ)。
+ * 前回プロセスで running のまま中断した execute ジョブを、jobs.ipcId 経由で done
+ * sentinel を探して決定論で決着させる:
+ *   - done sentinel + res.json があれば取り込み(applyExecuteResult)→ recovered++
+ *   - 無い / ipcId=null / parse 失敗 → executionStatus='failed'・status='in_progress'
+ *     (blocked にしない)に倒し executionResult に痕跡 → 再浮上経路(queue)が拾う → failedOver++
+ * AI は一切起動しない(driver.init() を呼ばず、IPC sentinel と DB のみ参照する read-only
+ * 痕跡処理)。同期(better-sqlite3 同期API + fs 同期API)。一度きり・冪等
+ * (決着済み job は status を running から外すので二度と拾わない)。
+ */
+export function reconcileOnBoot(): { recovered: number; failedOver: number } {
+  let recovered = 0;
+  let failedOver = 0;
+  const stranded = jobs.runningExecuteJobs();
+  for (const job of stranded) {
+    const item = items.get(job.itemId);
+    // item が無い / 既に running 以外で決着済みなら job だけ決着させて skip。
+    if (!item || item.executionStatus !== "running") {
+      jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
+      continue;
+    }
+
+    let takenIn = false;
+    if (job.ipcId) {
+      const donePath = path.join(PATHS.ipc, `${job.ipcId}.done`);
+      const resPath = path.join(PATHS.ipc, `${job.ipcId}.res.json`);
+      if (fs.existsSync(donePath)) {
+        try {
+          const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
+          const out = parseJson(raw) as Partial<ExecuteOut>;
+          applyExecuteResult(job.itemId, out);
+          jobs.update(job.id, {
+            status: out.status === "failed" ? "failed" : "succeeded",
+            finishedAt: Date.now(),
+            output: raw,
+          });
+          recovered++;
+          takenIn = true;
+        } catch {
+          /* parse 失敗 → 下の failed フォールバックへ倒す */
+        }
+      }
+    }
+
+    if (!takenIn) {
+      items.update(job.itemId, {
+        executionStatus: "failed",
+        status: "in_progress",
+        executionResult:
+          "前回セッション中に中断(再起動時 reconcile)。再実行/エスカレ/却下できます。",
+      });
+      jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
+      failedOver++;
+    }
+  }
+  return { recovered, failedOver };
 }
 
 export async function approveExecution(itemId: string): Promise<Item | null> {

@@ -9,6 +9,7 @@ import * as executor from "../executor.js";
 import * as promotion from "../promotion.js";
 import { autoFoldedCount, queue } from "../queue.js";
 import { items, jobs, labels, projects, rules, settings, sprints } from "../repo.js";
+import { getRuntimeState } from "../runtime-state.js";
 import { weekly } from "../summary.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
@@ -30,6 +31,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // 不可逆/高ステークスは proposed に回すので、ここでの追加ゲートは不要。
     // 監査サンプル済みも除外しない: 自動実行しつつキューにも出して見分けの効く
     // 監査を混入させる (§4-3, queue.ts のフィルタが面倒を見る)。
+    //
+    // WIP/worker 天井: 同時 in-flight が maxWorkers を超えないよう、点火可能枠を予算化する。
+    // budget = maxWorkers - 実行中 - 今ポーリングで点火中(igniting)。超過分は次の /api/state
+    // ポーリングまで待たせる(break)。igniting.size を差し引いて同一ポーリング内の過剰点火を防ぐ。
+    const cfg = settings.get();
+    const { running } = executor.inFlightCount();
+    let budget = Math.max(0, cfg.maxWorkers - running - igniting.size);
     for (const it of items.all()) {
       if (
         it.status === "classified" &&
@@ -38,7 +46,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         it.executionStatus === "none" &&
         !igniting.has(it.id)
       ) {
+        if (budget <= 0) break;
         igniting.add(it.id);
+        budget--;
         background(() =>
           executor.requestExecution(it.id).finally(() => igniting.delete(it.id)),
         );
@@ -55,6 +65,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       recentJobs: jobs.recent(30),
       projects: projects.all(),
       sprints: sprints.all(),
+      // 起動時 preflight/reconcile の痕跡と in-flight 集計(実行中N/承認待ちM)。表示は Batch6。
+      runtime: getRuntimeState(),
+      inFlight: executor.inFlightCount(),
     };
   });
 
