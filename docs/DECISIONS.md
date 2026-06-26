@@ -124,3 +124,59 @@
 - **作らない**: 子間の依存DAG＋トポロジカル順発火、常駐スケジューラ(§6 有料ゾーン)、
   連動PR/commit/CI 協調層(winnow は単一 repo でも commit/PR を扱わない)。証拠(摩擦の実測)が
   出てから再検討する(§5 Jカーブ・§7 まず器)。
+
+## 案件・プロダクト文脈の取り込み（ユーザ確認済み, 6回目）
+
+問い: 特定の案件/プロダクトに固有のコンテキスト・知識を、claude が処理しやすいように
+winnow にどう取り込むか。claude 自身の memory(CLAUDE.md/native memory)なのか、winnow が枠を出すのか。
+単発タスクは? プロダクト全体のベース知識は repo か別か? clone したディレクトリの情報は?
+
+**中核の整理: 持つべきものは直交2軸。混ぜない。**
+
+- **知識・文脈(推論用)**: `productContext`(全体) + `Project.context`(案件) + 親チェーン + repo の docs。
+  `buildContextBlock` が前3つを全プロンプトへ注入。ポータブルだがドリフト管理が要る。
+- **実行バインディング(どこで動くか)**: `Item.projectDir`(構造化カラム)。マシンローカル config。
+  パスを知識ブロブに混ぜない(ノイズ＋ドリフト)/知識を projectDir に入れない。
+
+**立場: winnow が「枠」を出す。ただし枠 = 既存 SQLite の自由文を磨く。claude memory は採らない。**
+
+- §1.3(state は system-of-record): 知識は SQLite に留め、/clear 後の無状態 worker が毎回
+  `buildContextBlock` で DB から再ロードする現状配管を維持。CLAUDE.md へ逃がすと状態が監査・
+  LabelEvent ループ外へ漏れる。さらに tmux worker は `PATHS.workspaces` 固定起動で projectDir 配下の
+  CLAUDE.md は自動ロードされず(tmux-driver.ts:78)、headless と非対称。**却下**(polyrepo レジストリ却下と同根)。
+- 例外: repo の docs は「コードベース自身が所有する正典」であって winnow の state ではない。
+  winnow は所有も同期もせず、**実行時に worker へ"読め"と指すだけ**。これは memory 依存ではない。
+
+**サブ問の決定:**
+
+- **案件知識**: 新エンティティ(knowledge_facts 等)も自動蒸留も作らず、`Project.context` 自由文を磨く。
+  自動蒸留→context 書き戻しは自己参照ループで較正の収束保証を失う(§3.6-4)ので不採用。
+- **単発タスク(projectId=null)**: 専用枠を作らない。知識枠の価値=再利用回数で、単発は再利用≒0。
+  `productContext` + body で回し、再利用が出たら既存の「案件に昇格」で初めて枠を持つ(閾値=2回目)。
+- **プロダクト全体のベース知識**: 両方・役割分担。control は repo に届かない(controlCwd 固定)ので
+  `productContext` に**要約＋運用方針**だけ置く。詳細正典(アーキ/規約/契約)は repo の docs に置き、
+  worker が実行時に読む。winnow は転記しない(ドリフト源)。
+- **clone のパス**: 既に `Item.projectDir`(構造化カラム)が正しい家。親→子継承＋ executor が cwd に固定。
+  これは知識でなくマシンローカル config なので context へは出さない。案件横断で参照する repo の所在は
+  `Project.context` の「## 参照・repo」に人間が書き、control の認識用に流す(層1, 実装済み)。
+
+**実装した(後方互換・マイグレーション不要):**
+
+- `context.ts`: 案件前提が空なら案件ブロックごと省略(以前の「(前提未記入)」がトークンを食う事故を修正、
+  productContext/親チェーンと対称化)。注入全体に上限 `MAX_CONTEXT_CHARS=16000` ＋番兵切り詰め
+  (HeadlessDriver の execFile ARG_MAX 未防御を、黙ったクラッシュでなく可視な省略へ。暫定値)。
+- `prompts.ts`(executePrompt, software のみ): 「着手前に作業ディレクトリの CLAUDE.md/README/docs を読み
+  正典として従え。【文脈】は要約で詳細は repo が優先」を明記。repo を正典として"指す"。
+- `routes.ts`(to-project): 案件昇格時、サブツリーのうち**未さばき(inbox/classified)かつ未実行**の項目だけ
+  背景で再分類に流す。案件文脈が効いた仕分けへ更新する。done/in_progress/実行済みは触らない。
+- web: 案件 textarea の placeholder を5見出しスケルトン(自動流し込みなし、殴り書きも可)。
+  設定の productContext ヘルプを「control 用の要約＋運用方針、詳細は repo の docs」に役割明記。
+
+**作らない/棚上げ(証拠が出てから):**
+
+- 棚上げ(P3, フリクション実測後): `Project.defaultProjectDir`(案件の主 clone を一度設定→item 継承の
+  3段フォールバック)、`items.byProject` と案件単位の棚卸し画面、`Project.context` 破綻時の
+  `knowledge_facts` 層2昇格。今は dead code を置かず方向のみ記録。
+- 恒久に作らない: 案件別 Rule/CategoryStat(較正の projectId 拡張)、CLAUDE.md への書き込み・自動同期、
+  生成 worker による自動蒸留、ai_suggested 候補キュー/承認画面、name→path 多フィールド repos レジストリ、
+  種まき(空時のスケルトン自動流し込み)、context のキャッシュ/関連度選別。
