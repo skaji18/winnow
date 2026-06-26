@@ -165,15 +165,15 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 | worker 並列数 | `maxWorkers` | worker セッション数。実行時に `max(1, …)` で 1 を下限に丸め。 | 既定 2 / 1–8（UI スライダーは 0–6） |
 | プロダクトの前提 | `productContext` | プロダクト全体の前提・方針。仕分け・分解・実行すべてに注入。 | 既定 `""` |
 | headless で動かす | `useHeadless` | tmux 常駐ではなく `claude -p`（ヘッドレス）で動かす切替。 | 既定 `false` |
-| control 起動コマンド | `claudeControlCmd` | control セッションの起動コマンド。 | 既定 `claude --permission-mode acceptEdits` |
-| worker 起動コマンド | `claudeWorkerCmd` | worker セッションの起動コマンド。 | 既定 `claude --permission-mode acceptEdits` |
+| control 起動コマンド | `claudeControlCmd` | control セッションの起動コマンド。 | 既定 `claude --permission-mode auto` |
+| worker 起動コマンド | `claudeWorkerCmd` | worker セッションの起動コマンド。 | 既定 `claude --permission-mode auto` |
 | 自動実行の一時停止 | `pauseAuto` | true で自動経路（キュー掃き出し・classify 末尾の即時着火・capture sweep）を抑止。手動承認は通す。 | 既定 `false` |
 | learned 監査下限 | `learnedAuditFloor` | learned auto rule カテゴリに恒常維持する最低監査率。`rollAudit` が `max(auditRate, learnedAuditFloor)` を採る。 | 既定 0.25 / 0–1 |
 | tip probation 期間 | `tipProbationMs` | learned auto rule の tip 直後に監査を一時引き上げる期間。 | 既定 604800000ms（1週間） |
 | tip probation 監査率 | `tipProbationRate` | probation 期間中の引き上げ監査率。 | 既定 0.5 / 0–1 |
 | ビン較正の最小サンプル | `binCalibrationMinSamples` | confidence ビン較正を発火させる最小サンプル数（ビン単位）。未満は補正しない。 | 既定 8（整数） |
 | ビン乖離閾値 | `binOverturnGap` | ビン実 overturn 率が申告を上回る乖離の閾値。超過で当該カテゴリの `requiredConf` を締め側に補正。 | 既定 0.25 / 0–1 |
-| claude 許可フラグ | `claudeAllowedFlags` | `claudeControlCmd`/`claudeWorkerCmd` を PATCH/import で書き換える際に許可するトークン集合（RCE 面を封鎖）。 | 既定: `--permission-mode` `acceptEdits` `--dangerously-skip-permissions` `-p` `--output-format` `json` `--model` `sonnet` `opus` `haiku` `plan` `default` |
+| claude 許可フラグ | `claudeAllowedFlags` | `claudeControlCmd`/`claudeWorkerCmd` を PATCH/import で書き換える際に許可するトークン集合（RCE 面を封鎖）。 | 既定: `--permission-mode` `auto` `acceptEdits` `--dangerously-skip-permissions` `-p` `--output-format` `json` `--model` `sonnet` `opus` `haiku` `plan` `default` |
 | 取り込み保留閾値 | `captureInboxHoldThreshold` | 過負荷時に capture を即 classify せず inbox 保留にする保留中件数の閾値。0 で無効。 | 既定 24 |
 
 > 各値のクランプ・更新 API は [`docs/CONFIG.md`](CONFIG.md) を参照。
