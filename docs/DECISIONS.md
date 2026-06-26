@@ -1,6 +1,6 @@
 # 実装上の決定（Decisions）
 
-`REQUIREMENTS.md` を実装に落とす際に確定した選択。ユーザ確認済みのものを含む。
+リポジトリ直下の `../REQUIREMENTS.md` を実装に落とす際に確定した選択。ユーザ確認済みのものを含む。
 
 ## 確定した利用前提（ユーザ確認済み）
 
@@ -239,8 +239,94 @@ winnow にどう取り込むか。claude 自身の memory(CLAUDE.md/native memor
 
 ## バックアップ（export/import / Batch5・Batch1 確定仕様準拠）
 
-- **GET /api/export**: 版数(SCHEMA_VERSION)付き JSON。全テーブル(items/label_events/rules/
-  category_stats/projects/sprints/jobs/settings)を列挙。boolean は SQLite 由来の 0/1 のまま往復。read-only。
+- **GET /api/export**: 版数(SCHEMA_VERSION)付き JSON。`data` 直下に全テーブルを実キー名(items/labels/rules/
+  categoryStats/projects/sprints/jobs/settings。DB テーブルとしては labels=label_events / categoryStats=category_stats)で
+  列挙。boolean は SQLite 由来の 0/1 のまま往復。read-only。
 - **POST /api/import**: **空DB復元限定・merge 禁止**。items/projects 件数 0 で「空」と判定(settings seed 行は
   db.ts が必ず作るので判定に含めない)。版数照合(不一致は 409)の上、FK 親→子順に直 INSERT で復元。
   部分ユニーク externalKey の不変条件(非null時一意)は export 元が保証している前提。状態変更系なのでシークレット必須。
+
+## DBスキーマ版管理（user_version 単一真実源 / Batch1）
+
+- **スキーマ版の単一の真実源は `PRAGMA user_version`**(Settings JSON ではない)。コードが期待する版は
+  定数 `CODE_SCHEMA_VERSION = 1`。起動時、DB の user_version がこれより小さければ `MIGRATIONS` の up を
+  版数順に適用、大きければ(**ダウングレード**)`Refusing to start` で起動停止する(古いコードで新しい
+  DB を黙って壊さない)。export/import のメタ照合用に `SCHEMA_VERSION`(= CODE_SCHEMA_VERSION)を別途
+  エクスポートするが、これは DDL には使わず version 不一致検出にだけ使う(`db.ts`, `routes.ts`)。
+- **起動時整合チェック**: `quick_check` が ok でなければ throw して listen させない(壊れた DB で起動しない)。
+  運用者から見ると新しい起動失敗モード(quick_check 失敗 / ダウングレード拒否 / マイグレーションの FK 違反)。
+- **破壊的 table-rebuild は手動 BEGIN/COMMIT で原子化**: 版0→版1 で label_events を FK化
+  (itemId を ON DELETE SET NULL・NOT NULL 解除)、sprints から死列 projectId を除去、category_stats の
+  PK を (category, aiDisposition, confBin) へ再構築する。これらは `foreign_keys=OFF` を要し、
+  better-sqlite3 の `db.transaction` 内では PRAGMA が無視されるため transaction を使わず、最後に
+  `foreign_key_check`(NG なら ROLLBACK+throw)で整合確認する。table-rebuild は旧スキーマ検出時のみ一度きり。
+  併せて items に raw*/executionSummary/executionOutput/rollbackPlan/declaredReversible/artifacts/
+  sourceUrl/externalKey 等、jobs に ipcId、projects に context が冪等追加され、externalKey には
+  非null時一意の部分ユニーク索引が付く(`db.ts`)。
+
+## 較正の精度上げ（母数汚染除去・Wilson 下限・ビン較正 / Batch2）
+
+「締めるのは速く緩めるのは慎重に」の非対称を、点推定から区間推定・生提案ベースの母数へと磨く。
+
+- **較正母数の汚染除去**: `recordOutcome` に渡す aiDisposition は tightness/最終ゲートで書き換える
+  「前」の生提案(`item.rawDisposition`、null時は disposition にフォールバック)。confBin も生の
+  `confBinOf(rawConfidence ?? confidence)` から算出する。tightness 後の disposition/confidence を渡すと
+  母数が歪み learned tip が誤るため、Item に `rawDisposition`/`rawConfidence` を持たせ最終ゲートでも不変に保つ
+  (`calibration.ts`, `classifier.ts`)。
+- **緩め判定を Wilson スコア下限へ**: learned auto rule 生成を「MIN_SAMPLES(=5) かつ点推定 >= 0.8」から
+  「`wilsonLowerBound(overturnedToAuto, total) >= OVERTURN_TO_AUTO(=0.8)`」に置換(MIN_SAMPLES は撤廃)。
+  小標本で偶然高い却下率に釣られて早まって緩めないため。Wilson は z=1.96 既定、total<1 は 0(緩めない=安全側)を
+  返す決定論実装でライブラリ不要。判定は全ビン横断の `categoryStats.aggregated(category)` を使う。
+- **confidence ビン較正**(`calibrateRequiredConf`): auto 生提案ビンで total>=`binCalibrationMinSamples`
+  かつ (実 overturn 率 - 申告 overturn 率(=1-(confBin+0.5)/5)) > `binOverturnGap` のビンがあれば、その gap を
+  requiredConf への締め下駄として加算する。**締め側(正の下駄)のみ**で、緩める方向には決して倒さない。
+- **stakes/reversibility 符号ズレ補正**(`stakesReversibilityCorrection`): 当該カテゴリに audit_bad が
+  1件以上あれば「過小評価の前科あり」として締め床 `{ stakesFloor: 0.7, reversibilityFloor: 0.5 }` を返す。
+  未補正カテゴリは `{}`(現状維持・後方互換)。母数は LabelEvent の audit_bad カウント(専用枠なし)。
+  補正床の素材は用意されているが、executor での消費は未配線(executor は現状ハードコードの
+  `REVERSIBLE_THRESHOLD=0.6` / `stakes > 0.7` のみを使う)。カテゴリ単位床の接続は将来 Batch4 で行う方向のみ確定。
+- **監査サンプリングの拡張**: tightness が締めた escalate(rawDisposition='auto' かつ最終 escalate)にも
+  小率 `rate * TIGHTENED_AUDIT_FRACTION(=0.5)` で監査を混ぜ、緩めた境界を継続監視する。learned auto rule
+  カテゴリは `max(auditRate, learnedAuditFloor)`、tip 直後の probation 期間(`tipProbationMs`)中は
+  `tipProbationRate` を採る。`rollAudit` に opts `{category, rawDisposition}` を追加(省略時は従来挙動)。
+- **ルール変更の在庫即再適用**(`applyRulesToInventory(category)`): rules upsert/mute_category/learned tip 後に
+  呼ぶと、その category の classified 在庫(executionStatus=none かつ未 autoExecuted)へ
+  applyRulesAndCalibration を再評価し disposition/reason を更新する(AI 往復ゼロ)。基点は生提案
+  `rawDisposition ?? disposition` なので過去に tightness で締めた項目もルールが緩めれば即恩恵。
+  着火自体は呼び出し側(actions.ts)が executor.requestExecution で行う(循環 import 回避)。
+- **新 settings キーと既定値**: `learnedAuditFloor`(0.25)/`tipProbationMs`(604_800_000=1週間)/
+  `tipProbationRate`(0.5)/`binCalibrationMinSamples`(8, int)/`binOverturnGap`(0.25, 0..1)。
+
+## キューの並び一本化と起動時 runtime state（Batch3）
+
+- **並びを `scoreItem()` 純関数に一本化**(`queue.ts`): キューと案件 flow ビューが共有する。
+  score = stakes + (1-confidence) + 優先度係数(urgent=1.5/high=0.9/normal=0/low=-0.4)
+  + dueBoost(超過1.2/2日内0.6/7日内0.2/他0) + 手動 orderIndex×(-`ORDER_COEF`=0.02)
+  + auditGlance(general の auto-done succeeded かつ監査サンプル時 0.3)。手動 orderIndex は弱係数の
+  タイブレークに留め、横断キューの主役性を崩さない。各行に一語の `topReason`(期日/高ステークス/優先度/
+  確信度低)・一行説明 `surfaceReason`・滞留経過 `ageDays`・stale 検知 `staleDays`(STALE_DAYS=3)・
+  インライン取り消し用 `undoableLabel` を付与。
+- **止まった項目を最優先で再浮上**: 実行失敗(executionStatus='failed')と保留(status='blocked')を
+  キュー先頭に出す(起動時 reconcile で中断ジョブを failed に倒した分もここで拾う)。in_progress×human は
+  「あなたが着手中」レーンとして末尾に寄生表示。**defer-until(緩め操作)は導入しない**: tightness が
+  締めた escalate も含め escalate/human は常にキューに出して監査される(緩めは慎重にの非対称維持)。
+- **非永続 runtime state を Settings から分離**(`runtime-state.ts`): プロセス内メモリで preflight
+  `{tmuxOk, claudeOk, checkedAt, note}` と reconcile `{ranAt, recovered, failedOver}` の痕跡だけを保持する。
+  起動毎に再算出する一時状態で DB(§1.3 の system-of-record)にも Settings の JSON blob にも入れない。
+  初期値は preflight 未実施(checkedAt:null)で tmuxOk/claudeOk は楽観既定 true(UI はフラグが false に
+  倒れた時だけ警告)。in-flight 集計(実行中N/承認待ちM)は DB 由来の決定論値なので二重持ちせず
+  `executor.inFlightCount()` で都度算出する。
+
+## 実行ゲートと巻き戻し（点火ゲート・可逆性過大評価 / Batch4）
+
+- **可逆性過大評価の即締め**: software の auto succeeded を取り消したとき、worker が可逆
+  (`declaredReversible===true`)と自己申告したのに `rollbackPlan` が空(自己申告と実態が乖離)なら
+  『可逆性過大評価』として該当 category を即締める: `recordOutcome(category,'auto','escalate',{auditBad:true})`
+  と audit_bad ラベル記録の二点セット。**締め方向のみ**(緩めない)(`executor.ts`)。
+- **実行失敗は in_progress を維持**(従来は blocked): out.status==='failed' または res.ok=false の項目は
+  status を blocked にせず in_progress に保つ。再浮上の可視性は queue の executionStatus='failed' フィルタが担保。
+- **auto 着火経路の最終ゲート**: disposition='auto' なのに confidence==null の項目(人間が PATCH で直接
+  disposition=auto を書いた等、分類器/監査を経ていない疑い)は自動着火せず escalate に倒し『auto の出所が
+  分類器でないため安全側にエスカレートしました。』を記録する。
+- **`pauseAuto` 設定**(既定 false): 自動実行のみ一時停止し proposed に倒して痕跡を残す。人間のワンタップ
+  (POST /api/items/:id/execute)は継続する(§3.6-3 の手動版)。

@@ -63,8 +63,19 @@ claude mcp add --transport http winnow http://127.0.0.1:8787/mcp --scope user
 | `dueDate` | number（epoch ms） | 任意 | `null` | 期日。 |
 | `parentId` | string | 任意 | `null` | 親アイテム ID。 |
 | `classify` | boolean | 任意 | `true` | `false` を渡さない限り、捕獲後すぐに分類が走る。 |
+| `externalKey` | string | 任意 | `null` | 外部ソース由来の冪等キー。重複取り込み防止用（下記）。 |
+| `sourceUrl` | string（URL） | 任意 | `null` | 原典（課題 / PR / ドキュメント等）へ戻る URL。read-only の痕跡として保存するだけで、winnow は外部送出しない。 |
 
 **必須ルール（クロスフィールド）：** `title` / `body` のうち最低 1 つが非空文字列であること。両方空だと拒否される。
+
+### `externalKey` による冪等な再取り込み
+
+`externalKey` を渡すと、同じキーでの再 `capture` は**重複アイテムを作らない**。既存アイテムがあれば：
+
+- `body` が来ていれば、既存アイテムの本文末尾に `\n\n---\n` 区切りで追記して既存アイテムを返す。
+- `body` が無ければ既存アイテムをそのまま返す（no-op 同然）。
+
+いずれの場合も**再分類は発火しない**。取り込み cron / バッチ投入を繰り返しても分類器を溢れさせないための設計。
 
 > **精度のヒント：** `body` は分類器に渡る一次情報。会話ログ・背景・制約をそのまま貼るほど、確信度・ステークス・可逆性の見積もりが正確になる。タイトルだけより、雑でも本文をリッチに入れるほうが良い。
 
@@ -81,15 +92,24 @@ claude mcp add --transport http winnow http://127.0.0.1:8787/mcp --scope user
 - **リモートの Claude / 別マシンからは `127.0.0.1` に届かない。** MCP も REST も同一マシンのローカルプロセスからのみ到達可能。
 - リモートツールから捕獲したい場合は、**トンネリング＋認証を自前で用意する必要がある**。winnow 自体には認証が一切ない（下記）ため、トンネルの外側で必ず認証をかけること。具体的な公開手順とリスクは [`OPERATOR_GUIDE.md`](./OPERATOR_GUIDE.md) を参照。
 
-### 認証は無い
+### 認証は無い（が、同一オリジン保証はある）
 
-REST・MCP のどちらにも認証は存在しない（トークン・API キー・セッション・認証フックいずれも無し）。唯一のアクセス制御は loopback バインドのみ。つまり **同一マシン上の任意のローカルプロセス／ユーザーが、無認証で全エンドポイント（MCP 含む）を呼べる**。
+REST・MCP のどちらにも**認証は存在しない**（トークン・API キー・セッション・ユーザー識別子いずれも無し。設計判断は [`DECISIONS.md`](./DECISIONS.md) 「認証は作らない」）。同一マシン上のローカルプロセスが全エンドポイントに到達できる点は loopback バインドのままで変わらない。
+
+ただし `src/server/security.ts` が `/api`・`/mcp` 全体に **同一オリジン保証**の `onRequest` フックを 1 本張る。これは認証ではなく、ブラウザ経由の他オリジン誘導 / DNS rebinding を弾くための層：
+
+- **Origin / Host 許可リスト検証** — Host のホスト名が `127.0.0.1` / `localhost` / `::1` 集合に無ければ 403 `{error:"origin not allowed"}`。Origin / Referer があればそのホスト名も同様に検証。これは `/api`・`/mcp` の両方に課される。
+- **ローカルシークレット** — 起動時に `randomBytes(24)` で生成したシークレットを `index.html` の `window.__WINNOW_SECRET__` に注入し、ブラウザは `X-Winnow-Secret` ヘッダで送る。`/api` の**状態変更系（非 GET）**のみがこれを要求し、欠落すると 403 `{error:"missing local secret"}`。`GET /api/state` などの読取り系は不要。
+
+**`/mcp` はシークレットを免除される。** ローカルの `claude`（同一マシンの正規経路で、同一オリジンのシークレットを持てない）から到達するため、Host = `127.0.0.1` / `localhost` 検証で DNS rebinding を防げば十分という判断。`/mcp` には Origin/Host 検証のみが課される。
+
+> dev フロントエンド（Vite :5174、`NODE_ENV` 非 production）では Vite origin を許容しシークレットも免除される。
 
 ---
 
 ## REST API の要点
 
-MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経由・同一パス）。MCP と違い `projectId` / `sprintId` も設定できる。主要ルート（`src/server/api/routes.ts`）：
+MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経由・同一パス）。MCP と違い `projectId` / `sprintId` も設定できる。`externalKey` / `sourceUrl` は MCP・REST のどちらでも渡せる。主要ルート（`src/server/api/routes.ts`）：
 
 ### 状態スナップショット
 
@@ -126,8 +146,8 @@ MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経
 | メソッド・パス | 説明 |
 |---|---|
 | `GET /api/sessions` | セッション一覧。 |
-| `GET /api/sessions/:name/capture` | ペインテキストの取得。 |
-| `GET /api/sessions/:name/attach` | アタッチコマンドの取得。 |
+| `GET /api/sessions/:name/capture` | ペインテキストの取得。**既知 session のみ**（`listSessions` の集合）。未知なら 404 `{error:"unknown session"}`。 |
+| `GET /api/sessions/:name/attach` | アタッチコマンドの取得。同上の既知 session 照合（未知は 404）。 |
 | `POST /api/ai/init` | ドライバを起動しセッション一覧を返す。 |
 
 ### 設定・サマリ
@@ -136,6 +156,8 @@ MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経
 |---|---|
 | `PATCH /api/settings` | チューニング・起動コマンド設定の更新（[`CONFIG.md`](./CONFIG.md) 参照）。 |
 | `GET /api/summary` | 週次サマリ。 |
+| `GET /api/export` | 全テーブルを版数付き JSON で書き出す（read-only。秘密は伏字化され、winnow は外部送出しない）。 |
+| `POST /api/import` | 版数付き JSON の復元。**空 DB 限定**（items / projects 件数 0）。版数不一致または非空 DB は 409。 |
 
 ### 案件 / スプリント / ルール
 
@@ -152,17 +174,24 @@ MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経
 | `GET /ws/terminal` | `tmux capture-pane` をストリームする WebSocket。 |
 | 静的配信 + SPA フォールバック | `web/dist` が存在する場合のみ。 |
 
-### `patchSchema` が除外するフィールド
+### `patchSchema` が許可 / 除外するフィールド
 
-`PATCH /api/items/:id` は `.strict()`（未知キーを拒否）。さらに以下のフィールドは**意図的に除外**され、PATCH では変更できない。これらは専用の action / audit / execute / cancel ルート経由でのみ動く（記帳・来歴の整合性のため）：
+`PATCH /api/items/:id` は `.strict()`（未知キーは 400）。**人間が手で編集してよいのは編集系フィールドのみ。**
 
-```
-auditSampled, humanOverrode, autoExecuted,
-executionStatus, executionResult,
-createdAt, updatedAt, id
-```
+PATCH で許可されるフィールド：`title, body, kind, rung, parentId, orderIndex, status, process, domain, projectDir, projectId, sprintId, dueDate, priority`、および楽観ロック用の `expectedUpdatedAt`。
 
-PATCH で許可されるフィールド：`title, body, kind, rung, parentId, orderIndex, status, disposition, confidence, reason, stakes, reversibility, category, process, domain, projectDir, projectId, sprintId, dueDate, priority`。
+以下のフィールドは**意図的に除外**され、PATCH では変更できない。専用の action / audit / execute / cancel ルート経由でのみ動く：
+
+- **分類器 / 較正フィールド** — `disposition, confidence, reason, stakes, reversibility, category, rawDisposition, rawConfidence`。背骨「口はバカ・分類器が賢い」の機械的強制（人間が `disposition=auto` を直書きして監査をバイパスし auto-leaf を注入する穴を塞ぐ）。`disposition` の人間変更は `POST /api/items/:id/action`（`reclassify`）に一本化されている（`label_event` を出す唯一の正規路）。
+- **監査 / 自動化 / 来歴** — `auditSampled, humanOverrode, autoExecuted, executionStatus, executionResult, createdAt, updatedAt, id`、および execute が書き戻す実行痕跡（`executionSummary, executionOutput, rollbackPlan, declaredReversible, artifacts` 等）。
+
+#### 楽観ロック（409 stale）
+
+`expectedUpdatedAt` を渡すと、その値が現在の `updatedAt` と一致しない場合に 409 `{error:"stale", current:<item>}` で弾く（全列上書きによる黙った巻き戻りの防止）。未指定ならチェックしない（後方互換）。
+
+#### `projectDir` 検証
+
+PATCH の `projectDir` は**絶対パス必須・realpath 化・機微パス拒否**で検証され、不正なら即時 400 `{error:<理由>}`。捕獲（capture / decompose）は不正でも拒否せず無効化 + escalate 注記に倒すが、ここは人間の直接編集なので即座に気づかせる。
 
 ---
 
