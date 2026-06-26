@@ -47,7 +47,11 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
   const prioC = PRIO[x.priority] ?? 0;
   const dueC = dueBoost(x);
   const orderC = -x.orderIndex * ORDER_COEF;
-  const score = stakesC + confC + prioC + dueC + orderC;
+  // auto-done general を僅かに前出し: 監査サンプル抽出が summary を glance しやすいよう
+  // 取消ハンドルを上位に寄せる (Batch2 サンプラ優先抽出の土台。topReason には出さない)。
+  const auditGlanceC =
+    x.domain === "general" && x.autoExecuted && x.executionStatus === "succeeded" ? 0.3 : 0;
+  const score = stakesC + confC + prioC + dueC + orderC + auditGlanceC;
 
   // 最大寄与カテゴリを決定論で選ぶ(添字アクセスを避け reduce で max を取る)。
   const contribs: { label: Exclude<TopReason, null>; value: number }[] = [

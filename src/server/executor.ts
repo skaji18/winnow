@@ -7,7 +7,8 @@ import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
 import { buildContextBlock } from "./context.js";
 import type { Item } from "./domain.js";
-import { items, jobs } from "./repo.js";
+import { items, jobs, labels, settings } from "./repo.js";
+import { recordOutcome } from "./calibration.js";
 
 // 実行とトリガー (REQUIREMENTS §3.4). 自動実行は可逆性で段を分ける:
 //  可逆な実行 → 自動着火 / 不可逆・高ステークス → 提案して人間ワンタップ承認。
@@ -44,11 +45,57 @@ function crossRepoSiblingPending(item: Item): boolean {
   );
 }
 
+/**
+ * 未確定ノード配下リーフの点火ゲート (§3.4/§3.6-3 締めるのは速く)。crossRepoSiblingPending と
+ * 同型の決定論ガード(推論なし・安全側に倒す)。次の3条件の OR が真なら auto 着火せず proposed に
+ * 倒す。DAG/依存自動推論/blockedBy 新スキーマは作らず、既存 parentId/orderIndex/status のみで判定:
+ *  (a) 親が未確定 (parent.uncertaintyResolved===false): 上の方向が固まる前に下を実行すると外す。
+ *  (b) 親を人間が保留 (parent.status==='blocked'): 親解除待ち。
+ *  (c) 同一親×上流 (orderIndex が前) の兄弟が未完: 上流完了待ち。
+ * parentId が null なら全条件 false (現状維持)。承認(approveExecution)はこのガードを通らない
+ * =ワンタップの逃げ道 (crossRepo と対称)。
+ */
+function uncertainNodeOrUpstreamPending(item: Item): boolean {
+  if (!item.parentId) return false;
+  const parent = items.get(item.parentId);
+  if (!parent) return false;
+  // (a) 親未確定 / (b) 親 blocked。
+  if (parent.uncertaintyResolved === false) return true;
+  if (parent.status === "blocked") return true;
+  // (c) 同一親×上流(orderIndex 小)に未完の兄弟がいる。
+  return items.children(item.parentId).some(
+    (o) =>
+      o.id !== item.id &&
+      o.orderIndex < item.orderIndex &&
+      o.status !== "done" &&
+      o.status !== "rejected" &&
+      o.executionStatus !== "succeeded" &&
+      o.executionStatus !== "cancelled",
+  );
+}
+
+/** 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。 */
+function uncertainGateReason(item: Item): string {
+  if (item.parentId) {
+    const parent = items.get(item.parentId);
+    if (parent) {
+      if (parent.uncertaintyResolved === false)
+        return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
+      if (parent.status === "blocked") return "親が保留(blocked)中です。＝親解除待ち";
+    }
+  }
+  return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
+}
+
 interface ExecuteOut {
   status: "succeeded" | "failed" | "needs_human";
   summary: string;
   output: string;
   reviewTask?: string;
+  // software 向け任意フィールド (申告なし=undefined=現状不変・後方互換)。
+  rollbackPlan?: string; // 変更ファイル一覧＋巻き戻す git コマンド
+  artifacts?: string[]; // 外部に生じた成果物の自由文/URL (read-only 痕跡)
+  reversible?: boolean; // この実行が安く巻き戻せるか (可逆性自己申告)
 }
 
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
@@ -61,6 +108,17 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
   // 再浮上した failed 項目の再実行 (Batch5 のワンタップ / 起動時 reconcile が failed に倒した
   // 項目) はここを通って再着火する。
   if (item.executionStatus && item.executionStatus !== "none" && item.executionStatus !== "failed") return item;
+  // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution は自動着火経路専用
+  // (キュー掃き出し・classify末尾の即時着火・在庫再適用)。approveExecution は runExecution を
+  // 直呼びしここを通らない=手動承認の逃げ道は止めない。proposed に倒して痕跡を残す。
+  if (settings.get().pauseAuto) {
+    return items.update(itemId, {
+      executionStatus: "proposed",
+      executionResult: "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。",
+    });
+  }
+  // Batch5 申し送り: ここ(kindチェックの直前)に auto source 検証(confidence==null なら escalate)を
+  // 挿入する予定。本バッチでは触らない。
   if (item.kind !== "leaf") {
     return items.update(itemId, {
       executionResult: "ノードは直接実行できません。先に分解してください。",
@@ -75,6 +133,13 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
     return items.update(itemId, {
       executionStatus: "proposed",
       executionResult: "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。",
+    });
+  }
+  if (uncertainNodeOrUpstreamPending(item)) {
+    // 未確定ノード配下/上流未完: 親確定・上流完了を待ってから着火 (最上流の制約を先に見せる)。
+    return items.update(itemId, {
+      executionStatus: "proposed",
+      executionResult: uncertainGateReason(item),
     });
   }
   if (crossRepoSiblingPending(item)) {
@@ -107,7 +172,16 @@ function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | nu
     // succeeded→done。それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
     status: succeeded ? "done" : "in_progress",
     autoExecuted: true,
+    // executionResult は後方互換で連結文字列を維持(UI/キュー一行が参照)。
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
+    // 成果物の分離保持: summary/output を分け、software のみ rollbackPlan を持つ。
+    executionSummary: out.summary ?? null,
+    executionOutput: out.output ?? null,
+    rollbackPlan: item.domain === "software" ? (out.rollbackPlan ?? null) : null,
+    declaredReversible: typeof out.reversible === "boolean" ? out.reversible : null,
+    // 外部副作用 artifacts は JSON 文字列で read-only 痕跡として保持 (winnow は能動操作しない)。
+    artifacts:
+      Array.isArray(out.artifacts) && out.artifacts.length ? JSON.stringify(out.artifacts) : null,
   });
 
   // レビューをパイプラインに戻す (§3.5). 継ぎ目=チェックポイントが実装ポイント。
@@ -261,11 +335,47 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   return runExecution(itemId);
 }
 
-/** 自動実行を安く取り消す (§4-4 fire-and-forgetにしない・可逆&可視)。 */
+/**
+ * 自動実行を安く取り消す (§4-4 fire-and-forgetにしない・可逆&可視)。
+ * (1) 巻き戻し手順の提示: worker 自己申告の rollbackPlan があれば人間へ見せる文言にする
+ *     (winnow は自動実行しない=人間ワンタップ)。
+ * (2) 可逆性過大評価の信号: software auto succeeded を取り消したとき、可逆と自己申告したのに
+ *     巻き戻し手順が空(自己申告と実態が乖離)なら『可逆性過大評価』として該当 category へ即締め
+ *     (recordOutcome auditBad + audit_bad ラベルの二点セット。actions.ts recordAudit と同型)。
+ */
 export async function cancelExecution(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+  // 冪等: 既に cancelled なら再発火しない (多重 POST /cancel で audit_bad を二重計上しない)。
+  if (item.executionStatus === "cancelled") return item;
+
+  // (1) 巻き戻し手順の提示 (自動実行しない=人間ワンタップ)。
+  const note = item.rollbackPlan
+    ? `取り消されました(痕跡は履歴に残ります)。以下は worker が申告した巻き戻し手順です(自動実行しません。必要なら手動で1タップ実行してください):\n\n${item.rollbackPlan}`
+    : "取り消されました(痕跡は履歴に残ります)。副作用は自動では巻き戻されません。";
+
+  // (2) 可逆性過大評価: 可逆と申告したのに巻き戻し手順が空 = 自己申告と実態が乖離。
+  const overclaimed =
+    item.domain === "software" &&
+    item.autoExecuted &&
+    item.executionStatus === "succeeded" &&
+    item.declaredReversible === true &&
+    (!item.rollbackPlan || !item.rollbackPlan.trim());
+  if (overclaimed && item.category) {
+    // 締め方向のみ (§3.6-3 緩めない)。escalate 固定の learned rule を即立てる。
+    recordOutcome(item.category, "auto", "escalate", { auditBad: true });
+    labels.record({
+      itemId,
+      action: "audit_bad",
+      fromDisposition: "auto",
+      toDisposition: "escalate",
+      category: item.category,
+    });
+  }
+
   return items.update(itemId, {
     executionStatus: "cancelled",
     status: "rejected",
-    executionResult: "取り消されました(痕跡は履歴に残ります)。",
+    executionResult: note,
   });
 }

@@ -39,6 +39,12 @@ export interface Item {
   auditSampled: boolean;
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+  // 実行成果物の分離保持 (§3.4)。サーバ未提供時 undefined=現状維持。UI 実装は Batch6。
+  executionSummary?: string | null;
+  executionOutput?: string | null;
+  rollbackPlan?: string | null; // software 巻き戻し手順 (取り消し時に提示)
+  declaredReversible?: boolean | null; // 可逆性自己申告 (null=未申告の三値)
+  artifacts?: string | null; // 外部副作用 artifacts (JSON 文字列。UI で JSON.parse)
   domain: "software" | "general";
   projectDir: string | null;
   projectId: string | null;
