@@ -15,10 +15,14 @@ export function Kanban({
   items,
   onMove,
   renderCard,
+  onStatusSelect,
 }: {
   items: Item[];
   onMove: (id: string, status: string) => void;
   renderCard: (it: Item) => ReactNode;
+  // a11y: DnD に加えキーボード/SR でも到達できる status 変更 select を各カードに出す。
+  // 未指定なら現状維持(DnD のみ)。Projects/Sprints は onStatusSelect={onMove} を渡す。
+  onStatusSelect?: (id: string, status: string) => void;
 }) {
   const [over, setOver] = useState<string | null>(null);
 
@@ -30,6 +34,8 @@ export function Kanban({
           <div
             key={col.key}
             className={`board-col${over === col.key ? " drag-over" : ""}`}
+            role="group"
+            aria-label={col.label}
             onDragOver={(e) => {
               e.preventDefault();
               if (over !== col.key) setOver(col.key);
@@ -51,6 +57,7 @@ export function Kanban({
               <div
                 key={it.id}
                 className="board-card"
+                tabIndex={0}
                 draggable
                 onDragStart={(e) => {
                   e.dataTransfer.setData("text/plain", it.id);
@@ -58,6 +65,20 @@ export function Kanban({
                 }}
               >
                 {renderCard(it)}
+                {onStatusSelect && (
+                  <select
+                    value={col.drop}
+                    aria-label="ステータス変更"
+                    title="ステータス変更(ドラッグの代わりにも使えます)"
+                    onChange={(e) => onStatusSelect(it.id, e.target.value)}
+                  >
+                    {COLUMNS.map((c) => (
+                      <option key={c.key} value={c.drop}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             ))}
             {cards.length === 0 && <div className="board-empty muted">ここにドロップ</div>}

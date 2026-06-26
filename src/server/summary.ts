@@ -50,8 +50,9 @@ export function weekly(): WeeklySummary {
     since,
   );
   const auto = autoJobs > 0 ? autoJobs : autoSnapshot;
-  const autoPrev = jobs.succeededExecuteItemsSince(prevSince) - jobs.succeededExecuteItemsSince(since);
-  const autoPrevAdj = autoPrev < 0 ? 0 : autoPrev;
+  // 先週窓 [prevSince, since) を直接 DISTINCT で数える(包含窓の差分だと両窓に跨る itemId が
+  // 相殺され過小になる罠を回避)。escalatedPrev と同じ直接窓方式に揃える。
+  const autoPrevAdj = jobs.succeededExecuteItemsBetween(prevSince, since);
 
   // --- escalate 件数: classifier は分類時に LabelEvent を出さないので、件数は
   // items の disposition='escalate' AND classified を当面維持 (イベント基準は方向別で取る)。

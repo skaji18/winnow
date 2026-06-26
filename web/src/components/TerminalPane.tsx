@@ -36,12 +36,14 @@ export function TerminalPane({ session }: { session: string | null }) {
           <button
             onClick={() => navigator.clipboard?.writeText(attachCmd)}
             title="実端末でアタッチするコマンドをコピー"
+            aria-label="実端末でアタッチするコマンドをコピー"
           >
             実端末で開く（コマンドをコピー）
           </button>
         )}
       </div>
-      <div className="term" ref={boxRef}>
+      {/* role=log だが aria-live は付けない: 端末更新を SR が読み上げ続けないように。 */}
+      <div className="term" role="log" ref={boxRef}>
         {text}
       </div>
       {attachCmd && <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>{attachCmd}</div>}

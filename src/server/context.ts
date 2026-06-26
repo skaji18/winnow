@@ -22,7 +22,7 @@ const RE_GH_TOKEN = /gh[pousr]_[A-Za-z0-9]{20,}/g;
 const RE_AWS_KEY = /AKIA[0-9A-Z]{16}/g;
 const RE_HIGH_ENTROPY = /[A-Za-z0-9+/=]{40,}/g;
 
-function redactSecrets(s: string): string {
+export function redactSecrets(s: string): string {
   return s
     .replace(RE_GH_TOKEN, "[REDACTED-TOKEN]")
     .replace(RE_AWS_KEY, "[REDACTED-AWS-KEY]")

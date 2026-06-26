@@ -45,6 +45,9 @@ export interface Item {
   rollbackPlan?: string | null; // software 巻き戻し手順 (取り消し時に提示)
   declaredReversible?: boolean | null; // 可逆性自己申告 (null=未申告の三値)
   artifacts?: string | null; // 外部副作用 artifacts (JSON 文字列。UI で JSON.parse)
+  // 外部取り込み痕跡 (read-only)。サーバ未提供時 undefined=チップ非表示=現状維持。
+  sourceUrl?: string | null;
+  externalKey?: string | null;
   domain: "software" | "general";
   projectDir: string | null;
   projectId: string | null;
@@ -55,8 +58,34 @@ export interface Item {
   updatedAt: number;
 }
 
+// 人間のさばき=ラベル (server domain.ts LabelAction のミラー。ドリフト禁止)。
+export type LabelAction =
+  | "do"
+  | "demote"
+  | "reclassify"
+  | "mute_category"
+  | "approve"
+  | "reject"
+  | "override"
+  | "audit_ok"
+  | "audit_bad";
+
+// server queue.ts TopReason のミラー。
+export type TopReason = "期日" | "高ステークス" | "優先度" | "確信度低" | null;
+
 export interface QueueItem extends Item {
   isAudit: boolean;
+  topReason: TopReason;
+  lane: "queue" | "in_progress";
+  surfaceReason: string;
+  staleDays: number | null;
+  ageDays: number | null;
+  // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。サーバ未提供時 undefined=非表示。
+  undoableLabel?: {
+    action: LabelAction;
+    fromDisposition: Disposition | null;
+    toDisposition: Disposition | null;
+  } | null;
 }
 
 export interface Project {
@@ -107,6 +136,8 @@ export interface Settings {
   claudeWorkerCmd: string;
   useHeadless: boolean;
   productContext: string;
+  // 自動実行の一時停止スイッチ (server domain.ts と整合。ヘッダトグルが消費)。
+  pauseAuto: boolean;
 }
 
 export interface WeeklySummary {
@@ -122,7 +153,24 @@ export interface WeeklySummary {
   auditBad: number;
   stale: number;
   failed: number;
+  // 要棚卸し件数 (server summary.ts と整合)。
+  needsReview: number;
   line: string;
+}
+
+// 起動時 runtime state のミラー (server runtime-state.ts)。
+export interface RuntimeState {
+  preflight: {
+    tmuxOk: boolean;
+    claudeOk: boolean;
+    checkedAt: number | null;
+    note: string | null;
+  };
+  reconcile: {
+    ranAt: number | null;
+    recovered: number;
+    failedOver: number;
+  };
 }
 
 export interface Job {
@@ -148,6 +196,17 @@ export interface AppState {
   recentJobs: Job[];
   projects: Project[];
   sprints: Sprint[];
+  // 起動時 preflight/reconcile 痕跡 + in-flight 集計 (server /api/state)。
+  runtime?: RuntimeState;
+  inFlight?: { running: number; proposed: number };
+  // AI 未接続→トップバナー用。ok=false のとき reason を出す。サーバ未提供時 undefined=非表示。
+  preflight?: { ok: boolean; reason: string | null };
+  // 全期間 LabelEvent 総数 (cold-banner 初日=実績ゼロ判定)。
+  totalLabels?: number;
+  // 設定『直近の捕獲』表示用。
+  captureStats?: { count: number; lastAt: number | null };
+  // MCP 接続スニペット用 (例 http://localhost:8787/mcp)。
+  mcpEndpoint?: string;
 }
 
 // Agile/Jira 文脈の語彙 (内部キーは不変)。
@@ -180,4 +239,15 @@ export const STATUS_LABEL: Record<string, string> = {
   done: "完了",
   rejected: "却下",
   blocked: "停滞",
+  archived: "アーカイブ",
 };
+
+// stakes/reversibility を色だけに頼らず高/中/低の語で併記する (a11y: 色以外の手がかり §4-2)。
+export function STAKES_LABEL(v: number | null): string {
+  if (v == null) return "–";
+  return v >= 0.66 ? "高" : v >= 0.33 ? "中" : "低";
+}
+export function REVERSIBILITY_LABEL(v: number | null): string {
+  if (v == null) return "–";
+  return v >= 0.66 ? "高" : v >= 0.33 ? "中" : "低";
+}

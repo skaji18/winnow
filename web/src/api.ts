@@ -14,7 +14,12 @@ async function j<T>(url: string, opts?: RequestInit): Promise<T> {
     ...opts,
     headers: { ...headers, ...(opts?.headers as Record<string, string> | undefined) },
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    // 楽観ロック競合(409)は専用接頭辞で投げ、UI が『他所で更新された→再取得』へ分岐できるように。
+    const text = await res.text();
+    if (res.status === 409) throw new Error(`CONFLICT ${text}`);
+    throw new Error(`${res.status} ${text}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -31,10 +36,18 @@ export const api = {
     sprintId?: string | null;
     priority?: Priority;
     dueDate?: number | null;
+    sourceUrl?: string | null;
   }) => j<Item>("/api/items", { method: "POST", body: JSON.stringify(input) }),
 
-  updateItem: (id: string, patch: Partial<Item>) =>
-    j<Item>(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  // expectedUpdatedAt を渡すと楽観ロックが有効化される(サーバが現在の updatedAt と
+  // 不一致なら 409 CONFLICT)。未指定=チェックなし=後方互換。
+  updateItem: (id: string, patch: Partial<Item>, expectedUpdatedAt?: number) =>
+    j<Item>(`/api/items/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(
+        expectedUpdatedAt != null ? { ...patch, expectedUpdatedAt } : patch,
+      ),
+    }),
 
   deleteItem: (id: string) => j(`/api/items/${id}`, { method: "DELETE" }),
 
@@ -53,6 +66,9 @@ export const api = {
     }),
 
   execute: (id: string) => j(`/api/items/${id}/execute`, { method: "POST" }),
+  // general成果物『この方向で直す』: 一行指示を渡して同じ execute を再走させる。
+  reExecute: (id: string, instruction: string) =>
+    j(`/api/items/${id}/execute`, { method: "POST", body: JSON.stringify({ instruction }) }),
   approve: (id: string) => j(`/api/items/${id}/approve`, { method: "POST" }),
   cancel: (id: string) => j<Item>(`/api/items/${id}/cancel`, { method: "POST" }),
 
@@ -61,6 +77,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, to }),
     }),
+
+  // 処分=ラベルの Undo (直近1手の逆適用)。
+  undoLabel: (id: string) => j<Item>(`/api/items/${id}/undo-label`, { method: "POST" }),
+  // 即締め: muteCategory の対称『この種類は当面上げて』(escalate 固定 rule)。
+  escalateCategory: (id: string) =>
+    j<Item>(`/api/items/${id}/escalate-category`, { method: "POST" }),
 
   audit: (id: string, ok: boolean) =>
     j<Item>(`/api/items/${id}/audit`, { method: "POST", body: JSON.stringify({ ok }) }),

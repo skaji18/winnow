@@ -12,26 +12,40 @@ const STATUSES = ["inbox", "classified", "in_progress", "review", "done", "block
 
 export function ProjectsView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [sel, setSel] = useState<string | null>(state.projects[0]?.id ?? null);
+  const [showArchived, setShowArchived] = useState(false);
   const project = state.projects.find((p) => p.id === sel) ?? null;
+  // アーカイブを既定で畳む。sel が archived 化されても detail は参照表示できる。
+  const visible = state.projects.filter((p) => showArchived || p.status !== "archived");
 
   return (
     <div className="proj-layout">
       <div className="proj-side">
         <NewProject onChange={onChange} onCreated={setSel} />
-        {state.projects.map((p) => (
+        <label className="row muted" style={{ gap: 6, fontSize: 11.5, padding: "2px 0" }}>
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+          />
+          アーカイブを表示
+        </label>
+        {visible.map((p) => (
           <button
             key={p.id}
             className={`proj-pick ${sel === p.id ? "sel" : ""}`}
             onClick={() => setSel(p.id)}
           >
-            <b>{p.name}</b>
+            <b>
+              {p.name}
+              {p.status === "archived" && <span className="muted">（アーカイブ）</span>}
+            </b>
             <span className="muted" style={{ fontSize: 11 }}>
               {p.mode === "board" ? "ボード" : "フロー"} ·{" "}
               {state.items.filter((i) => i.projectId === p.id).length}件
             </span>
           </button>
         ))}
-        {state.projects.length === 0 && <p className="muted">案件がありません。</p>}
+        {visible.length === 0 && <p className="muted">案件がありません。</p>}
       </div>
 
       <div className="proj-main">
@@ -115,6 +129,18 @@ function ProjectDetail({
           <option value="board">ボード表示</option>
           <option value="flow">フロー表示</option>
         </select>
+        {project.status === "archived" ? (
+          <button onClick={() => api.updateProject(project.id, { status: "active" }).then(onChange)}>
+            復元
+          </button>
+        ) : (
+          <button
+            title="アーカイブ(タスクは残り、案件ピッカーで畳まれます)"
+            onClick={() => api.updateProject(project.id, { status: "archived" }).then(onChange)}
+          >
+            アーカイブ
+          </button>
+        )}
         <button
           className="danger"
           onClick={() => {
@@ -169,7 +195,25 @@ function ProjectBoard({
       </p>
       <Kanban
         items={items}
-        onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
+        onMove={(id, status) => {
+          // 楽観ロック: 現在の updatedAt を渡し、CONFLICT(他所更新)なら再取得へ。
+          const cur = items.find((i) => i.id === id);
+          api
+            .updateItem(id, { status }, cur?.updatedAt)
+            .then(onChange)
+            .catch((e) => {
+              if (String(e.message).startsWith("CONFLICT")) onChange();
+            });
+        }}
+        onStatusSelect={(id, status) => {
+          const cur = items.find((i) => i.id === id);
+          api
+            .updateItem(id, { status }, cur?.updatedAt)
+            .then(onChange)
+            .catch((e) => {
+              if (String(e.message).startsWith("CONFLICT")) onChange();
+            });
+        }}
         renderCard={(it) => (
           <>
             <div className="board-card-title">{it.title}</div>
@@ -237,7 +281,14 @@ function FlowList({ items, onChange }: { items: Item[]; onChange: () => void }) 
             </select>
             <select
               value={it.status}
-              onChange={(e) => api.updateItem(it.id, { status: e.target.value }).then(onChange)}
+              onChange={(e) =>
+                api
+                  .updateItem(it.id, { status: e.target.value }, it.updatedAt)
+                  .then(onChange)
+                  .catch((err) => {
+                    if (String(err.message).startsWith("CONFLICT")) onChange();
+                  })
+              }
             >
               {STATUSES.map((s) => (
                 <option key={s} value={s}>

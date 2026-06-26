@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db.js";
+import { validateClaudeCmd } from "./security.js";
 import {
   type CategoryStat,
   type Disposition,
@@ -82,6 +83,18 @@ export const items = {
   get(id: string): Item | null {
     const r = db.prepare("SELECT * FROM items WHERE id = ?").get(id) as Row | undefined;
     return r ? mapItem(r) : null;
+  },
+  /**
+   * 外部取り込み(capture)の直近統計 (設定の『直近の捕獲』表示用)。externalKey か sourceUrl を
+   * 持つ Item を「外部取り込み由来」とみなし、件数と最新 createdAt を返す。0 件なら lastAt=null。
+   */
+  captureStats(): { count: number; lastAt: number | null } {
+    const r = db
+      .prepare(
+        "SELECT COUNT(*) AS c, MAX(createdAt) AS m FROM items WHERE externalKey IS NOT NULL OR sourceUrl IS NOT NULL",
+      )
+      .get() as { c: number; m: number | null };
+    return { count: r.c, lastAt: r.m ?? null };
   },
   // 外部冪等キーで既存を検索 (capture の重複 no-op/追記)。非null時一意(部分ユニーク索引)。
   findByExternalKey(key: string): Item | null {
@@ -229,6 +242,10 @@ export const labels = {
       .prepare("SELECT * FROM label_events ORDER BY createdAt ASC")
       .all() as LabelEvent[];
   },
+  /** 全期間の LabelEvent 総数 (cold-banner 初日=実績ゼロ判定に使う)。 */
+  total(): number {
+    return (db.prepare("SELECT COUNT(*) AS c FROM label_events").get() as { c: number }).c;
+  },
   since(ts: number): LabelEvent[] {
     return db
       .prepare("SELECT * FROM label_events WHERE createdAt >= ? ORDER BY createdAt DESC")
@@ -238,6 +255,17 @@ export const labels = {
     return db
       .prepare("SELECT * FROM label_events WHERE itemId = ? ORDER BY createdAt DESC")
       .all(itemId) as LabelEvent[];
+  },
+  /** 直近1件の label_event (Undo=直近1手の逆適用の起点)。無ければ null。 */
+  lastForItem(itemId: string): LabelEvent | null {
+    const r = db
+      .prepare("SELECT * FROM label_events WHERE itemId = ? ORDER BY createdAt DESC LIMIT 1")
+      .get(itemId) as LabelEvent | undefined;
+    return r ?? null;
+  },
+  /** label_event を1件物理削除する (Undo の逆適用後に教師信号も巻き戻す)。 */
+  deleteById(id: string): void {
+    db.prepare("DELETE FROM label_events WHERE id = ?").run(id);
   },
   /** カテゴリ × アクション群で件数を数える (summary の方向別締緩・符号ズレ補正の母数)。 */
   countByCategoryAction(category: string, actions: LabelAction[], since: number): number {
@@ -362,6 +390,21 @@ export const categoryStats = {
       field === "overturnedToAuto" ? 1 : 0,
     );
   },
+  /**
+   * bump の逆操作 (Undo=直近1手の逆適用)。該当行のカウンタを -1 する (0 未満にはしない=
+   * MAX(0,...))。行が無ければ何もしない。教師信号の巻き戻しに使う (recordOutcome の bump と対称)。
+   */
+  unbump(
+    category: string,
+    aiDisposition: Disposition,
+    field: "agreed" | "overturned" | "overturnedToAuto",
+    confBin = 0,
+  ): void {
+    db.prepare(
+      `UPDATE category_stats SET ${field} = MAX(0, ${field} - 1)
+       WHERE category = ? AND aiDisposition = ? AND confBin = ?`,
+    ).run(category, aiDisposition, confBin);
+  },
   all(): CategoryStat[] {
     return db.prepare("SELECT * FROM category_stats").all() as CategoryStat[];
   },
@@ -436,6 +479,20 @@ export const jobs = {
            WHERE status='succeeded' AND kindOfWork='execute' AND finishedAt >= ?`,
         )
         .get(ts) as { c: number }
+    ).c;
+  },
+  /**
+   * 指定窓 [from, to) 内に成功した execute ジョブの DISTINCT itemId 数。
+   * 先週比(autoPrev)を差分でなく直接窓で数えるため(包含窓の DISTINCT 差で相殺・過小になる罠を回避)。
+   */
+  succeededExecuteItemsBetween(from: number, to: number): number {
+    return (
+      db
+        .prepare(
+          `SELECT COUNT(DISTINCT itemId) AS c FROM jobs
+           WHERE status='succeeded' AND kindOfWork='execute' AND finishedAt >= ? AND finishedAt < ?`,
+        )
+        .get(from, to) as { c: number }
     ).c;
   },
 };
@@ -604,15 +661,41 @@ export function importData(payload: ImportPayload): {
   // settings はシード行を上書き(import の設定で復元)。
   if (payload.settings) {
     const merged = { ...DEFAULT_SETTINGS, ...payload.settings } as Settings;
+    // import が PATCH /api/settings の起動コマンド許可リストを迂回する穴を塞ぐ。
+    // claudeControlCmd/WorkerCmd を validateClaudeCmd で検証し、不正なら DEFAULT へ落とす
+    // (settings 検証の単一窓口に揃える。RCE 面を import 経路からも閉じる)。
+    if (!validateClaudeCmd(merged.claudeControlCmd, merged.claudeAllowedFlags)) {
+      merged.claudeControlCmd = DEFAULT_SETTINGS.claudeControlCmd;
+    }
+    if (!validateClaudeCmd(merged.claudeWorkerCmd, merged.claudeAllowedFlags)) {
+      merged.claudeWorkerCmd = DEFAULT_SETTINGS.claudeWorkerCmd;
+    }
     db.prepare("UPDATE settings SET json = ? WHERE id = 1").run(JSON.stringify(merged));
   }
-  return {
-    projects: restoreRows("projects", payload.projects ?? []),
-    sprints: restoreRows("sprints", payload.sprints ?? []),
-    items: restoreRows("items", payload.items ?? []),
-    labels: restoreRows("label_events", payload.labels ?? []),
-    rules: restoreRows("rules", payload.rules ?? []),
-    categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
-    jobs: restoreRows("jobs", payload.jobs ?? []),
-  };
+
+  // items.parentId は即時(非DEFERRABLE) FK。export は親→子順を保証しないため、
+  // foreign_keys=ON のまま子→親順に INSERT すると FK 違反 throw する。
+  // better-sqlite3 は db.transaction 内の PRAGMA を無視するため、トランザクション外で
+  // foreign_keys=OFF にして restoreRows 群を流し、foreign_key_check で整合確認後 ON に戻す。
+  db.pragma("foreign_keys = OFF");
+  try {
+    const result = {
+      projects: restoreRows("projects", payload.projects ?? []),
+      sprints: restoreRows("sprints", payload.sprints ?? []),
+      items: restoreRows("items", payload.items ?? []),
+      labels: restoreRows("label_events", payload.labels ?? []),
+      rules: restoreRows("rules", payload.rules ?? []),
+      categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
+      jobs: restoreRows("jobs", payload.jobs ?? []),
+    };
+    const fkViolations = db.pragma("foreign_key_check") as unknown[];
+    if (fkViolations.length > 0) {
+      throw new Error(
+        `import: foreign_key_check failed: ${JSON.stringify(fkViolations)}`,
+      );
+    }
+    return result;
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
 }

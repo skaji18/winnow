@@ -3,7 +3,7 @@ import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
-import { items, labels, rules } from "./repo.js";
+import { categoryStats, items, labels, rules } from "./repo.js";
 import { confBinOf } from "./text.js";
 
 /**
@@ -39,7 +39,8 @@ export function doIt(itemId: string): Item | null {
   }
   // 是認=agreed。aiDisposition は「生提案」(rawDisposition、null時は disposition にフォールバック)。
   // confBin も生 confidence(rawConfidence ?? confidence)から算出して較正母数の汚染を避ける。
-  const rawDisp = item.rawDisposition ?? item.disposition;
+  // env-escalated(生提案なし)は較正母数に積まない: rawDisp を null に潰して下の if でスキップ。
+  const rawDisp = item.envEscalated ? null : (item.rawDisposition ?? item.disposition);
   if (rawDisp) {
     recordOutcome(item.category, rawDisp, rawDisp, {
       confBin: confBinOf(item.rawConfidence ?? item.confidence),
@@ -81,10 +82,13 @@ export function reclassify(itemId: string, to: Disposition): Item | null {
   // 覆しは「生提案 vs 人間最終」で判定する (rawDisposition、null時は from にフォールバック)。
   // tightness が auto→escalate に締めた項目を人間が auto に戻したケースは、生提案 auto が
   // 正しかった証拠なので overturnedToAuto に積まれるべき。confBin も生 confidence から算出。
-  const rawDisp = item.rawDisposition ?? from;
-  recordOutcome(item.category, rawDisp, to, {
-    confBin: confBinOf(item.rawConfidence ?? item.confidence),
-  });
+  // env-escalated(生提案なし)は較正母数に積まない: rawDisp を null に潰して recordOutcome を呼ばない。
+  const rawDisp = item.envEscalated ? null : (item.rawDisposition ?? from);
+  if (rawDisp) {
+    recordOutcome(item.category, rawDisp, to, {
+      confBin: confBinOf(item.rawConfidence ?? item.confidence),
+    });
+  }
   // auto へ倒し込んだら監査対象に入れ直す (§4-3). auto→auto 再是認は既存フラグを保ち二重計上を避ける。
   const intoAuto = to === "auto" && from !== "auto";
   const patch: Partial<Item> = { disposition: to, humanOverrode: from !== to };
@@ -165,8 +169,11 @@ function recordAudit(item: Item, ok: boolean, to: Disposition = "escalate"): Par
 
 /**
  * 「tightness が締めた escalate」(rawDisposition='auto' かつ最終 disposition='escalate')の監査。
- * audit_ok のときだけ=「auto で足りた」緩め証拠を簿記として積む (aiDisposition='auto',
- * humanFinal='auto' → overturnedToAuto 相当)。ただし rule は tip しない (簿記のみ)。
+ * audit_ok のときは recordOutcome(category,'auto','auto') で agreed(auto) を簿記するだけ。
+ * これは learned auto tip(overturnedToAuto)には寄与しない=緩め方向の自動化はしない(緩めは
+ * 慎重・非対称)。overturnedToAuto は aiDisposition='escalate' && humanFinal='auto' のときだけ積まれ、
+ * learned auto tip はその escalate バケットの overturnedToAuto を母数にする。agreed(auto) は別物で、
+ * calibrateRequiredConf の auto バケット overturn 率分母を増やし締め下駄を弱める副次効果に留まる。
  * カードは既存「確認(自動処理)」チップと見分け不能 (queue.ts の isAudit が rawDisposition を含む)。
  * 返すのは items.update に重ねる追加パッチ。
  */
@@ -210,4 +217,120 @@ export function auditConfirm(itemId: string, ok: boolean): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
   return items.update(itemId, recordAudit(item, ok));
+}
+
+/**
+ * 処分=ラベルの Undo (§4-4 安く取り消せる)。直近1件の label_event を逆適用する。
+ * 操作直後にカードを即消ししない前提で、人間が「取り消し」を1タップしたときに直近の一手を戻す。
+ * 整合性 (calibration の簿記巻き戻し) はサーバ責務 (UI は undoableLabel の有無だけ見る)。
+ *
+ * 逆適用の内容:
+ *  - disposition を fromDisposition に復元 (記録されていれば)。
+ *  - status を「さばき前」へ: do/reject は classified に戻す (do は in_progress、reject は rejected を解く)。
+ *  - mute_category はそのカテゴリの最新 active rule を deactivate (即締めの対称=緩めも1手だけ戻せる)。
+ *  - recordOutcome が積んだ category_stats の bump を unbump で 1 戻す (教師信号を歪めない)。
+ *  - 最後にその label_event を削除する (週次集計・母数から外す=二重計上しない)。
+ * 戻せる label が無ければ item をそのまま返す。
+ */
+export function undoLastLabel(itemId: string): Item | null {
+  const item = items.get(itemId);
+  if (!item) return null;
+  const ev = labels.lastForItem(itemId);
+  if (!ev) return item;
+
+  const confBin = confBinOf(item.rawConfidence ?? item.confidence);
+  const rawDisp = item.rawDisposition ?? ev.fromDisposition ?? item.disposition;
+  const patch: Partial<Item> = {};
+
+  switch (ev.action) {
+    case "do": {
+      // doIt: status を in_progress にした。
+      patch.status = "classified";
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      // 監査 do(recordAudit true)と通常 do(auto 項目の是認)は最終状態が区別不能のため、
+      // auditSampled の再武装はしない(存在しなかった監査サンプルを誤って再浮上させない)。
+      // bump の巻き戻し(agreed)は両 do とも同じ auto/agreed 母数なので unbump のみ残す。
+      if (item.disposition === "auto" && !item.auditSampled) {
+        if (ev.category) categoryStats.unbump(ev.category, "auto", "agreed", confBin);
+      } else if (ev.category && rawDisp) {
+        // 通常 do = 是認: agreed(rawDisp) を bump した。
+        categoryStats.unbump(ev.category, rawDisp, "agreed", confBin);
+      }
+      break;
+    }
+    case "reject": {
+      patch.status = "classified";
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      break;
+    }
+    case "reclassify":
+    case "override": {
+      // reclassify/override: disposition を to に覆し recordOutcome を積んだ。
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      patch.humanOverrode = false;
+      if (ev.category && rawDisp && ev.toDisposition) {
+        const human = ev.toDisposition;
+        if (rawDisp === human) {
+          categoryStats.unbump(ev.category, rawDisp, "agreed", confBin);
+        } else {
+          categoryStats.unbump(ev.category, rawDisp, "overturned", confBin);
+          if (rawDisp === "escalate" && human === "auto") {
+            categoryStats.unbump(ev.category, rawDisp, "overturnedToAuto", confBin);
+          }
+        }
+      }
+      break;
+    }
+    case "mute_category": {
+      // muteCategory: そのカテゴリに auto 固定 manual rule を立て disposition=auto にした。
+      // 最新 active rule を deactivate し disposition を戻す (緩め方向の1手だけ戻せる)。
+      if (item.category) {
+        const r = rules.forCategory(item.category);
+        if (r) rules.deactivate(r.id);
+      }
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      break;
+    }
+    case "audit_ok":
+    case "audit_bad":
+    case "approve":
+    case "demote":
+    default:
+      // これらは標準の Undo 対象にしない (監査教師信号/承認/降格は別経路で扱う)。安全側で no-op。
+      break;
+  }
+
+  labels.deleteById(ev.id);
+  return Object.keys(patch).length ? (items.update(itemId, patch) ?? item) : item;
+}
+
+/**
+ * 即締め: muteCategory の対称『この種類は当面上げて』(§3.6-3 締めるのは速く)。
+ * escalate 固定の manual rule を upsert する。緩め方向(auto)とは非対称に、締め方向だけ
+ * UI から手早く打てる正規路。disposition も escalate に倒し、在庫を即再適用する。
+ */
+export function escalateCategory(itemId: string): Item | null {
+  const item = items.get(itemId);
+  if (!item || !item.category) return item ?? null;
+  rules.upsert({
+    category: item.category,
+    forcedDisposition: "escalate",
+    source: "manual",
+    note: "この種類は当面上げて(手動・締め)",
+  });
+  labels.record({
+    itemId,
+    action: "override",
+    fromDisposition: item.disposition,
+    toDisposition: "escalate",
+    category: item.category,
+  });
+  const updated = items.update(itemId, {
+    disposition: "escalate",
+    status: "classified",
+    humanOverrode: item.disposition !== "escalate",
+  });
+  // 締め方向の在庫即再適用 (AI往復ゼロ)。auto に倒っていた classified 在庫を escalate へ。
+  reapplyAndIgnite(item.category);
+  return updated;
 }

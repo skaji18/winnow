@@ -1,5 +1,5 @@
-import type { Item } from "./domain.js";
-import { items } from "./repo.js";
+import type { Disposition, Item, LabelAction } from "./domain.js";
+import { items, labels } from "./repo.js";
 
 // あなたの「今日なに見る?」ビュー (REQUIREMENTS §4). 火の海ではなく
 // エスカレーションだけの短いキュー。自動分は畳む。ただし監査サンプルは
@@ -18,7 +18,23 @@ export interface QueueItem extends Item {
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
   ageDays: number | null;
+  // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。UI はこの有無だけ見て
+  // インライン『取り消し』を出す (逆適用の整合性はサーバ責務)。
+  undoableLabel: {
+    action: LabelAction;
+    fromDisposition: Disposition | null;
+    toDisposition: Disposition | null;
+  } | null;
 }
+
+// Undo で戻せる(逆適用が定義されている)アクションだけを undoableLabel として出す。
+const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
+  "do",
+  "reject",
+  "reclassify",
+  "override",
+  "mute_category",
+]);
 
 const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -0.4 };
 // 手動 orderIndex を「弱く」混ぜるための係数 (DECISIONS: 手動並びは弱いタイブレーク)。
@@ -50,7 +66,12 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
   // auto-done general を僅かに前出し: 監査サンプル抽出が summary を glance しやすいよう
   // 取消ハンドルを上位に寄せる (Batch2 サンプラ優先抽出の土台。topReason には出さない)。
   const auditGlanceC =
-    x.domain === "general" && x.autoExecuted && x.executionStatus === "succeeded" ? 0.3 : 0;
+    x.domain === "general" &&
+    x.autoExecuted &&
+    x.executionStatus === "succeeded" &&
+    x.auditSampled
+      ? 0.3
+      : 0;
   const score = stakesC + confC + prioC + dueC + orderC + auditGlanceC;
 
   // 最大寄与カテゴリを決定論で選ぶ(添字アクセスを避け reduce で max を取る)。
@@ -107,21 +128,10 @@ export function queue(): QueueItem[] {
     //    実行中の auto/running はキューに溢れさせない(従来どおり出さない)。
     if (it.status === "in_progress" && it.disposition === "human") return true;
     if (it.status !== "classified") return false;
-    // 7) エスカレーション/人間案件は出す。tightness が締めた escalate も含まれ監査される。
-    if (it.disposition === "escalate" || it.disposition === "human") {
-      // GTD defer-until フィルタ: 純粋に未さばきな(着手も実行もしていない)classified の
-      // escalate/human で、dueDate が未来なら「再浮上日(defer until)」として棚上げする。
-      // 緩める側の操作なので保守的に未来 due のみ。failed/blocked/proposed/in_progress/
-      // auto-succeeded は上で既に拾っており defer の対象外(止まった項目の再浮上を侵さない)。
-      if (
-        it.executionStatus === "none" &&
-        it.dueDate != null &&
-        it.dueDate > Date.now()
-      ) {
-        return false;
-      }
-      return true;
-    }
+    // 7) エスカレーション/人間案件は常に出す(main の挙動=現状維持)。tightness が締めた
+    //    escalate も含まれ監査される。背骨『締めは速く緩めは慎重』に従い、人間が一度も見ていない
+    //    attention 要求を黙って引っ込める defer-until(緩め操作)は導入しない。
+    if (it.disposition === "escalate" || it.disposition === "human") return true;
     // 自動だが監査サンプルされたものは「見分けつかない形」で混ぜる (§4-3)。
     if (it.disposition === "auto" && it.auditSampled) return true;
     return false;
@@ -151,6 +161,15 @@ export function queue(): QueueItem[] {
     const inProgressAge =
       it.status === "in_progress" ? Math.floor((Date.now() - it.updatedAt) / DAY_MS) : null;
     const staleDays = inProgressAge != null && inProgressAge >= STALE_DAYS ? inProgressAge : null;
+    const last = labels.lastForItem(it.id);
+    const undoableLabel =
+      last && UNDOABLE.has(last.action)
+        ? {
+            action: last.action,
+            fromDisposition: last.fromDisposition,
+            toDisposition: last.toDisposition,
+          }
+        : null;
     return {
       ...it,
       isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
@@ -159,6 +178,7 @@ export function queue(): QueueItem[] {
       surfaceReason: surfaceReasonOf(it, ageDays),
       staleDays,
       ageDays,
+      undoableLabel,
     };
   });
 }

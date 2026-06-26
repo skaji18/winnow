@@ -22,8 +22,10 @@ import {
 import { getRuntimeState } from "../runtime-state.js";
 import { weekly } from "../summary.js";
 import { validateClaudeCmd } from "../security.js";
+import { redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
+import { SERVER_PORT } from "../config.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -44,7 +46,7 @@ const classifying = new Set<string>();
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // One-shot snapshot powering the whole UI.
-  app.get("/api/state", async () => {
+  app.get("/api/state", async (req) => {
     // 仕分け済みの自動アイテムはキューを開いた瞬間に走り出す (待ち行列を作らない)。
     // requestExecution が自己ガードする: executionStatus!=="none" は弾き、
     // 不可逆/高ステークスは proposed に回すので、ここでの追加ゲートは不要。
@@ -97,6 +99,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // 起動時 preflight/reconcile の痕跡と in-flight 集計(実行中N/承認待ちM)。表示は Batch6。
       runtime: getRuntimeState(),
       inFlight: executor.inFlightCount(),
+      // Batch6 UI が消費する薄い追加: AI 未接続バナー/cold-banner 初日/MCP スニペット/直近捕獲。
+      // preflight: runtime の tmux/claude チェックを {ok,reason} に畳む (未チェック時は ok=true)。
+      preflight: ((): { ok: boolean; reason: string | null } => {
+        const pf = getRuntimeState().preflight;
+        const ok = pf.tmuxOk && pf.claudeOk;
+        return { ok, reason: ok ? null : (pf.note ?? "AI 接続を確認できません") };
+      })(),
+      totalLabels: labels.total(),
+      captureStats: items.captureStats(),
+      // MCP 接続先 (read-only。ローカル claude が capture を直接投げる正規経路 /mcp)。
+      mcpEndpoint: `http://${(req.headers.host as string) || `localhost:${SERVER_PORT}`}/mcp`,
     };
   });
 
@@ -244,9 +257,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // execute は長くなりうるのでバックグラウンド。UIは /api/state をポーリング。
+  // 任意 instruction: general成果物の『この方向で直す』(一行指示→同じ execute 再走)。
+  // 未指定=従来の execute と同一 (後方互換)。
+  const executeSchema = z.object({ instruction: z.string().optional() }).strict();
   app.post("/api/items/:id/execute", async (req) => {
     const { id } = req.params as { id: string };
-    background(() => executor.requestExecution(id));
+    const body = req.body ? executeSchema.parse(req.body) : {};
+    // 人間のワンタップ実行/再実行は manual:true で呼ぶ → pauseAuto ガードを回避する
+    // (手動アクションは止めない=非対称)。自動経路(/api/state 掃き出し)は manual を渡さない。
+    background(() => executor.requestExecution(id, body.instruction ?? "", { manual: true }));
     return { started: true };
   });
   app.post("/api/items/:id/approve", async (req) => {
@@ -287,15 +306,33 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return actions.auditConfirm(id, ok);
   });
 
-  // --- sessions (terminal theater) -----------------------------------------
-  app.get("/api/sessions", async () => getDriver().listSessions());
-  app.get("/api/sessions/:name/capture", async (req) => {
-    const { name } = req.params as { name: string };
-    return { text: await getDriver().capture(decodeURIComponent(name)) };
+  // 処分=ラベルの Undo (直近1手の逆適用) と、即締め(muteCategory の対称)。
+  app.post("/api/items/:id/undo-label", async (req) => {
+    const { id } = req.params as { id: string };
+    return actions.undoLastLabel(id) ?? { error: "not found" };
   });
-  app.get("/api/sessions/:name/attach", async (req) => {
+  app.post("/api/items/:id/escalate-category", async (req) => {
+    const { id } = req.params as { id: string };
+    return actions.escalateCategory(id) ?? { error: "not found" };
+  });
+
+  // --- sessions (terminal theater) -----------------------------------------
+  // 既知 session(listSessions の window 集合)だけを許可する照合。WS(index.ts)と同じ照合を
+  // REST にも掛け、任意 tmux ターゲットへの capture 注入を塞ぐ(WS で閉じた穴の REST 側非対称を解消)。
+  const isKnownSession = (name: string): boolean =>
+    new Set(getDriver().listSessions().map((s) => s.name)).has(name);
+  app.get("/api/sessions", async () => getDriver().listSessions());
+  app.get("/api/sessions/:name/capture", async (req, reply) => {
     const { name } = req.params as { name: string };
-    return { command: getDriver().attachCommand(decodeURIComponent(name)) };
+    const decoded = decodeURIComponent(name);
+    if (!isKnownSession(decoded)) return reply.code(404).send({ error: "unknown session" });
+    return { text: await getDriver().capture(decoded) };
+  });
+  app.get("/api/sessions/:name/attach", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const decoded = decodeURIComponent(name);
+    if (!isKnownSession(decoded)) return reply.code(404).send({ error: "unknown session" });
+    return { command: getDriver().attachCommand(decoded) };
   });
   app.post("/api/ai/init", async () => {
     await ensureDriver();
@@ -336,20 +373,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // --- export / import (版数付き JSON・空DB復元限定) -------------------------
   // GET /api/export: 全テーブルを版数付き JSON で書き出す(read-only、winnow は外部送出しない)。
   // boolean は SQLite 由来の 0/1 のまま往復させる(import の直 INSERT が同じ表現で書き戻す)。
-  app.get("/api/export", async () => ({
-    version: SCHEMA_VERSION,
-    exportedAt: Date.now(),
-    data: {
-      items: items.all(),
-      labels: labels.all(),
-      rules: rules.all(),
-      categoryStats: categoryStats.all(),
-      projects: projects.all(),
-      sprints: sprints.all(),
-      jobs: jobs.recent(1_000_000),
-      settings: settings.get(),
-    },
-  }));
+  // 伏字化: context.ts の最終ゲートが止める秘密が export 経由で素通しになる穴を塞ぐ。
+  // 最低限 productContext / claude*Cmd と items.body を redactSecrets に通す。
+  app.get("/api/export", async () => {
+    const s = settings.get();
+    const redactedSettings = {
+      ...s,
+      productContext: redactSecrets(s.productContext ?? ""),
+      claudeControlCmd: redactSecrets(s.claudeControlCmd ?? ""),
+      claudeWorkerCmd: redactSecrets(s.claudeWorkerCmd ?? ""),
+    };
+    const redactedItems = items.all().map((it) => ({
+      ...it,
+      body: typeof it.body === "string" ? redactSecrets(it.body) : it.body,
+    }));
+    return {
+      version: SCHEMA_VERSION,
+      exportedAt: Date.now(),
+      data: {
+        items: redactedItems,
+        labels: labels.all(),
+        rules: rules.all(),
+        categoryStats: categoryStats.all(),
+        projects: projects.all(),
+        sprints: sprints.all(),
+        jobs: jobs.recent(1_000_000),
+        settings: redactedSettings,
+      },
+    };
+  });
 
   // POST /api/import: 空DB復元限定(merge 禁止)。items/projects 件数 0 で「空」と判定
   // (settings seed 行は db.ts が必ず作るので判定に含めない)。版数照合の上、復元する。
