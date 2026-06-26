@@ -4,7 +4,8 @@
 import { z } from "zod";
 import { classify } from "./classifier.js";
 import type { Item } from "./domain.js";
-import { items } from "./repo.js";
+import { validateProjectDir } from "./paths.js";
+import { items, settings } from "./repo.js";
 import { provisionalTitle } from "./text.js";
 
 // 仕分け等の長い AI op はバックグラウンドで回す (UI/呼び出し側は待たない)。
@@ -27,6 +28,10 @@ export const captureSchema = z
     priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
     dueDate: z.number().nullable().optional(),
     classify: z.boolean().optional(),
+    // 外部冪等キー (重複取り込み防止)。同一 externalKey の再 capture は no-op/追記になる。
+    externalKey: z.string().min(1).optional(),
+    // 原典へ戻るリンク (read-only 痕跡。winnow は外部送出しない)。
+    sourceUrl: z.string().url().optional(),
   })
   .refine((d) => Boolean(d.title?.trim() || d.body?.trim()), {
     message: "title か body のいずれかが必要です",
@@ -40,20 +45,63 @@ export type CaptureInput = z.infer<typeof captureSchema>;
  * 同期 SQLite 書き込みなので、戻り値が返る時点でアイテムは確実に永続化済み。
  */
 export function captureItem(input: CaptureInput): Item {
+  // (1) 冪等キー: 同一 externalKey の既存があれば重複作成せず、body が来ていれば追記して
+  //     既存 Item を返す(no-op 同然)。再分類は発火しない(取り込み再投入で分類器を溢れさせない)。
+  if (input.externalKey) {
+    const existing = items.findByExternalKey(input.externalKey);
+    if (existing) {
+      if (input.body?.trim()) {
+        return (
+          items.update(existing.id, {
+            body: `${existing.body}\n\n---\n${input.body}`,
+          }) ?? existing
+        );
+      }
+      return existing;
+    }
+  }
+
+  // (2) projectDir 検証: 不正(相対パス/機微パス)は拒否でなく projectDir=null で作成しつつ、
+  //     後段 classify が escalate 寄りに倒れるよう body 末尾へ注記(背骨: 失敗は安全側に倒す)。
+  let projectDir = input.projectDir ?? null;
+  let escalateNote = "";
+  if (input.projectDir != null && input.projectDir.trim() !== "") {
+    const v = validateProjectDir(input.projectDir);
+    projectDir = v.dir;
+    if (v.escalate) {
+      escalateNote = `\n\n[winnow] 注意: 渡された作業ディレクトリを安全側で無効化しました(${v.reason ?? "検証失敗"})。実行前に人間が確認してください。`;
+    }
+  }
+
   const title = input.title?.trim() || provisionalTitle(input.body ?? "");
   const item = items.create({
     title,
-    body: input.body ?? "",
+    body: (input.body ?? "") + escalateNote,
     parentId: input.parentId ?? null,
     kind: input.kind ?? "node",
     domain: input.domain ?? "general",
-    projectDir: input.projectDir ?? null,
+    projectDir,
     projectId: input.projectId ?? null,
     sprintId: input.sprintId ?? null,
     priority: input.priority ?? "normal",
     dueDate: input.dueDate ?? null,
+    sourceUrl: input.sourceUrl ?? null,
+    externalKey: input.externalKey ?? null,
   });
-  // 新規アイテムが着いたら分類器が disposition を書く (§4 利用動線)。
-  if (input.classify !== false) background(() => classify(item.id));
+
+  // (3) 過負荷バックプレッシャ: 未さばき(disposition=null かつ inbox/classified)が
+  //     captureInboxHoldThreshold を超えていたら classify を発火せず inbox 保留にする
+  //     (reject/escalate でなくバックプレッシャ。開封時 /api/state sweep でドレインされる)。
+  const cfg = settings.get();
+  const pending = items
+    .all()
+    .filter(
+      (it) =>
+        it.disposition === null && (it.status === "inbox" || it.status === "classified"),
+    ).length;
+  const overloaded = cfg.captureInboxHoldThreshold > 0 && pending >= cfg.captureInboxHoldThreshold;
+
+  // 新規アイテムが着いたら分類器が disposition を書く (§4 利用動線)。過負荷時は保留。
+  if (input.classify !== false && !overloaded) background(() => classify(item.id));
   return item;
 }

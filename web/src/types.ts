@@ -28,6 +28,10 @@ export interface Item {
   stakes: number | null;
   reversibility: number | null;
   category: string | null;
+  // tightness/ゲート前の AI 生提案 (較正母数の源)。読み取り専用。サーバ未提供時 undefined=現状維持。
+  rawDisposition?: Disposition | null;
+  rawConfidence?: number | null;
+  envEscalated?: boolean;
   process: "waterfall" | "iterative" | null;
   uncertaintyResolved: boolean;
   autoExecuted: boolean;
@@ -35,6 +39,12 @@ export interface Item {
   auditSampled: boolean;
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+  // 実行成果物の分離保持 (§3.4)。サーバ未提供時 undefined=現状維持。UI 実装は Batch6。
+  executionSummary?: string | null;
+  executionOutput?: string | null;
+  rollbackPlan?: string | null; // software 巻き戻し手順 (取り消し時に提示)
+  declaredReversible?: boolean | null; // 可逆性自己申告 (null=未申告の三値)
+  artifacts?: string | null; // 外部副作用 artifacts (JSON 文字列。UI で JSON.parse)
   domain: "software" | "general";
   projectDir: string | null;
   projectId: string | null;
@@ -105,6 +115,13 @@ export interface WeeklySummary {
   overridden: number;
   audited: number;
   tippedCategories: string[];
+  autoPrev: number;
+  escalatedPrev: number;
+  tightenedCount: number;
+  loosenedCount: number;
+  auditBad: number;
+  stale: number;
+  failed: number;
   line: string;
 }
 

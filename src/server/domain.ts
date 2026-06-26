@@ -67,6 +67,14 @@ export interface Item {
   reversibility: number | null; // 0..1 (1=完全に可逆)
   category: string | null; // 基準率補正のバケット (§3.6-1)
 
+  // raw* は分類器の生出力 (ルール・基準率補正・tightness/ゲートで上書きされる前の値)。
+  // 較正母数 (category_stats) を汚染除去するための真実源。null = 未分類/レガシー。
+  rawDisposition: Disposition | null;
+  rawConfidence: number | null; // 0..1, clamp01後・tightness前
+  // 環境不全 (classify失敗/JSON解析失敗/タイムアウト/dispatch不可) で安全側 escalate に
+  // 倒した痕跡。較正母数に積まない判別と週次 failed 集計に使う。
+  envEscalated: boolean;
+
   process: Process | null;
   uncertaintyResolved: boolean;
 
@@ -77,6 +85,18 @@ export interface Item {
 
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+
+  // 実行成果物の分離保持 (§3.4)。executionResult は後方互換で連結文字列を維持し、
+  // 以下は監査/取り消し提示のために分離して持つ。
+  executionSummary: string | null; // general成果物の ExecuteOut.summary
+  executionOutput: string | null; // general成果物本体 (ExecuteOut.output)
+  rollbackPlan: string | null; // software実行の巻き戻し手順 (worker自己申告)
+  declaredReversible: boolean | null; // worker が可逆と自己申告したか。null=未申告 (三値)
+  artifacts: string | null; // 外部副作用 artifacts (自由文/URL配列) を JSON文字列で保持
+
+  // 外部取り込み痕跡 (read-only、winnow は送出しない)。
+  sourceUrl: string | null; // 取り込み元 URL/参照。null = 手入力
+  externalKey: string | null; // 外部ソース由来の冪等キー (重複取り込み防止)
 
   // domain: ソフト開発タスクは実際にコードを動かす / 一般タスクは下書き提案 (§3.4)
   domain: "software" | "general";
@@ -164,6 +184,9 @@ export interface Rule {
 export interface CategoryStat {
   category: string;
   aiDisposition: Disposition;
+  // confidenceビン (0..4 = floor(rawConfidence*5) clamp4)。PRIMARY KEY は
+  // (category, aiDisposition, confBin)。既存集計は全ビン SUM で後方互換。
+  confBin: number;
   agreed: number; // 人間が是認
   overturned: number; // 人間が覆した (全方向)
   overturnedToAuto: number; // escalate を auto へ覆した分だけ (§3.6-3 緩める判定の分子)
@@ -180,6 +203,9 @@ export interface ExecutionJob {
   finishedAt: number | null;
   output: string | null;
   error: string | null;
+  // dispatch時の req.id (IPC相関ID)。起動時 reconcile が running ジョブの done
+  // sentinel を決定論で特定するため。null = レガシー (reconcile は sentinel 探索 skip)。
+  ipcId: string | null;
   createdAt: number;
 }
 
@@ -202,6 +228,26 @@ export interface Settings {
   // プロダクト全体の前提 (何を作っている/スタック/規約/方針)。上段への鋭い投資は
   // 下段で複利で効く (§2.2)。分類・分解・実行プロンプト全部に注入する。
   productContext: string;
+
+  // 自動実行の一時停止スイッチ (§3.6-3 の手動版)。true で自動経路 (キュー掃き出し
+  // ループ・classify末尾の即時着火・capture sweep) を抑止。approve (手動承認) は通す。
+  // default=false で現状維持。締めるのは速く。
+  pauseAuto: boolean;
+  // learned auto rule カテゴリに恒常維持する最低監査率。通常 auditRate より高く緩めた
+  // 境界を継続監視。rollAudit が max(auditRate, learnedAuditFloor) を採る。
+  learnedAuditFloor: number; // 0..1
+  // learned auto rule tip直後の一時監査引き上げ期間 (既定1週間)。
+  tipProbationMs: number; // ms
+  // tip直後 probation 期間中の引き上げ監査率。
+  tipProbationRate: number; // 0..1
+  // confidenceビン較正を発火させる最小サンプル数 (ビン単位)。これ未満は補正しない。
+  binCalibrationMinSamples: number; // int
+  // ビン実 overturn 率が申告を上回る乖離閾値。これ超で当該カテゴリの requiredConf を締め側に補正。
+  binOverturnGap: number; // 0..1
+  // claudeControlCmd/WorkerCmd を PATCH で書き換える際に許可するトークン集合 (RCE面を閉じる)。
+  claudeAllowedFlags: string[];
+  // 過負荷時に capture を即 classify せず inbox 保留にする閾値。0 で無効=現状維持。
+  captureInboxHoldThreshold: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -212,4 +258,25 @@ export const DEFAULT_SETTINGS: Settings = {
   claudeWorkerCmd: "claude --permission-mode acceptEdits",
   useHeadless: false,
   productContext: "",
+  pauseAuto: false,
+  learnedAuditFloor: 0.25,
+  tipProbationMs: 604_800_000, // 1週間
+  tipProbationRate: 0.5,
+  binCalibrationMinSamples: 8,
+  binOverturnGap: 0.25,
+  claudeAllowedFlags: [
+    "--permission-mode",
+    "acceptEdits",
+    "--dangerously-skip-permissions",
+    "-p",
+    "--output-format",
+    "json",
+    "--model",
+    "sonnet",
+    "opus",
+    "haiku",
+    "plan",
+    "default",
+  ],
+  captureInboxHoldThreshold: 24,
 };

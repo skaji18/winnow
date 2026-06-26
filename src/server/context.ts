@@ -14,6 +14,21 @@ import { items, projects, settings } from "./repo.js";
 // driver 非対称を1上限で丸める割り切り(暫定値・実機計測で調整可)。
 const MAX_CONTEXT_CHARS = 16000;
 
+// 秘密伏字化 (§6 防御). productContext/案件context/親body 由来の秘密が分類・分解・実行
+// プロンプトに無差別注入されるのを最終ゲートで止める(締め込み)。ホットパス(全 dispatch)で
+// 走るので正規表現はモジュールトップで事前コンパイルし、毎回 .replace で使う(test は使わない)。
+// 閾値は保守的(40+連続)にし、誤検出は安全側(伏字)に倒れる。
+const RE_GH_TOKEN = /gh[pousr]_[A-Za-z0-9]{20,}/g;
+const RE_AWS_KEY = /AKIA[0-9A-Z]{16}/g;
+const RE_HIGH_ENTROPY = /[A-Za-z0-9+/=]{40,}/g;
+
+function redactSecrets(s: string): string {
+  return s
+    .replace(RE_GH_TOKEN, "[REDACTED-TOKEN]")
+    .replace(RE_AWS_KEY, "[REDACTED-AWS-KEY]")
+    .replace(RE_HIGH_ENTROPY, "[REDACTED-HIGH-ENTROPY]");
+}
+
 export function buildContextBlock(item: Item): string {
   const parts: string[] = [];
 
@@ -52,5 +67,7 @@ export function buildContextBlock(item: Item): string {
       bodyText.slice(0, MAX_CONTEXT_CHARS) +
       "\n\n…(文脈が長すぎるため後半を省略。設定『プロダクトの前提』または案件の前提を整理してください)";
   }
+  // 注入直前に秘密を伏字化(切り詰めで分断された残骸も対象にするため切り詰めの後に適用)。
+  bodyText = redactSecrets(bodyText);
   return `\n## 文脈（必ずこれに沿って判断・分解・実行する）\n${bodyText}\n`;
 }

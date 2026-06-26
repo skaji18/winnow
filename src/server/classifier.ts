@@ -1,20 +1,52 @@
 import { randomUUID } from "node:crypto";
 import { ensureDriver } from "./ai/index.js";
 import { classifyPrompt } from "./ai/prompts.js";
-import { applyRulesAndCalibration } from "./calibration.js";
+import { applyRulesAndCalibration, calibrateRequiredConf } from "./calibration.js";
 import { buildContextBlock } from "./context.js";
 import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
-import { categories, items, jobs, settings } from "./repo.js";
+import { categories, items, jobs, rules, settings } from "./repo.js";
 import { isProvisionalTitle, normalizeCategory } from "./text.js";
+import { classifyJobError } from "./errors.js";
+
+// 締めた escalate(rawDisposition=auto なのに tightness で escalate に倒した)に混ぜる監査の割合。
+// 通常 auto より低率で、緩めた境界の検証を継続するための簿記。
+const TIGHTENED_AUDIT_FRACTION = 0.5;
 
 /**
  * 監査サンプリング判定 (§3.6-2, §4-3). auto 処分のみ N% を抽出。
  * auto に倒す全経路が同一基準でサンプルできるよう共通化し actions.ts からも再利用する。
+ *
+ * 拡張 (Batch2): tightness が締めた escalate(rawDisposition==='auto' かつ最終 escalate)にも
+ * 小率で監査を混ぜ、緩めた境界を継続監視する。learned auto rule カテゴリは
+ * max(auditRate, learnedAuditFloor)、tip 直後 probation 期間中は tipProbationRate を採る。
+ * 既存呼び出し(rollAudit('auto'))は opts 省略で従来挙動。
  */
-export function rollAudit(disposition: Disposition): boolean {
-  return disposition === "auto" && Math.random() < settings.get().auditRate;
+export function rollAudit(
+  disposition: Disposition,
+  opts: { category?: string | null; rawDisposition?: Disposition | null } = {},
+): boolean {
+  const cfg = settings.get();
+  // カテゴリの learned auto rule 有無と tip probation で監査率を決める。
+  let rate = cfg.auditRate;
+  if (opts.category) {
+    const rule = rules.forCategory(opts.category);
+    if (rule && rule.source === "learned" && rule.forcedDisposition === "auto") {
+      const inProbation = Date.now() - rule.createdAt < cfg.tipProbationMs;
+      rate = inProbation
+        ? Math.max(rate, cfg.tipProbationRate)
+        : Math.max(rate, cfg.learnedAuditFloor);
+    }
+  }
+  if (disposition === "auto") {
+    return Math.random() < rate;
+  }
+  // tightness が締めた escalate: 生提案 auto だったものを小率で監査に混ぜる。
+  if (disposition === "escalate" && opts.rawDisposition === "auto") {
+    return Math.random() < rate * TIGHTENED_AUDIT_FRACTION;
+  }
+  return false;
 }
 
 interface ClassifyOut {
@@ -58,13 +90,14 @@ export async function classify(itemId: string): Promise<Item | null> {
     finishedAt: null,
     output: null,
     error: null,
+    ipcId: null,
   });
 
   const res = await driver.dispatch({
     id: randomUUID(),
     role: "control",
     label: `分類: ${item.title.slice(0, 30)}`,
-    prompt: classifyPrompt(item, buildContextBlock(item), categories.known()),
+    prompt: classifyPrompt(item, buildContextBlock(item), categories.knownWithRecency()),
     expectJson: true,
     timeoutMs: 90_000,
   });
@@ -74,21 +107,32 @@ export async function classify(itemId: string): Promise<Item | null> {
     status: res.ok ? "succeeded" : "failed",
     finishedAt: Date.now(),
     output: res.raw,
-    error: res.error ?? null,
+    // クォータ/レート起因の失敗は "quota: ..." 接頭辞付けで種別を残す(/healthz・デバッグ用)。
+    error: classifyJobError(res.error),
   });
 
   if (!res.ok) {
     // 分類できないときは安全側=escalate (§5 誤仕分け前提・保守デフォルト).
+    // 環境不全由来 (acquire timeout/タイムアウト/JSON解析失敗/dispatch不可) を判別できるよう
+    // envEscalated=1 を立て、reason に痕跡を残す。raw* は生提案が無いので null/0(較正母数に積まない)。
     return items.update(itemId, {
       status: "classified",
       disposition: "escalate",
       confidence: 0,
-      reason: `自動分類に失敗(${res.error ?? "unknown"})→安全側にエスカレート`,
+      reason: `[env] 環境不全由来: 自動分類に失敗(${res.error ?? "unknown"})→安全側にエスカレート`,
       category: "unclassified",
+      rawDisposition: null,
+      rawConfidence: 0,
+      envEscalated: true,
     });
   }
 
   const out = normalize(res.data as Partial<ClassifyOut>);
+
+  // 較正母数汚染除去の本質: 生提案 (tightness/ゲート前の AI 出力) を raw* に確保し不変に保つ。
+  // 以下のゲートは「最終ゲート」であって disposition/confidence を書き換えても raw* は触らない。
+  const rawDisposition: Disposition = out.disposition;
+  const rawConfidence: number = out.confidence;
 
   // 明示ルール → 基準率補正
   const ruled = applyRulesAndCalibration(out.category, out.disposition);
@@ -96,8 +140,12 @@ export async function classify(itemId: string): Promise<Item | null> {
   let reason = ruled.note ? `${out.reason}（${ruled.note}）` : out.reason;
 
   // 再調律スライダー: 締めるのは速く (§3.6-3). auto に倒すバーを tightness で上げる。
+  // 【最終ゲート】ここで disposition を escalate に書き換えても raw* は不変(母数に混ぜない)。
   if (disposition === "auto") {
-    const requiredConf = 0.5 + 0.4 * cfg.escalationTightness; // 0.5..0.9
+    // ビン較正の締め下駄: カテゴリが申告より実際に外している証拠があれば requiredConf を上げる。
+    // 締め側にだけ倒す(非対称)。緩める方向には決して使わない。
+    const calibBump = calibrateRequiredConf(out.category) ?? 0;
+    const requiredConf = Math.min(0.98, 0.5 + 0.4 * cfg.escalationTightness + calibBump); // 0.5..0.98
     const highStakesIrreversible = out.stakes > 0.7 && out.reversibility < 0.5;
     if (out.confidence < requiredConf || highStakesIrreversible) {
       disposition = "escalate";
@@ -107,13 +155,15 @@ export async function classify(itemId: string): Promise<Item | null> {
 
   // リーフ実行可能性ゲート: 受け入れ基準が曖昧なまま自動実行すると外す (§2.2).
   // 詳細不足の leaf は自動着火させず「要詳細化」でキューに残す (締めるのは速く §3.6-3)。
+  // 【最終ゲート】これも raw* を変えない。
   if (out.kind === "leaf" && !out.executableReady && disposition === "auto") {
     disposition = "escalate";
     reason = `${reason}（要詳細化: 受け入れ基準が曖昧。分解か詳細追記を）`;
   }
 
   // 監査サンプリング: 自動処理分の N% を、見分けのつかない形でキューへ (§4-3).
-  const auditSampled = rollAudit(disposition);
+  // tightness が締めた escalate(rawDisposition=auto)にも小率で混ぜ、緩めた境界を継続監視。
+  const auditSampled = rollAudit(disposition, { category: out.category, rawDisposition });
 
   // 「雑に貼る」入口: 登録時タイトルが本文先頭の機械切り出し(暫定)なら、AI要約見出しで
   // 上書きする。これは同一 dispatch のJSONに相乗りしており追加往復ゼロ (§6)。
@@ -135,13 +185,19 @@ export async function classify(itemId: string): Promise<Item | null> {
     uncertaintyResolved: out.uncertaintyResolved,
     category: out.category,
     auditSampled,
+    rawDisposition,
+    rawConfidence,
+    envEscalated: false,
   });
 
   // 即時着火 (§0「回し」, routes.ts のキューopen掃き出しに次ぐ副次トリガ).
   // 新たに分類された auto leaf を /api/state ポーリングを待たず発火させる。
   // 掃き出しとの二重着火は requestExecution 冒頭の executionStatus ガードが吸収するため調整不要。
   if (updated && updated.disposition === "auto" && updated.kind === "leaf") {
-    void executor.requestExecution(updated.id).catch(() => {});
+    // 握り潰さずログだけは残す(背骨: エラーを黙って捨てない)。
+    void executor
+      .requestExecution(updated.id)
+      .catch((e) => console.error("[winnow] auto-ignite after classify failed:", e));
   }
 
   return updated;

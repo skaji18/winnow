@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
+import { parseJson } from "./ai/tmux-driver.js";
+import { PATHS } from "./config.js";
 import { buildContextBlock } from "./context.js";
 import type { Item } from "./domain.js";
-import { items, jobs } from "./repo.js";
+import { items, jobs, labels, settings } from "./repo.js";
+import { recordOutcome } from "./calibration.js";
+import { validateProjectDir } from "./paths.js";
+import { classifyJobError } from "./errors.js";
 
 // 実行とトリガー (REQUIREMENTS §3.4). 自動実行は可逆性で段を分ける:
 //  可逆な実行 → 自動着火 / 不可逆・高ステークス → 提案して人間ワンタップ承認。
@@ -40,11 +47,57 @@ function crossRepoSiblingPending(item: Item): boolean {
   );
 }
 
+/**
+ * 未確定ノード配下リーフの点火ゲート (§3.4/§3.6-3 締めるのは速く)。crossRepoSiblingPending と
+ * 同型の決定論ガード(推論なし・安全側に倒す)。次の3条件の OR が真なら auto 着火せず proposed に
+ * 倒す。DAG/依存自動推論/blockedBy 新スキーマは作らず、既存 parentId/orderIndex/status のみで判定:
+ *  (a) 親が未確定 (parent.uncertaintyResolved===false): 上の方向が固まる前に下を実行すると外す。
+ *  (b) 親を人間が保留 (parent.status==='blocked'): 親解除待ち。
+ *  (c) 同一親×上流 (orderIndex が前) の兄弟が未完: 上流完了待ち。
+ * parentId が null なら全条件 false (現状維持)。承認(approveExecution)はこのガードを通らない
+ * =ワンタップの逃げ道 (crossRepo と対称)。
+ */
+function uncertainNodeOrUpstreamPending(item: Item): boolean {
+  if (!item.parentId) return false;
+  const parent = items.get(item.parentId);
+  if (!parent) return false;
+  // (a) 親未確定 / (b) 親 blocked。
+  if (parent.uncertaintyResolved === false) return true;
+  if (parent.status === "blocked") return true;
+  // (c) 同一親×上流(orderIndex 小)に未完の兄弟がいる。
+  return items.children(item.parentId).some(
+    (o) =>
+      o.id !== item.id &&
+      o.orderIndex < item.orderIndex &&
+      o.status !== "done" &&
+      o.status !== "rejected" &&
+      o.executionStatus !== "succeeded" &&
+      o.executionStatus !== "cancelled",
+  );
+}
+
+/** 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。 */
+function uncertainGateReason(item: Item): string {
+  if (item.parentId) {
+    const parent = items.get(item.parentId);
+    if (parent) {
+      if (parent.uncertaintyResolved === false)
+        return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
+      if (parent.status === "blocked") return "親が保留(blocked)中です。＝親解除待ち";
+    }
+  }
+  return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
+}
+
 interface ExecuteOut {
   status: "succeeded" | "failed" | "needs_human";
   summary: string;
   output: string;
   reviewTask?: string;
+  // software 向け任意フィールド (申告なし=undefined=現状不変・後方互換)。
+  rollbackPlan?: string; // 変更ファイル一覧＋巻き戻す git コマンド
+  artifacts?: string[]; // 外部に生じた成果物の自由文/URL (read-only 痕跡)
+  reversible?: boolean; // この実行が安く巻き戻せるか (可逆性自己申告)
 }
 
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
@@ -54,7 +107,30 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
   // executionStatus は "none" 既定で null にならない (db.ts DEFAULT 'none')。
   // failed のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
+  // 再浮上した failed 項目の再実行 (Batch5 のワンタップ / 起動時 reconcile が failed に倒した
+  // 項目) はここを通って再着火する。
   if (item.executionStatus && item.executionStatus !== "none" && item.executionStatus !== "failed") return item;
+  // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution は自動着火経路専用
+  // (キュー掃き出し・classify末尾の即時着火・在庫再適用)。approveExecution は runExecution を
+  // 直呼びしここを通らない=手動承認の逃げ道は止めない。proposed に倒して痕跡を残す。
+  if (settings.get().pauseAuto) {
+    return items.update(itemId, {
+      executionStatus: "proposed",
+      executionResult: "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。",
+    });
+  }
+  // auto source 検証 (背骨「口はバカ・分類器が賢い」の executor 側の最終ゲート)。
+  // 分類器は auto に倒すとき必ず confidence を入れる (classifier.ts normalize/clamp01)。
+  // 自動着火経路で disposition==='auto' なのに confidence==null = 分類器/監査を経ていない疑い
+  // (人間が PATCH で直接 disposition=auto を書いた等)。分類由来でないと判断し、自動着火せず
+  // 安全側に escalate に倒す(分類器経由は必ず confidence を持つので誤爆しない)。
+  if (item.disposition === "auto" && item.confidence == null) {
+    return items.update(itemId, {
+      disposition: "escalate",
+      status: "classified",
+      executionResult: "auto の出所が分類器でないため安全側にエスカレートしました。",
+    });
+  }
   if (item.kind !== "leaf") {
     return items.update(itemId, {
       executionResult: "ノードは直接実行できません。先に分解してください。",
@@ -71,6 +147,13 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
       executionResult: "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。",
     });
   }
+  if (uncertainNodeOrUpstreamPending(item)) {
+    // 未確定ノード配下/上流未完: 親確定・上流完了を待ってから着火 (最上流の制約を先に見せる)。
+    return items.update(itemId, {
+      executionStatus: "proposed",
+      executionResult: uncertainGateReason(item),
+    });
+  }
   if (crossRepoSiblingPending(item)) {
     // 同一案件で複数repoの自動実行が並んでいる: 横断変更の暴発を防ぎ承認待ちに回す。
     return items.update(itemId, {
@@ -83,58 +166,34 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
   return runExecution(itemId);
 }
 
-/** 実際に worker セッションへ投げて実行する。 */
-export async function runExecution(itemId: string): Promise<Item | null> {
+/**
+ * ExecuteOut を解釈して item を更新し、必要ならレビュータスクを戻す共通ヘルパ。
+ * runExecution の成功パスと起動時 reconcile の done sentinel 取り込みパスの両方から
+ * 呼ぶ(挙動一致・重複排除)。Batch4 はこのヘルパ内に新カラム(executionSummary/
+ * Output/rollbackPlan/declaredReversible/artifacts)の書き込みを足す前提。
+ *
+ * blocked語義整理: 失敗(out.status==='failed')は status を blocked にせず in_progress に
+ * 保ち、再浮上は executionStatus==='failed' で表す(queue の visible が拾う)。
+ */
+function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
-
-  items.update(itemId, { executionStatus: "running", status: "in_progress" });
-  const driver = await ensureDriver();
-  const job = jobs.create({
-    itemId,
-    role: "worker",
-    kindOfWork: "execute",
-    sessionName: null,
-    status: "running",
-    startedAt: Date.now(),
-    finishedAt: null,
-    output: null,
-    error: null,
-  });
-
-  const res = await driver.dispatch({
-    id: randomUUID(),
-    role: "worker",
-    label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item)),
-    cwd: item.projectDir ?? undefined,
-    expectJson: true,
-    timeoutMs: 600_000,
-  });
-
-  jobs.update(job.id, {
-    sessionName: res.sessionName,
-    status: res.ok ? "succeeded" : "failed",
-    finishedAt: Date.now(),
-    output: res.raw,
-    error: res.error ?? null,
-  });
-
-  if (!res.ok) {
-    return items.update(itemId, {
-      executionStatus: "failed",
-      status: "blocked",
-      executionResult: `実行失敗: ${res.error ?? "unknown"}`,
-    });
-  }
-
-  const out = res.data as Partial<ExecuteOut>;
   const succeeded = out.status === "succeeded";
   const updated = items.update(itemId, {
     executionStatus: out.status === "needs_human" ? "proposed" : succeeded ? "succeeded" : "failed",
-    status: succeeded ? "done" : "blocked",
+    // succeeded→done。それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
+    status: succeeded ? "done" : "in_progress",
     autoExecuted: true,
+    // executionResult は後方互換で連結文字列を維持(UI/キュー一行が参照)。
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
+    // 成果物の分離保持: summary/output を分け、software のみ rollbackPlan を持つ。
+    executionSummary: out.summary ?? null,
+    executionOutput: out.output ?? null,
+    rollbackPlan: item.domain === "software" ? (out.rollbackPlan ?? null) : null,
+    declaredReversible: typeof out.reversible === "boolean" ? out.reversible : null,
+    // 外部副作用 artifacts は JSON 文字列で read-only 痕跡として保持 (winnow は能動操作しない)。
+    artifacts:
+      Array.isArray(out.artifacts) && out.artifacts.length ? JSON.stringify(out.artifacts) : null,
   });
 
   // レビューをパイプラインに戻す (§3.5). 継ぎ目=チェックポイントが実装ポイント。
@@ -152,6 +211,148 @@ export async function runExecution(itemId: string): Promise<Item | null> {
   return updated;
 }
 
+/** 実際に worker セッションへ投げて実行する。 */
+export async function runExecution(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+
+  // 防御的 projectDir 検証(最終ゲート): headless-driver が req.cwd を無検証 cwd にする穴を、
+  // dispatch に渡る前に塞ぐ。不正(相対/機微パス)なら実行せず proposed に倒して人間確認へ。
+  if (item.projectDir != null) {
+    const v = validateProjectDir(item.projectDir);
+    if (v.escalate) {
+      return items.update(itemId, {
+        executionStatus: "proposed",
+        executionResult: `作業ディレクトリが不正のため実行を保留しました(${v.reason ?? "検証失敗"})。`,
+      });
+    }
+  }
+
+  items.update(itemId, { executionStatus: "running", status: "in_progress" });
+  const driver = await ensureDriver();
+  // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
+  // reconcile が done sentinel (PATHS.ipc/${ipcId}.done) と res.json を決定論で特定できる。
+  const ipcId = randomUUID();
+  const job = jobs.create({
+    itemId,
+    role: "worker",
+    kindOfWork: "execute",
+    sessionName: null,
+    status: "running",
+    startedAt: Date.now(),
+    finishedAt: null,
+    output: null,
+    error: null,
+    ipcId,
+  });
+
+  const res = await driver.dispatch({
+    id: ipcId,
+    role: "worker",
+    label: `実行: ${item.title.slice(0, 30)}`,
+    prompt: executePrompt(item, buildContextBlock(item)),
+    cwd: item.projectDir ?? undefined,
+    expectJson: true,
+    timeoutMs: 600_000,
+  });
+
+  jobs.update(job.id, {
+    sessionName: res.sessionName,
+    status: res.ok ? "succeeded" : "failed",
+    finishedAt: Date.now(),
+    output: res.raw,
+    // クォータ/レート起因の失敗は "quota: ..." 接頭辞付けで種別を残す。
+    error: classifyJobError(res.error),
+  });
+
+  if (!res.ok) {
+    // blocked語義整理: 実行失敗は status を blocked にせず in_progress に保つ。
+    // 可視性は queue の executionStatus==='failed' フィルタが担保する。
+    return items.update(itemId, {
+      executionStatus: "failed",
+      status: "in_progress",
+      executionResult: `実行失敗: ${res.error ?? "unknown"}`,
+    });
+  }
+
+  return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>);
+}
+
+/**
+ * WIP/worker 天井のための in-flight 集計。DB から決定論で算出する(状態の二重持ちを
+ * 避けるため runtime-state には保持しない)。routes の掃き出しループと /api/state が使う。
+ *   running  = 実行中 N
+ *   proposed = 承認待ち M
+ */
+export function inFlightCount(): { running: number; proposed: number } {
+  let running = 0;
+  let proposed = 0;
+  for (const it of items.all()) {
+    if (it.executionStatus === "running") running++;
+    else if (it.executionStatus === "proposed") proposed++;
+  }
+  return { running, proposed };
+}
+
+/**
+ * 起動時 reconcile(index.ts が db 初期化直後・listen 前に一度だけ呼ぶ)。
+ * 前回プロセスで running のまま中断した execute ジョブを、jobs.ipcId 経由で done
+ * sentinel を探して決定論で決着させる:
+ *   - done sentinel + res.json があれば取り込み(applyExecuteResult)→ recovered++
+ *   - 無い / ipcId=null / parse 失敗 → executionStatus='failed'・status='in_progress'
+ *     (blocked にしない)に倒し executionResult に痕跡 → 再浮上経路(queue)が拾う → failedOver++
+ * AI は一切起動しない(driver.init() を呼ばず、IPC sentinel と DB のみ参照する read-only
+ * 痕跡処理)。同期(better-sqlite3 同期API + fs 同期API)。一度きり・冪等
+ * (決着済み job は status を running から外すので二度と拾わない)。
+ */
+export function reconcileOnBoot(): { recovered: number; failedOver: number } {
+  let recovered = 0;
+  let failedOver = 0;
+  const stranded = jobs.runningExecuteJobs();
+  for (const job of stranded) {
+    const item = items.get(job.itemId);
+    // item が無い / 既に running 以外で決着済みなら job だけ決着させて skip。
+    if (!item || item.executionStatus !== "running") {
+      jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
+      continue;
+    }
+
+    let takenIn = false;
+    if (job.ipcId) {
+      const donePath = path.join(PATHS.ipc, `${job.ipcId}.done`);
+      const resPath = path.join(PATHS.ipc, `${job.ipcId}.res.json`);
+      if (fs.existsSync(donePath)) {
+        try {
+          const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
+          const out = parseJson(raw) as Partial<ExecuteOut>;
+          applyExecuteResult(job.itemId, out);
+          jobs.update(job.id, {
+            status: out.status === "failed" ? "failed" : "succeeded",
+            finishedAt: Date.now(),
+            output: raw,
+          });
+          recovered++;
+          takenIn = true;
+        } catch {
+          /* parse 失敗 → 下の failed フォールバックへ倒す */
+        }
+      }
+    }
+
+    if (!takenIn) {
+      items.update(job.itemId, {
+        executionStatus: "failed",
+        status: "in_progress",
+        executionResult:
+          "前回セッション中に中断(再起動時 reconcile)。再実行/エスカレ/却下できます。",
+      });
+      jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
+      failedOver++;
+    }
+  }
+  return { recovered, failedOver };
+}
+
 export async function approveExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
@@ -159,11 +360,47 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   return runExecution(itemId);
 }
 
-/** 自動実行を安く取り消す (§4-4 fire-and-forgetにしない・可逆&可視)。 */
+/**
+ * 自動実行を安く取り消す (§4-4 fire-and-forgetにしない・可逆&可視)。
+ * (1) 巻き戻し手順の提示: worker 自己申告の rollbackPlan があれば人間へ見せる文言にする
+ *     (winnow は自動実行しない=人間ワンタップ)。
+ * (2) 可逆性過大評価の信号: software auto succeeded を取り消したとき、可逆と自己申告したのに
+ *     巻き戻し手順が空(自己申告と実態が乖離)なら『可逆性過大評価』として該当 category へ即締め
+ *     (recordOutcome auditBad + audit_bad ラベルの二点セット。actions.ts recordAudit と同型)。
+ */
 export async function cancelExecution(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+  // 冪等: 既に cancelled なら再発火しない (多重 POST /cancel で audit_bad を二重計上しない)。
+  if (item.executionStatus === "cancelled") return item;
+
+  // (1) 巻き戻し手順の提示 (自動実行しない=人間ワンタップ)。
+  const note = item.rollbackPlan
+    ? `取り消されました(痕跡は履歴に残ります)。以下は worker が申告した巻き戻し手順です(自動実行しません。必要なら手動で1タップ実行してください):\n\n${item.rollbackPlan}`
+    : "取り消されました(痕跡は履歴に残ります)。副作用は自動では巻き戻されません。";
+
+  // (2) 可逆性過大評価: 可逆と申告したのに巻き戻し手順が空 = 自己申告と実態が乖離。
+  const overclaimed =
+    item.domain === "software" &&
+    item.autoExecuted &&
+    item.executionStatus === "succeeded" &&
+    item.declaredReversible === true &&
+    (!item.rollbackPlan || !item.rollbackPlan.trim());
+  if (overclaimed && item.category) {
+    // 締め方向のみ (§3.6-3 緩めない)。escalate 固定の learned rule を即立てる。
+    recordOutcome(item.category, "auto", "escalate", { auditBad: true });
+    labels.record({
+      itemId,
+      action: "audit_bad",
+      fromDisposition: "auto",
+      toDisposition: "escalate",
+      category: item.category,
+    });
+  }
+
   return items.update(itemId, {
     executionStatus: "cancelled",
     status: "rejected",
-    executionResult: "取り消されました(痕跡は履歴に残ります)。",
+    executionResult: note,
   });
 }

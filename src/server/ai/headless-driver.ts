@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { PATHS } from "../config.js";
+import { validateProjectDir } from "../paths.js";
 import { settings } from "../repo.js";
 import type { AiDriver, AiRequest, AiResult, SessionInfo } from "./driver.js";
 import { parseJson } from "./tmux-driver.js";
@@ -22,7 +23,17 @@ export class HeadlessDriver implements AiDriver {
       // strip interactive-only permission flags that also work in print mode
       .split(/\s+/)
       .slice(1); // drop the leading "claude"
-    const cwd = req.cwd ?? (req.role === "worker" ? PATHS.workspaces : PATHS.controlCwd);
+    // req.cwd を無検証で execFile cwd にする穴を塞ぐ(最終ゲート)。不正なら既定にフォールバック。
+    const fallback = req.role === "worker" ? PATHS.workspaces : PATHS.controlCwd;
+    let cwd = fallback;
+    if (req.cwd != null) {
+      const v = validateProjectDir(req.cwd);
+      if (v.escalate || v.dir == null) {
+        console.warn(`[winnow] headless dispatch: invalid cwd rejected (${v.reason ?? req.cwd}), using fallback`);
+      } else {
+        cwd = v.dir;
+      }
+    }
     try {
       const { stdout } = await pexec(
         "claude",
