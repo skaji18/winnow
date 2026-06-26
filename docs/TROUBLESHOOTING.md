@@ -9,7 +9,7 @@
 
 - **キューが全然減らない** → 序盤は正常です（Jカーブ）。さばき続けてください。
 - **これは確認したくない、というものが何度も上がる** → そのカードで「もう上げるな」、または `再調律・設定` の「締め具合」を少し下げる。
-- **逆に、自動に任せたくないものが勝手に処理される** → 「分類し直す→要確認/要判断」で倒し、「締め具合」を上げる。締め具合は内部で必要確信度を `0.5 + 0.4 × escalationTightness`（範囲 0.5〜0.9）に変換します。
+- **逆に、自動に任せたくないものが勝手に処理される** → 「分類し直す→要確認/要判断」で倒し、「締め具合」を上げる。締め具合は内部で必要確信度を `min(0.98, 0.5 + 0.4 × escalationTightness + calibBump)`（範囲 0.5〜0.98）に変換します。`calibBump` はビン較正による締め下駄で、カテゴリが申告より実際に外している証拠があるとき締め側にだけ上乗せされます。
 - **大きすぎて手がつかないアイテム** → 「分解する」で実行可能なタスク（leaf）まで割る。
 - **AIの実行結果が不安** → カードの「実行結果 / メモを見る」で中身を確認、必要なら「取り消す」。ただし副作用は自動では巻き戻されません。
 
@@ -77,7 +77,7 @@
 
 **対処**
 - まず許可プロンプト停止の有無を確認（前々項）。done が出ないケースの多くはこれが原因です。
-- dispatch は最大 2 回まで再試行されます（done が無く、ペインが idle に戻っている場合のみ）。それでも失敗する場合は `セッション` タブの live ビューや `tmux capture-pane` でペインの状態を目視確認してください（目視は readiness 検知のためで、結果スクレイピングには使いません）。
+- dispatch は最大 2 回まで試行されます（＝再試行は 1 回まで。done が無く、ペインが idle に戻っている場合のみ）。それでも失敗する場合は `セッション` タブの live ビューや `tmux capture-pane` でペインの状態を目視確認してください（目視は readiness 検知のためで、結果スクレイピングには使いません）。
 - 取りこぼした IPC ファイルが残ることがあります（後述の「ipc/ の堆積」）。
 
 ---
@@ -114,7 +114,7 @@
 - リモートアクセスは設計上想定外です。SSH ポートフォワード等でループバックへトンネルする（直接 bind を外向きにする手段はコード上ありません）。
 - MCP クライアントは必ず `POST /mcp` を使う。405 が返る場合はメソッドを見直す。
 - `claude` のログイン状態を確認する。`セッション` タブの live ビューや `tmux capture-pane` でログインプロンプトが出ていないか目視する。
-- 認証は REST/MCP ともに一切ありません。ループバック上の任意ローカルプロセスが全エンドポイント（起動コマンドの書き換えを含む）を無資格で叩けます。共有マシンでの取り扱いは [OPERATOR_GUIDE.md](./OPERATOR_GUIDE.md) を参照。
+- ログイン UI 付きの認証は依然ありません（ユーザ識別子を持たない）が、同一オリジン保証層が新設されました。全 `/api`・`/mcp` に Origin/Host 許可リスト検証が掛かり、状態変更系（`/api` の非 GET）は起動毎に生成されるローカルシークレットを要求します。詳細・切り分けは下記「`403 origin not allowed` / `403 missing local secret`」を参照。共有マシンでの取り扱いは [OPERATOR_GUIDE.md](./OPERATOR_GUIDE.md) を参照。
 
 ---
 
@@ -129,6 +129,98 @@
 **対処**
 - アプリ停止中に `~/.winnow/ipc/` 配下の不要ファイルを手動削除する。ディレクトリ自体は起動時の `ensureDirs()` で再作成されます。
 - パスは `WINNOW_HOME`（既定 `~/.winnow`）配下。場所の詳細は [CONFIG.md](./CONFIG.md) を参照。
+
+---
+
+## 起動時に DB 整合チェック／ダウングレード／マイグレーションで落ちる
+
+**症状**
+- サーバが listen する前に例外で停止し、`winnow:` で始まる stderr メッセージを残す。
+
+**原因**
+- DB スキーマは `PRAGMA user_version` を単一の真実源とする版管理（コード期待版 `CODE_SCHEMA_VERSION = 1`）になりました。起動時（`src/server/db.ts` のトップレベル＝`index.ts` が `db.js` を import した時点）に次の3つを順に行い、いずれも NG なら throw して listen させません。
+  - **整合チェック失敗**: SQLite `quick_check` の結果が単一行の `"ok"` でなければ停止。メッセージ: `winnow: SQLite quick_check FAILED for <dbパス>: <詳細JSON>`。DB ファイル破損時の新しい起動失敗モードです。
+  - **ダウングレード拒否**: DB の `user_version` がコード版より新しい場合に停止。メッセージ: `winnow: DB schema v<current> is newer than code v<CODE_SCHEMA_VERSION> (downgrade). Refusing to start.`。新しいバージョンで作成した DB を古いコードで起動した場合に出ます。
+  - **マイグレーションの外部キー違反**: 版0→版1 マイグレーション適用後の `foreign_key_check` で違反が検出されると ROLLBACK して停止。メッセージ: `winnow: migration v<n> foreign_key_check failed: <違反JSON>`。
+
+**対処**
+- `quick_check FAILED` は DB ファイル破損です。健全なバックアップから復元するか、空 DB から作り直す（場所は [CONFIG.md](./CONFIG.md) 参照）。
+- ダウングレード拒否は、新しいコードで作った DB を古いコードで開いています。コードを元のバージョンに戻すか、その DB に合うバージョンで起動してください。
+- マイグレーションの FK 違反は、版0→版1 で `label_events.itemId` の孤児（旧 remove が単純 DELETE で掃除しなかった分）が NULL 化される過程で起きえます。再実行で解消しない場合は DB の素性を確認してください（[OPERATOR_GUIDE.md](./OPERATOR_GUIDE.md) 参照）。
+- なお `reconcile` / `preflight` の例外は握り潰してサーバ起動を止めません。起動を恒久的にブロックするのは上記 DB 系チェックのみです。
+
+---
+
+## トップに「AI 未接続」の赤バナーが出る（preflight）
+
+**症状**
+- 画面トップに `AI 未接続: <理由> → [セッション起動]` の赤バナーが出る。
+
+**原因**
+- 起動時（listen 前に一度だけ）に preflight チェックが走り、`/api/state` の `preflight` に結果が乗ります。`preflight.ok` が `false` のときバナーを表示します（`preflight` 未提供＝`undefined` のときは何も出しません）。
+- preflight は AI セッションを起動しない軽い1回チェックです。`useHeadless = false` のとき `tmux -V` の可否（tmux 未検出なら note に「tmux 未検出」）と、起動コマンド先頭トークンを `<bin> --version`（timeout 5秒）で叩いた可否（解決できなければ「claude 未解決」）を見ます。`useHeadless = true` のとき tmux は skip されます。
+
+**対処**
+- 「tmux 未検出」は本ドキュメント「tmux セッションが立たない」の対処（tmux 導入 or `useHeadless = true`）に従う。
+- 「claude 未解決」は `claudeControlCmd` / `claudeWorkerCmd` の先頭バイナリが PATH 上で解決できるか確認する。
+- バナーの `[セッション起動]` ボタンは `api.initAi()` を呼びます。
+
+---
+
+## `403 origin not allowed` / `403 missing local secret`
+
+**症状**
+- ブラウザや API クライアントから `/api`・`/mcp` を叩くと 403 が返る。本文は `{"error":"origin not allowed"}` または `{"error":"missing local secret"}`。
+
+**原因**
+- 同一オリジン保証層（認証ではない）が `/api`・`/mcp` 全体に onRequest フックで掛かります。`/healthz`・`/ws`・静的アセットは対象外です。
+  - **`origin not allowed`**: Host ヘッダ（および Origin/Referer があればそのホスト名）が許可集合外。許可ホストは `127.0.0.1` / `localhost` / `[::1]` / `::1`、許可ポートは本サーバポート（と空＝ポート不問。dev では `5174` も）。DNS rebinding / 他オリジン誘導を弾くためのものです。
+  - **`missing local secret`**: 状態変更系（`/api` の GET/HEAD/OPTIONS 以外）でローカルシークレットが欠落／不一致。シークレットはサーバ起動毎に1回生成され（プロセス内メモリのみ・DB に置かない）、本番ビルドでは `index.html` の `</head>` 直前に `window.__WINNOW_SECRET__` として注入され、ブラウザは `X-Winnow-Secret` ヘッダで送ります。`GET /api/state`・`GET /api/export` はシークレット不要、`/mcp` はローカル claude の正規経路としてシークレット免除（Origin/Host 検証のみ）です。
+
+**対処**
+- ブラウザは本サーバが配信した `index.html` から開く（注入済みシークレットを使うため）。古いタブや別オリジンからの操作は 403 になります。リロードで解消することがあります。
+- dev モード（`NODE_ENV !== production`＝`web/dist` 非配信）では Vite origin（`:5174`）を許容し、状態変更系のシークレットも免除されます（`checkSecret` が dev で常に true）。本番ビルドでのみシークレットが効くため、403 の切り分けに使えます。
+- 自作の API クライアントから状態変更系を叩く場合は、本番では `X-Winnow-Secret` ヘッダを付ける必要があります。
+
+---
+
+## `PATCH /api/settings` が `400 disallowed command tokens` を返す
+
+**症状**
+- `claudeControlCmd` / `claudeWorkerCmd` を `PATCH /api/settings` で書き換えると 400 が返る。本文は `{"error":"disallowed command tokens in claudeControlCmd"}`（または `...in claudeWorkerCmd`）。
+
+**原因**
+- 起動コマンドは許可リスト（`claudeAllowedFlags`）外のトークンを含むと弾かれます（RCE 面を閉じるため）。先頭トークンは `claude` 固定、以降は許可集合内のトークンのみが受理されます。
+
+**対処**
+- 先頭を `claude` にし、フラグは `claudeAllowedFlags` の範囲内に収める。許可フラグの一覧は [CONFIG.md](./CONFIG.md) を参照。
+
+---
+
+## 再起動後に『前回セッション中に中断』のカードが浮上する（reconcile）
+
+**症状**
+- 再起動後、キューに『前回セッション中に中断(再起動時 reconcile)。再実行/エスカレ/却下できます。』の説明が付いたカードが最優先で再浮上する。
+
+**原因**
+- 起動時 reconcile（listen 前に一度だけ）が、前回プロセスで `running` のまま中断した実行ジョブを、AI を起動しない read-only 処理で決着させます。`~/.winnow` の IPC done sentinel（`<ipcId>.done` と `<ipcId>.res.json`）が見つかれば取り込み（recovered）、無い／parse 失敗なら `executionStatus = 'failed'`・`status = 'in_progress'`（blocked にはしない）に倒し（failedOver）、その分を queue の failed 再浮上経路が拾います。
+
+**対処**
+- カードから「再実行」「エスカレ」「却下」のいずれかで決着させる。中断は前回プロセスの異常終了を意味するので、必要なら原因（落ちた理由）も併せて確認してください。
+- reconcile は決定論処理で、例外が出てもサーバ起動は止まりません。
+
+---
+
+## 実行失敗のエラーに `quota:` 接頭辞が付く
+
+**症状**
+- `/healthz` の集計やデバッグで、ジョブの `error` が `quota: ...` で始まっている。
+
+**原因**
+- AI op の失敗メッセージがクォータ/レート起因（`quota` / `rate limit` / `usage limit` / `overloaded` / `too many requests` / `429` / `529` 等にマッチ）の場合、`classifyJobError` が `quota: ` 接頭辞を付けて種別を残します。残量計は作らず、痕跡を残すだけです。
+
+**対処**
+- `quota:` 付きは環境不全（クォータ/レート）であり、設定や入力の不備とは区別できます。時間をおいて再実行するか、利用上限を確認してください。
 
 ---
 

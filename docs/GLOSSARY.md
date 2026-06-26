@@ -65,8 +65,21 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 - **不可逆 または 高ステークス → 自動着火せず「承認待ち」（`executionStatus: "proposed"`）。**
 - 可逆・低ステークス・横断衝突なし → 自動着火。
 
-分類側ゲート（`classifier.ts`）: `confidence` が必要バーを下回る、または
-`stakes > 0.7 && reversibility < 0.5` のとき、`auto` を `escalate` に降格。
+分類側ゲート（`classifier.ts`）: `confidence` が必要バー
+`requiredConf = min(0.98, 0.5 + 0.4 * escalationTightness + calibBump)`（= 0.5..0.98。
+`calibBump` はビン較正の締め下駄）を下回る、または `stakes > 0.7 && reversibility < 0.5`
+のとき、`auto` を `escalate` に降格。
+
+### 較正母数の生提案（raw*）
+
+最終ゲート（tightness 締め・leaf 実行可能性ゲート）は `disposition`/`confidence` を
+書き換えるが、較正母数（`category_stats`）を汚さないよう「書き換え前の生提案」を別に保持する。
+
+| 表示ラベル | 内部キー | 定義 |
+|---|---|---|
+| 生の仕分け | `rawDisposition` | ルール・基準率補正・tightness/ゲートで上書きされる前の生の `disposition`。`null` = 未分類/レガシー。較正は `disposition` ではなくこれを真実源にする。 |
+| 生の確信度 | `rawConfidence` | clamp01 後・tightness 前の `confidence`。confidence ビン（`confBin`）の決定に使う。 |
+| 環境不全エスカレ | `envEscalated` | classify 失敗/JSON 解析失敗/タイムアウト/dispatch 不可で安全側 `escalate` に倒した痕跡。較正母数に積まず、週次の「失敗」集計に使う。 |
 
 ### プロセス軸
 
@@ -85,9 +98,13 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 |---|---|---|
 | Jカーブ | J-curve | コールドスタートの体感曲線。使い始めはキューが短くならない（AIが境界線を学習中）。さばき続けるほど自動に倒せる分が増え、やがてキューはエスカレーションだけの短いリストになる。 |
 | 基準率補正 | base-rate correction | 学習の中身の大半。カテゴリ別のカウントで境界を倒す（例: あるカテゴリで `escalate` が十分なサンプルで一貫却下されたら、learned rule で自動に倒す）。ゼロから方策は学ばず、明示ルールの残差だけを学ぶ。 |
-| 監査サンプリング | audit sampling | 自動バケットの一定割合を、わざと人間レビューに混ぜてバイアスのない教師信号を取る仕組み。サンプルされた項目は同じキューに塩漬けで混入し、控えめな「確認(自動処理)」チップだけが付く。 |
+| confidence ビン | `confBin` | 確信度を 5 段（`floor(clamp01(rawConfidence ?? confidence)*5)` を 0..4 に clamp、`null`/未定義は中央ビン 2 扱い）に区切るビン。`category_stats` の PK は `(category, aiDisposition, confBin)`。既存集計は全ビン SUM で後方互換。 |
+| Wilson スコア下限 | `wilsonLowerBound` | 緩め側（learned auto rule 生成）の判定を点推定から置換した区間下限（決定論・z=1.96、`total<1` は 0 を返す＝緩めない安全側）。`escalate→auto` 覆し率の Wilson 下限が `OVERTURN_TO_AUTO`(=0.8) 以上のときだけ自動に倒す。小標本で偶然高い却下率に釣られないため（旧 `MIN_SAMPLES` を置換・撤廃）。 |
+| 監査サンプリング | audit sampling | 自動バケットの一定割合を、わざと人間レビューに混ぜてバイアスのない教師信号を取る仕組み。サンプルされた項目は同じキューに塩漬けで混入し、控えめな「確認(自動処理)」チップだけが付く。learned auto rule のカテゴリは `learnedAuditFloor` まで監査率を底上げし、tip 直後は `tipProbationMs` の間 `tipProbationRate` へ一時引き上げ（probation）。 |
 | 監査チップ | `isAudit` / `chip-audit`（`確認(自動処理)`） | 監査サンプルとして抜き取られたカードに付く控えめなチップ。アクションは通常項目と同一。 |
 | 明示ルール / 学習した境界 | learned rule / `rules` | `category → disposition` の明示的な境界。学習由来（学習）か手動かを持ち、設定画面で「解除」できる。 |
+| 当面は上げて（即締め） | `escalateCategory`（`POST /api/items/:id/escalate-category`） | 「この種類は当面上げて」。`muteCategory`（もう上げるな＝自動に倒す）の対称で、`escalate` 固定の手動ルールを upsert し当該カテゴリの在庫へ即再適用する締め方向の正規路。 |
+| 可逆性過大評価 | — | software の auto succeeded を取り消したとき、worker が可逆（`declaredReversible===true`）と自己申告したのに `rollbackPlan` が空＝自己申告と実態が乖離した状態。該当 category を即 `escalate` に締める（締め方向のみ）。 |
 | 信号の非対称 | — | 過剰エスカレーションは安く速く気づけ、過小エスカレーションは高く遅れて危険に現れる。ゆえに「**締めるのは速く、緩めるのは慎重に**」。 |
 
 ---
@@ -102,7 +119,22 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 | 実行器 | Executor | リーフに効く。具体実行を回す。可逆性で自動着火／提案を分ける。 |
 | 昇格判定 | Promotion Judge | 出てきた子に「まだ問いか／もう実行可能か」を付け直す。 |
 | 案件に昇格 | to-project（`POST /api/items/:id/to-project`） | ノードをプロジェクト（入れ物）に格上げし、サブツリーごと紐付ける。 |
-| 承認待ち | `executionStatus: "proposed"` | 不可逆・高ステークス、または横断衝突ガードにかかった項目。人間のワンタップ承認を待つ状態。 |
+| 承認待ち | `executionStatus: "proposed"` | 不可逆・高ステークス、未確定ノード配下/上流未完リーフ、または横断衝突ガードにかかった項目。人間のワンタップ承認を待つ状態。 |
+
+### 実行成果物・痕跡
+
+`executionResult` は後方互換のため連結文字列を維持しつつ、監査／取り消し提示のため以下を分離保持する。
+
+| 表示ラベル | 内部キー | 定義 |
+|---|---|---|
+| 実行サマリ | `executionSummary` | general 成果物の要約（`ExecuteOut.summary`）。 |
+| 実行本体 | `executionOutput` | general 成果物本体（`ExecuteOut.output`）。下書き提案の中身。 |
+| 巻き戻し手順 | `rollbackPlan` | software 実行の巻き戻し手順（worker 自己申告）。取り消し時に提示。 |
+| 可逆性自己申告 | `declaredReversible` | worker が可逆と申告したか。`null` = 未申告（三値）。可逆と申告したのに `rollbackPlan` が空なら「可逆性過大評価」として締める。 |
+| 外部成果物 | `artifacts` | 外部副作用の自由文/URL 配列を JSON 文字列で持つ read-only 痕跡。winnow は能動操作しない。 |
+
+> 実行失敗（`executionStatus: "failed"`）は `status` を `blocked` にせず `in_progress` に保ち、
+> キューの再浮上フィルタで拾う。
 
 > AI 連携の詳細（tmux／ファイルI/Oプロトコル／ヘッドレス）は [`docs/MCP.md`](MCP.md) と
 > [`docs/CONFIG.md`](CONFIG.md) を参照。
@@ -113,12 +145,14 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 
 | 表示ラベル | 英語 / コード上の語 | 定義 |
 |---|---|---|
-| 案件（プロジェクト） | project | 最上位の束ね。アイテムは1案件に属せる。`mode` で見せ方を切替（`board`=状態カンバン / `flow`=優先度・期日順リスト）。削除してもタスクは残り、紐付けだけ外れる。 |
+| 案件（プロジェクト） | project | 最上位の束ね。アイテムは1案件に属せる。`mode` で見せ方を切替（`board`=状態カンバン / `flow`=優先度・期日順リスト）。`status` で `active` / `archived`（アーカイブ。ピッカーは既定で畳む）を切替。削除してもタスクは残り、紐付けだけ外れる。 |
 | 案件の前提・文脈 | `Project.context` | 案件固有の自由文。分解・実行のプロンプトに注入される。 |
 | スプリント | sprint | 案件に属さない**グローバルな時間箱（期間）**。スプリントタブはその期間の全タスクを案件横断でカンバン表示。削除してもタスクは残り、割当だけ外れる。 |
 | 状態 | `status` | 受信(inbox) / 未着手(classified) / 進行中(in_progress) / レビュー(review) / 完了(done) / 却下(rejected) / 停滞(blocked)。 |
 | 優先度 | `priority` | 緊急(urgent) / 高(high) / 中(normal) / 低(low)。既定 `normal`。キューの並びに加点。 |
 | 期日 | `dueDate` | 期限（epoch ms）。超過・間近はキューで前に出る。 |
+| 原典リンク | `sourceUrl` | 取り込み元 URL/参照（課題/PR/ドキュメントへ戻る）。read-only 痕跡で winnow は外部送出しない。`null` = 手入力。 |
+| 外部冪等キー | `externalKey` | 外部ソース由来の重複取り込み防止キー。同一 `externalKey` の再 capture は重複作成せず既存 Item に追記して返す（再分類は発火しない）。非 NULL のみ一意（部分ユニーク索引）。 |
 
 ---
 
@@ -126,13 +160,21 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 
 | 表示ラベル | 内部キー | 定義 | 既定 / 値域 |
 |---|---|---|---|
-| 締め具合 | `escalationTightness` | 高いほどエスカレ寄り（安全側）。必要確信度バーを `0.5 + 0.4 * tightness`（= 0.5..0.9）に上げる。 | 既定 0.7 / 0–1 |
+| 締め具合 | `escalationTightness` | 高いほどエスカレ寄り（安全側）。必要確信度バーを `min(0.98, 0.5 + 0.4 * tightness + calibBump)`（= 0.5..0.98。`calibBump` はビン較正の締め下駄）に上げる。 | 既定 0.7 / 0–1 |
 | 監査サンプル率 | `auditRate` | 自動処理の何%を監査としてキューに混ぜるか（`auto` かつ乱数 < auditRate でサンプル）。 | 既定 0.15 / 0–1（UI スライダーは 0–0.5） |
 | worker 並列数 | `maxWorkers` | worker セッション数。実行時に `max(1, …)` で 1 を下限に丸め。 | 既定 2 / 1–8（UI スライダーは 0–6） |
 | プロダクトの前提 | `productContext` | プロダクト全体の前提・方針。仕分け・分解・実行すべてに注入。 | 既定 `""` |
 | headless で動かす | `useHeadless` | tmux 常駐ではなく `claude -p`（ヘッドレス）で動かす切替。 | 既定 `false` |
 | control 起動コマンド | `claudeControlCmd` | control セッションの起動コマンド。 | 既定 `claude --permission-mode acceptEdits` |
 | worker 起動コマンド | `claudeWorkerCmd` | worker セッションの起動コマンド。 | 既定 `claude --permission-mode acceptEdits` |
+| 自動実行の一時停止 | `pauseAuto` | true で自動経路（キュー掃き出し・classify 末尾の即時着火・capture sweep）を抑止。手動承認は通す。 | 既定 `false` |
+| learned 監査下限 | `learnedAuditFloor` | learned auto rule カテゴリに恒常維持する最低監査率。`rollAudit` が `max(auditRate, learnedAuditFloor)` を採る。 | 既定 0.25 / 0–1 |
+| tip probation 期間 | `tipProbationMs` | learned auto rule の tip 直後に監査を一時引き上げる期間。 | 既定 604800000ms（1週間） |
+| tip probation 監査率 | `tipProbationRate` | probation 期間中の引き上げ監査率。 | 既定 0.5 / 0–1 |
+| ビン較正の最小サンプル | `binCalibrationMinSamples` | confidence ビン較正を発火させる最小サンプル数（ビン単位）。未満は補正しない。 | 既定 8（整数） |
+| ビン乖離閾値 | `binOverturnGap` | ビン実 overturn 率が申告を上回る乖離の閾値。超過で当該カテゴリの `requiredConf` を締め側に補正。 | 既定 0.25 / 0–1 |
+| claude 許可フラグ | `claudeAllowedFlags` | `claudeControlCmd`/`claudeWorkerCmd` を PATCH/import で書き換える際に許可するトークン集合（RCE 面を封鎖）。 | 既定: `--permission-mode` `acceptEdits` `--dangerously-skip-permissions` `-p` `--output-format` `json` `--model` `sonnet` `opus` `haiku` `plan` `default` |
+| 取り込み保留閾値 | `captureInboxHoldThreshold` | 過負荷時に capture を即 classify せず inbox 保留にする保留中件数の閾値。0 で無効。 | 既定 24 |
 
 > 各値のクランプ・更新 API は [`docs/CONFIG.md`](CONFIG.md) を参照。
 > 注: コード上のコメントでは「tightness」と呼ぶ箇所があるが、実キーは `escalationTightness`。
