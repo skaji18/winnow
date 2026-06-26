@@ -3,7 +3,7 @@ import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
-import { items, labels, rules } from "./repo.js";
+import { categoryStats, items, labels, rules } from "./repo.js";
 import { confBinOf } from "./text.js";
 
 /**
@@ -210,4 +210,119 @@ export function auditConfirm(itemId: string, ok: boolean): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
   return items.update(itemId, recordAudit(item, ok));
+}
+
+/**
+ * 処分=ラベルの Undo (§4-4 安く取り消せる)。直近1件の label_event を逆適用する。
+ * 操作直後にカードを即消ししない前提で、人間が「取り消し」を1タップしたときに直近の一手を戻す。
+ * 整合性 (calibration の簿記巻き戻し) はサーバ責務 (UI は undoableLabel の有無だけ見る)。
+ *
+ * 逆適用の内容:
+ *  - disposition を fromDisposition に復元 (記録されていれば)。
+ *  - status を「さばき前」へ: do/reject は classified に戻す (do は in_progress、reject は rejected を解く)。
+ *  - mute_category はそのカテゴリの最新 active rule を deactivate (即締めの対称=緩めも1手だけ戻せる)。
+ *  - recordOutcome が積んだ category_stats の bump を unbump で 1 戻す (教師信号を歪めない)。
+ *  - 最後にその label_event を削除する (週次集計・母数から外す=二重計上しない)。
+ * 戻せる label が無ければ item をそのまま返す。
+ */
+export function undoLastLabel(itemId: string): Item | null {
+  const item = items.get(itemId);
+  if (!item) return null;
+  const ev = labels.lastForItem(itemId);
+  if (!ev) return item;
+
+  const confBin = confBinOf(item.rawConfidence ?? item.confidence);
+  const rawDisp = item.rawDisposition ?? ev.fromDisposition ?? item.disposition;
+  const patch: Partial<Item> = {};
+
+  switch (ev.action) {
+    case "do": {
+      // doIt: status を in_progress にした。監査auto なら audit_ok を積み auditSampled を下ろした。
+      patch.status = "classified";
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      if (item.disposition === "auto" && !item.auditSampled) {
+        // 監査 do = recordAudit(true): agreed(auto) を bump し auditSampled=false にした。
+        patch.auditSampled = true;
+        if (ev.category) categoryStats.unbump(ev.category, "auto", "agreed", confBin);
+      } else if (ev.category && rawDisp) {
+        // 通常 do = 是認: agreed(rawDisp) を bump した。
+        categoryStats.unbump(ev.category, rawDisp, "agreed", confBin);
+      }
+      break;
+    }
+    case "reject": {
+      patch.status = "classified";
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      break;
+    }
+    case "reclassify":
+    case "override": {
+      // reclassify/override: disposition を to に覆し recordOutcome を積んだ。
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      patch.humanOverrode = false;
+      if (ev.category && rawDisp && ev.toDisposition) {
+        const human = ev.toDisposition;
+        if (rawDisp === human) {
+          categoryStats.unbump(ev.category, rawDisp, "agreed", confBin);
+        } else {
+          categoryStats.unbump(ev.category, rawDisp, "overturned", confBin);
+          if (rawDisp === "escalate" && human === "auto") {
+            categoryStats.unbump(ev.category, rawDisp, "overturnedToAuto", confBin);
+          }
+        }
+      }
+      break;
+    }
+    case "mute_category": {
+      // muteCategory: そのカテゴリに auto 固定 manual rule を立て disposition=auto にした。
+      // 最新 active rule を deactivate し disposition を戻す (緩め方向の1手だけ戻せる)。
+      if (item.category) {
+        const r = rules.forCategory(item.category);
+        if (r) rules.deactivate(r.id);
+      }
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      break;
+    }
+    case "audit_ok":
+    case "audit_bad":
+    case "approve":
+    case "demote":
+    default:
+      // これらは標準の Undo 対象にしない (監査教師信号/承認/降格は別経路で扱う)。安全側で no-op。
+      break;
+  }
+
+  labels.deleteById(ev.id);
+  return Object.keys(patch).length ? (items.update(itemId, patch) ?? item) : item;
+}
+
+/**
+ * 即締め: muteCategory の対称『この種類は当面上げて』(§3.6-3 締めるのは速く)。
+ * escalate 固定の manual rule を upsert する。緩め方向(auto)とは非対称に、締め方向だけ
+ * UI から手早く打てる正規路。disposition も escalate に倒し、在庫を即再適用する。
+ */
+export function escalateCategory(itemId: string): Item | null {
+  const item = items.get(itemId);
+  if (!item || !item.category) return item ?? null;
+  rules.upsert({
+    category: item.category,
+    forcedDisposition: "escalate",
+    source: "manual",
+    note: "この種類は当面上げて(手動・締め)",
+  });
+  labels.record({
+    itemId,
+    action: "override",
+    fromDisposition: item.disposition,
+    toDisposition: "escalate",
+    category: item.category,
+  });
+  const updated = items.update(itemId, {
+    disposition: "escalate",
+    status: "classified",
+    humanOverrode: item.disposition !== "escalate",
+  });
+  // 締め方向の在庫即再適用 (AI往復ゼロ)。auto に倒っていた classified 在庫を escalate へ。
+  reapplyAndIgnite(item.category);
+  return updated;
 }

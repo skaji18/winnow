@@ -101,7 +101,7 @@ interface ExecuteOut {
 }
 
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
-export async function requestExecution(itemId: string): Promise<Item | null> {
+export async function requestExecution(itemId: string, instruction = ""): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
@@ -163,7 +163,7 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
     });
   }
   // 可逆: 自動着火。
-  return runExecution(itemId);
+  return runExecution(itemId, instruction);
 }
 
 /**
@@ -211,8 +211,8 @@ function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | nu
   return updated;
 }
 
-/** 実際に worker セッションへ投げて実行する。 */
-export async function runExecution(itemId: string): Promise<Item | null> {
+/** 実際に worker セッションへ投げて実行する。instruction は「この方向で直す」の一行指示(任意)。 */
+export async function runExecution(itemId: string, instruction = ""): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
 
@@ -250,7 +250,7 @@ export async function runExecution(itemId: string): Promise<Item | null> {
     id: ipcId,
     role: "worker",
     label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item)),
+    prompt: executePrompt(item, buildContextBlock(item), instruction),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
     timeoutMs: 600_000,

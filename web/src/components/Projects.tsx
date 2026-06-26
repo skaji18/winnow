@@ -12,26 +12,40 @@ const STATUSES = ["inbox", "classified", "in_progress", "review", "done", "block
 
 export function ProjectsView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [sel, setSel] = useState<string | null>(state.projects[0]?.id ?? null);
+  const [showArchived, setShowArchived] = useState(false);
   const project = state.projects.find((p) => p.id === sel) ?? null;
+  // アーカイブを既定で畳む。sel が archived 化されても detail は参照表示できる。
+  const visible = state.projects.filter((p) => showArchived || p.status !== "archived");
 
   return (
     <div className="proj-layout">
       <div className="proj-side">
         <NewProject onChange={onChange} onCreated={setSel} />
-        {state.projects.map((p) => (
+        <label className="row muted" style={{ gap: 6, fontSize: 11.5, padding: "2px 0" }}>
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+          />
+          アーカイブを表示
+        </label>
+        {visible.map((p) => (
           <button
             key={p.id}
             className={`proj-pick ${sel === p.id ? "sel" : ""}`}
             onClick={() => setSel(p.id)}
           >
-            <b>{p.name}</b>
+            <b>
+              {p.name}
+              {p.status === "archived" && <span className="muted">（アーカイブ）</span>}
+            </b>
             <span className="muted" style={{ fontSize: 11 }}>
               {p.mode === "board" ? "ボード" : "フロー"} ·{" "}
               {state.items.filter((i) => i.projectId === p.id).length}件
             </span>
           </button>
         ))}
-        {state.projects.length === 0 && <p className="muted">案件がありません。</p>}
+        {visible.length === 0 && <p className="muted">案件がありません。</p>}
       </div>
 
       <div className="proj-main">
@@ -115,6 +129,18 @@ function ProjectDetail({
           <option value="board">ボード表示</option>
           <option value="flow">フロー表示</option>
         </select>
+        {project.status === "archived" ? (
+          <button onClick={() => api.updateProject(project.id, { status: "active" }).then(onChange)}>
+            復元
+          </button>
+        ) : (
+          <button
+            title="アーカイブ(タスクは残り、案件ピッカーで畳まれます)"
+            onClick={() => api.updateProject(project.id, { status: "archived" }).then(onChange)}
+          >
+            アーカイブ
+          </button>
+        )}
         <button
           className="danger"
           onClick={() => {
@@ -170,6 +196,7 @@ function ProjectBoard({
       <Kanban
         items={items}
         onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
+        onStatusSelect={(id, status) => api.updateItem(id, { status }).then(onChange)}
         renderCard={(it) => (
           <>
             <div className="board-card-title">{it.title}</div>

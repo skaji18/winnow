@@ -83,6 +83,18 @@ export const items = {
     const r = db.prepare("SELECT * FROM items WHERE id = ?").get(id) as Row | undefined;
     return r ? mapItem(r) : null;
   },
+  /**
+   * 外部取り込み(capture)の直近統計 (設定の『直近の捕獲』表示用)。externalKey か sourceUrl を
+   * 持つ Item を「外部取り込み由来」とみなし、件数と最新 createdAt を返す。0 件なら lastAt=null。
+   */
+  captureStats(): { count: number; lastAt: number | null } {
+    const r = db
+      .prepare(
+        "SELECT COUNT(*) AS c, MAX(createdAt) AS m FROM items WHERE externalKey IS NOT NULL OR sourceUrl IS NOT NULL",
+      )
+      .get() as { c: number; m: number | null };
+    return { count: r.c, lastAt: r.m ?? null };
+  },
   // 外部冪等キーで既存を検索 (capture の重複 no-op/追記)。非null時一意(部分ユニーク索引)。
   findByExternalKey(key: string): Item | null {
     const r = db.prepare("SELECT * FROM items WHERE externalKey = ?").get(key) as Row | undefined;
@@ -229,6 +241,10 @@ export const labels = {
       .prepare("SELECT * FROM label_events ORDER BY createdAt ASC")
       .all() as LabelEvent[];
   },
+  /** 全期間の LabelEvent 総数 (cold-banner 初日=実績ゼロ判定に使う)。 */
+  total(): number {
+    return (db.prepare("SELECT COUNT(*) AS c FROM label_events").get() as { c: number }).c;
+  },
   since(ts: number): LabelEvent[] {
     return db
       .prepare("SELECT * FROM label_events WHERE createdAt >= ? ORDER BY createdAt DESC")
@@ -238,6 +254,17 @@ export const labels = {
     return db
       .prepare("SELECT * FROM label_events WHERE itemId = ? ORDER BY createdAt DESC")
       .all(itemId) as LabelEvent[];
+  },
+  /** 直近1件の label_event (Undo=直近1手の逆適用の起点)。無ければ null。 */
+  lastForItem(itemId: string): LabelEvent | null {
+    const r = db
+      .prepare("SELECT * FROM label_events WHERE itemId = ? ORDER BY createdAt DESC LIMIT 1")
+      .get(itemId) as LabelEvent | undefined;
+    return r ?? null;
+  },
+  /** label_event を1件物理削除する (Undo の逆適用後に教師信号も巻き戻す)。 */
+  deleteById(id: string): void {
+    db.prepare("DELETE FROM label_events WHERE id = ?").run(id);
   },
   /** カテゴリ × アクション群で件数を数える (summary の方向別締緩・符号ズレ補正の母数)。 */
   countByCategoryAction(category: string, actions: LabelAction[], since: number): number {
@@ -361,6 +388,21 @@ export const categoryStats = {
       field === "overturned" ? 1 : 0,
       field === "overturnedToAuto" ? 1 : 0,
     );
+  },
+  /**
+   * bump の逆操作 (Undo=直近1手の逆適用)。該当行のカウンタを -1 する (0 未満にはしない=
+   * MAX(0,...))。行が無ければ何もしない。教師信号の巻き戻しに使う (recordOutcome の bump と対称)。
+   */
+  unbump(
+    category: string,
+    aiDisposition: Disposition,
+    field: "agreed" | "overturned" | "overturnedToAuto",
+    confBin = 0,
+  ): void {
+    db.prepare(
+      `UPDATE category_stats SET ${field} = MAX(0, ${field} - 1)
+       WHERE category = ? AND aiDisposition = ? AND confBin = ?`,
+    ).run(category, aiDisposition, confBin);
   },
   all(): CategoryStat[] {
     return db.prepare("SELECT * FROM category_stats").all() as CategoryStat[];

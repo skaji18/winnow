@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../api.js";
 import type { AppState, Item, Sprint } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
-import { DueBadge, PriorityBadge, ProjectChip } from "./Bits.js";
+import { DispositionDot, DueBadge, parseDate, PriorityBadge, ProjectChip, toDateInput } from "./Bits.js";
 import { Kanban } from "./Kanban.js";
 
 // スプリント = グローバルな時間箱。カンバンは「その期間の全タスク」を案件横断で
@@ -56,12 +56,14 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
         <div className="empty">スプリント期間を選ぶと、その期間の横断カンバンが出ます。</div>
       ) : (
         <>
+          <SprintStats sprint={sprint} inSprint={inSprint} />
           <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
-            カードをドラッグして列(状態)を移動できます。
+            カードをドラッグ、または各カードのステータス選択で列(状態)を移動できます。
           </p>
           <Kanban
             items={inSprint}
             onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
+            onStatusSelect={(id, status) => api.updateItem(id, { status }).then(onChange)}
             renderCard={(it) => <SprintCard item={it} state={state} onChange={onChange} />}
           />
 
@@ -101,6 +103,29 @@ function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => 
         <option value="active">進行中</option>
         <option value="completed">完了</option>
       </select>
+      {/* 期間配線 (サーバ updateSprint は startDate/endDate/goal 対応済み=配線漏れだった)。 */}
+      <input
+        type="date"
+        title="開始日"
+        aria-label="スプリント開始日"
+        defaultValue={toDateInput(sprint.startDate)}
+        onChange={(e) => api.updateSprint(sprint.id, { startDate: parseDate(e.target.value) }).then(onChange)}
+      />
+      <input
+        type="date"
+        title="終了日"
+        aria-label="スプリント終了日"
+        defaultValue={toDateInput(sprint.endDate)}
+        onChange={(e) => api.updateSprint(sprint.id, { endDate: parseDate(e.target.value) }).then(onChange)}
+      />
+      <input
+        type="text"
+        placeholder="ゴール(一行)"
+        aria-label="スプリントのゴール"
+        defaultValue={sprint.goal}
+        onBlur={(e) => api.updateSprint(sprint.id, { goal: e.target.value }).then(onChange)}
+        style={{ width: 160 }}
+      />
       <button
         className="danger"
         onClick={() => {
@@ -111,6 +136,24 @@ function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => 
         削除
       </button>
     </>
+  );
+}
+
+// スプリント集計(最小・厳格): 残りN日 / 未完M件 / 期日超過K件 のみ。
+// velocity/burndown は出さない(背骨: 処理量メトリクス禁止)。ヘッダ枠(muted 一行)へ間借り。
+function SprintStats({ sprint, inSprint }: { sprint: Sprint; inSprint: Item[] }) {
+  const now = Date.now();
+  const remain =
+    sprint.endDate == null ? "—" : `${Math.ceil((sprint.endDate - now) / 86_400_000)}日`;
+  const incomplete = inSprint.filter((i) => i.status !== "done" && i.status !== "rejected").length;
+  const overdue = inSprint.filter(
+    (i) => i.dueDate != null && i.dueDate < now && i.status !== "done",
+  ).length;
+  return (
+    <p className="muted" style={{ fontSize: 12.5, margin: "0 0 6px" }}>
+      残り {remain} / 未完 {incomplete}件 / 期日超過 {overdue}件
+      {sprint.goal ? ` ・ ゴール: ${sprint.goal}` : ""}
+    </p>
   );
 }
 
@@ -130,7 +173,7 @@ function SprintCard({
       <div className="board-card-title">{item.title}</div>
       <div className="badges" style={{ marginBottom: 6 }}>
         <ProjectChip projectId={item.projectId} projects={state.projects} />
-        {item.disposition && <span className={`badge disp-${item.disposition}`}>●</span>}
+        <DispositionDot disposition={item.disposition} />
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
       </div>

@@ -163,7 +163,7 @@ ${fenceBody("body", item.body)}
 }
 
 /** execute: リーフの実行。domain で挙動を変える (§3.4). */
-export function executePrompt(item: Item, ctx = ""): string {
+export function executePrompt(item: Item, ctx = "", instruction = ""): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
   // 絶対パスをプロンプト本文にも書き、全ファイルI/Oをその配下に閉じ込める。
@@ -179,12 +179,17 @@ export function executePrompt(item: Item, ctx = ""): string {
 着手前に、変更計画を output の冒頭に必ず書くこと: (1)対象ファイル一覧 (2)実行するコマンド (3)外部送信の有無。不可逆な操作(本番デプロイ・データ削除・外部送信など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと(既存の needs_human ガードを使う。追加の往復はしない)。
 実行した場合は output の末尾に巻き戻し手順を必ず書くこと: 変更したファイルの一覧と、その変更を元に戻す具体的な git コマンド(例: git checkout -- <file> / git revert <sha> / git stash)。これは rollbackPlan にも同じ内容を入れること。winnow はこれを自動実行しない。人間が取り消しを押したときの手順として提示するだけ。`
       : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。${dirNote}`;
+  // 「この方向で直す」再走: 人間の一行指示(観察対象データ=本文と同格の追加要望)を渡す。
+  // 既存の成果物を踏まえて方向修正させる。未指定なら従来の execute と同一(後方互換)。
+  const redirectNote = instruction.trim()
+    ? `\n\n## 追加の方向修正(人間の一行指示)\n前回の成果物を踏まえ、次の方向で直してください: ${instruction.trim()}`
+    : "";
   return `${SPINE}
 ${ctx}
 # タスク: 実行(Executor)
 以下は「リーフ(実行可能タスク)」です。上の【文脈】(プロダクト前提・案件前提・上位の意図)に
 沿って実行してください。bodyの受け入れ基準を満たすことをゴールにすること。
-${softwareNote}
+${softwareNote}${redirectNote}
 
 ## アイテム
 ${fenceBody("title", item.title)}

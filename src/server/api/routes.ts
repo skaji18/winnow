@@ -24,6 +24,7 @@ import { weekly } from "../summary.js";
 import { validateClaudeCmd } from "../security.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
+import { SERVER_PORT } from "../config.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -44,7 +45,7 @@ const classifying = new Set<string>();
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // One-shot snapshot powering the whole UI.
-  app.get("/api/state", async () => {
+  app.get("/api/state", async (req) => {
     // 仕分け済みの自動アイテムはキューを開いた瞬間に走り出す (待ち行列を作らない)。
     // requestExecution が自己ガードする: executionStatus!=="none" は弾き、
     // 不可逆/高ステークスは proposed に回すので、ここでの追加ゲートは不要。
@@ -97,6 +98,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // 起動時 preflight/reconcile の痕跡と in-flight 集計(実行中N/承認待ちM)。表示は Batch6。
       runtime: getRuntimeState(),
       inFlight: executor.inFlightCount(),
+      // Batch6 UI が消費する薄い追加: AI 未接続バナー/cold-banner 初日/MCP スニペット/直近捕獲。
+      // preflight: runtime の tmux/claude チェックを {ok,reason} に畳む (未チェック時は ok=true)。
+      preflight: ((): { ok: boolean; reason: string | null } => {
+        const pf = getRuntimeState().preflight;
+        const ok = pf.tmuxOk && pf.claudeOk;
+        return { ok, reason: ok ? null : (pf.note ?? "AI 接続を確認できません") };
+      })(),
+      totalLabels: labels.total(),
+      captureStats: items.captureStats(),
+      // MCP 接続先 (read-only。ローカル claude が capture を直接投げる正規経路 /mcp)。
+      mcpEndpoint: `http://${(req.headers.host as string) || `localhost:${SERVER_PORT}`}/mcp`,
     };
   });
 
@@ -244,9 +256,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // execute は長くなりうるのでバックグラウンド。UIは /api/state をポーリング。
+  // 任意 instruction: general成果物の『この方向で直す』(一行指示→同じ execute 再走)。
+  // 未指定=従来の execute と同一 (後方互換)。
+  const executeSchema = z.object({ instruction: z.string().optional() }).strict();
   app.post("/api/items/:id/execute", async (req) => {
     const { id } = req.params as { id: string };
-    background(() => executor.requestExecution(id));
+    const body = req.body ? executeSchema.parse(req.body) : {};
+    background(() => executor.requestExecution(id, body.instruction ?? ""));
     return { started: true };
   });
   app.post("/api/items/:id/approve", async (req) => {
@@ -285,6 +301,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const { ok } = z.object({ ok: z.boolean() }).parse(req.body);
     return actions.auditConfirm(id, ok);
+  });
+
+  // 処分=ラベルの Undo (直近1手の逆適用) と、即締め(muteCategory の対称)。
+  app.post("/api/items/:id/undo-label", async (req) => {
+    const { id } = req.params as { id: string };
+    return actions.undoLastLabel(id) ?? { error: "not found" };
+  });
+  app.post("/api/items/:id/escalate-category", async (req) => {
+    const { id } = req.params as { id: string };
+    return actions.escalateCategory(id) ?? { error: "not found" };
   });
 
   // --- sessions (terminal theater) -----------------------------------------

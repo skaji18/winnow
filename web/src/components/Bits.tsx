@@ -1,5 +1,5 @@
-import type { Item, Project, Sprint } from "../types.js";
-import { PRIORITY_LABEL } from "../types.js";
+import type { Disposition, Item, Project, Sprint } from "../types.js";
+import { DISPOSITION_LABEL, PRIORITY_LABEL } from "../types.js";
 
 // カード/ビュー共通の小物バッジ。期日・優先度・案件をグランス可能に出す。
 
@@ -40,6 +40,64 @@ export function ProjectChip({
     <span className="badge proj" title="案件 / スプリント">
       {p.name}
       {sp ? ` · ${sp.name}` : ""}
+    </span>
+  );
+}
+
+/**
+ * 承認プレビュー/成果物の artifacts・sourceUrl をリンクチップで出す (§3.4 痕跡を可視に)。
+ * winnow は外部送出しない=read-only リンク。どちらも空/undefined なら null(現状維持)。
+ */
+export function ArtifactChips({
+  artifacts,
+  sourceUrl,
+}: {
+  artifacts?: string | null;
+  sourceUrl?: string | null;
+}) {
+  let parsed: string[] = [];
+  if (artifacts) {
+    try {
+      const v = JSON.parse(artifacts);
+      if (Array.isArray(v)) parsed = v.map((x) => String(x));
+    } catch {
+      parsed = [artifacts];
+    }
+  }
+  if (parsed.length === 0 && !sourceUrl) return null;
+  const isUrl = (s: string) => /^https?:\/\//i.test(s);
+  const basename = (s: string) => s.split(/[/\\]/).pop() || s;
+  return (
+    <div className="badges" style={{ marginTop: 6 }}>
+      {sourceUrl && (
+        <a className="badge proj" href={sourceUrl} target="_blank" rel="noreferrer">
+          🔗 ソース
+        </a>
+      )}
+      {parsed.map((a, i) =>
+        isUrl(a) ? (
+          <a key={i} className="badge" href={a} target="_blank" rel="noreferrer" title={a}>
+            📎 {basename(a)}
+          </a>
+        ) : (
+          <span key={i} className="badge" title={a}>
+            📎 {basename(a)}
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
+/**
+ * 色●だけのコンパクト表示でも色以外の手がかり(sr-only ラベル)を必ず添える (a11y §4-2)。
+ */
+export function DispositionDot({ disposition }: { disposition: Disposition | null }) {
+  if (!disposition) return null;
+  return (
+    <span className={`badge disp-${disposition}`} title={DISPOSITION_LABEL[disposition]}>
+      <span aria-hidden="true">●</span>
+      <span className="sr-only">{DISPOSITION_LABEL[disposition]}</span>
     </span>
   );
 }

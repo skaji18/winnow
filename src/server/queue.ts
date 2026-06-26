@@ -1,5 +1,5 @@
-import type { Item } from "./domain.js";
-import { items } from "./repo.js";
+import type { Disposition, Item, LabelAction } from "./domain.js";
+import { items, labels } from "./repo.js";
 
 // あなたの「今日なに見る?」ビュー (REQUIREMENTS §4). 火の海ではなく
 // エスカレーションだけの短いキュー。自動分は畳む。ただし監査サンプルは
@@ -18,7 +18,23 @@ export interface QueueItem extends Item {
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
   ageDays: number | null;
+  // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。UI はこの有無だけ見て
+  // インライン『取り消し』を出す (逆適用の整合性はサーバ責務)。
+  undoableLabel: {
+    action: LabelAction;
+    fromDisposition: Disposition | null;
+    toDisposition: Disposition | null;
+  } | null;
 }
+
+// Undo で戻せる(逆適用が定義されている)アクションだけを undoableLabel として出す。
+const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
+  "do",
+  "reject",
+  "reclassify",
+  "override",
+  "mute_category",
+]);
 
 const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -0.4 };
 // 手動 orderIndex を「弱く」混ぜるための係数 (DECISIONS: 手動並びは弱いタイブレーク)。
@@ -151,6 +167,15 @@ export function queue(): QueueItem[] {
     const inProgressAge =
       it.status === "in_progress" ? Math.floor((Date.now() - it.updatedAt) / DAY_MS) : null;
     const staleDays = inProgressAge != null && inProgressAge >= STALE_DAYS ? inProgressAge : null;
+    const last = labels.lastForItem(it.id);
+    const undoableLabel =
+      last && UNDOABLE.has(last.action)
+        ? {
+            action: last.action,
+            fromDisposition: last.fromDisposition,
+            toDisposition: last.toDisposition,
+          }
+        : null;
     return {
       ...it,
       isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
@@ -159,6 +184,7 @@ export function queue(): QueueItem[] {
       surfaceReason: surfaceReasonOf(it, ageDays),
       staleDays,
       ageDays,
+      undoableLabel,
     };
   });
 }

@@ -4,7 +4,8 @@
   --panel-2: #1e222b;
   --border: #2a2f3a;
   --text: #e6e9ef;
-  --muted: #9aa3b2;
+  /* コントラスト引き上げ (旧 #9aa3b2 → WCAG 改善)。 */
+  --muted: #aab3c2;
   --accent: #6ea8fe;
   --auto: #4ade80;
   --escalate: #fbbf24;
@@ -161,3 +162,62 @@ label.field input[type="range"] { width: 100%; }
 .empty { text-align: center; color: var(--muted); padding: 40px; }
 details.exec { margin-top: 8px; }
 details.exec pre { white-space: pre-wrap; background: var(--bg); padding: 10px; border-radius: 7px; font-size: 12px; max-height: 240px; overflow: auto; }
+/* general 成果物の summary/output 分離表示。 */
+.exec-summary { border-left: 3px solid var(--accent); }
+.exec-output { color: var(--text); }
+
+/* --- a11y 共通 --------------------------------------------------------------- */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: absolute; left: -9999px; top: 0; z-index: 100;
+  background: var(--accent); color: #08111f; padding: 8px 12px; border-radius: 0 0 8px 0;
+}
+.skip-link:focus { left: 0; }
+*:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* タブは色以外の手がかり(下線+太字+先頭マーカ)も付ける。 */
+nav.tabs button[aria-selected="true"] {
+  font-weight: 600; text-decoration: underline; text-underline-offset: 3px;
+}
+nav.tabs button[aria-selected="true"]::before { content: "▸ "; }
+
+/* confidence 閾値色 (色だけに頼らず数値も併記)。 */
+.conf-fill.high { background: var(--auto); }
+.conf-fill.mid { background: var(--escalate); }
+.conf-fill.low { background: var(--human); }
+
+/* 学習中 escalate を正常 escalate と区別 (点線枠・色以外の手がかり)。 */
+.badge.disp-escalate.learning { border-style: dashed; opacity: 0.85; }
+
+/* ヘッダ集計 + 一時停止トグル。 */
+.header-counts { color: var(--muted); font-size: 12.5px; }
+.header-counts.over { color: var(--escalate); }
+.pause-toggle { font-size: 12px; }
+.pause-toggle[aria-pressed="true"] { border-color: var(--escalate); color: var(--escalate); }
+
+/* Undo インライン (控えめ)。 */
+.undo-inline {
+  font-size: 11px; color: var(--muted); text-decoration: underline;
+  background: none; border: none; padding: 0;
+}
+.undo-inline:hover { background: none; color: var(--text); }
+
+/* 検索バー ('/' で出る控えめなもの)。 */
+.filter-bar {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 12px;
+}
+.filter-chip { font-size: 11px; padding: 3px 9px; border-radius: 20px; }
+.filter-chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* prefers-contrast / forced-colors。 */
+@media (prefers-contrast: more) {
+  :root { --muted: #cfd6e2; --border: #4a5160; }
+}
+@media (forced-colors: active) {
+  .badge, .card, .board-col { border: 1px solid currentColor; }
+  .conf-fill { background: Highlight; }
+}

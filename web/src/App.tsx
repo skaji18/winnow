@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
-import { DueBadge, PriorityBadge, ProjectChip, parseDate, provisionalTitle } from "./components/Bits.js";
+import {
+  ArtifactChips,
+  DueBadge,
+  PriorityBadge,
+  ProjectChip,
+  parseDate,
+  provisionalTitle,
+} from "./components/Bits.js";
+import { applyFilter, emptyFilter, FilterBar, filterIsEmpty, type FilterState } from "./components/FilterBar.js";
 import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { SprintsView } from "./components/Sprints.js";
@@ -10,10 +18,20 @@ import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "./types.js";
 
 type Tab = "queue" | "sprints" | "projects" | "backlog" | "sessions" | "settings";
 
+// 実績ゼロ(初日)判定の閾値。LabelEvent 総数がこれ未満なら cold-banner 初日を第一級表示。
+const COLD_THRESHOLD = 10;
+
+// 操作結果用の単一 aria-live status を子へ流す軽量 context (§4-1 さばきの結果を読み上げる)。
+const LiveContext = createContext<(msg: string) => void>(() => {});
+function useLive() {
+  return useContext(LiveContext);
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [tab, setTab] = useState<Tab>("queue");
   const [error, setError] = useState<string | null>(null);
+  const [liveMsg, setLiveMsg] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -38,45 +56,105 @@ export default function App() {
     );
   }
 
+  const togglePause = async () => {
+    await api.updateSettings({ pauseAuto: !state.settings.pauseAuto });
+    setLiveMsg(state.settings.pauseAuto ? "自動実行を再開しました" : "自動実行を一時停止しました");
+    await refresh();
+  };
+
   return (
-    <div className="app">
-      <header className="top">
-        <h1>Winnow</h1>
-        <span className="tagline">判断アテンションを配給する道具</span>
-        <span className="summary-line" title="ループを閉じて見せる (§4-5)">
-          {state.summary.line}
-        </span>
-      </header>
+    <LiveContext.Provider value={setLiveMsg}>
+      <div className="app">
+        <a className="skip-link" href="#main">
+          本文へスキップ
+        </a>
+        {/* 操作結果用の単一 aria-live status (視覚非表示)。 */}
+        <div className="sr-only" role="status" aria-live="polite">
+          {liveMsg}
+        </div>
 
-      <nav className="tabs">
-        {(
-          [
-            ["queue", `キュー (${state.queue.length})`],
-            ["sprints", `スプリント (${state.sprints.length})`],
-            ["projects", `案件 (${state.projects.length})`],
-            ["backlog", "バックログ"],
-            ["sessions", `セッション (${state.sessions.length})`],
-            ["settings", "再調律・設定"],
-          ] as [Tab, string][]
-        ).map(([t, label]) => (
-          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-            {label}
+        <header className="top">
+          <h1>Winnow</h1>
+          <span className="tagline">判断アテンションを配給する道具</span>
+          <HeaderCounts state={state} />
+          <button
+            className="pause-toggle"
+            aria-pressed={state.settings.pauseAuto}
+            title="自動実行の一時停止(承認は通せます)"
+            onClick={togglePause}
+          >
+            {state.settings.pauseAuto ? "▶ 自動実行を再開" : "⏸ 自動実行を一時停止"}
           </button>
-        ))}
-      </nav>
+          <span className="summary-line" title="ループを閉じて見せる (§4-5)">
+            {state.summary.line}
+          </span>
+        </header>
 
-      {error && <div className="cold-banner">通信エラー: {error}</div>}
+        <nav className="tabs" role="tablist" aria-label="ビュー">
+          {(
+            [
+              ["queue", `キュー (${state.queue.length})`],
+              ["sprints", `スプリント (${state.sprints.length})`],
+              ["projects", `案件 (${state.projects.length})`],
+              ["backlog", "バックログ"],
+              ["sessions", `セッション (${state.sessions.length})`],
+              ["settings", "再調律・設定"],
+            ] as [Tab, string][]
+          ).map(([t, label]) => (
+            <button
+              key={t}
+              id={`tab-${t}`}
+              role="tab"
+              aria-selected={tab === t}
+              aria-controls="main"
+              className={tab === t ? "active" : ""}
+              onClick={() => setTab(t)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
 
-      {/* どこからでも即キャプチャ (新規儀式ゼロ §4)。全タブ共通の登録口。 */}
-      <AddItem state={state} onChange={refresh} />
+        {/* preflight トップバナー: AI 未接続→セッション起動。未提供(undefined)なら何も出さない。 */}
+        {state.preflight && !state.preflight.ok && (
+          <div className="cold-banner danger" role="alert">
+            AI 未接続: {state.preflight.reason ?? "接続を確認できません"} →{" "}
+            <button onClick={() => api.initAi().then(refresh)}>セッション起動</button>
+          </div>
+        )}
 
-      {tab === "queue" && <QueueView state={state} onChange={refresh} />}
-      {tab === "sprints" && <SprintsView state={state} onChange={refresh} />}
-      {tab === "projects" && <ProjectsView state={state} onChange={refresh} />}
-      {tab === "backlog" && <TreeView state={state} onChange={refresh} />}
-      {tab === "sessions" && <SessionsView state={state} onChange={refresh} />}
-      {tab === "settings" && <SettingsView state={state} onChange={refresh} />}
-    </div>
+        {error && <div className="cold-banner">通信エラー: {error}</div>}
+
+        {/* どこからでも即キャプチャ (新規儀式ゼロ §4)。全タブ共通の登録口。 */}
+        <AddItem state={state} onChange={refresh} />
+
+        <main id="main" tabIndex={-1}>
+          {tab === "queue" && <QueueView state={state} onChange={refresh} />}
+          {tab === "sprints" && <SprintsView state={state} onChange={refresh} />}
+          {tab === "projects" && <ProjectsView state={state} onChange={refresh} />}
+          {tab === "backlog" && <TreeView state={state} onChange={refresh} />}
+          {tab === "sessions" && <SessionsView state={state} onChange={refresh} />}
+          {tab === "settings" && <SettingsView state={state} onChange={refresh} />}
+        </main>
+      </div>
+    </LiveContext.Provider>
+  );
+}
+
+// ヘッダ集計: 実行中N/承認待ちM。N>maxWorkers のとき薄く色付け(機械ブロックはしない=ナッジ §4)。
+function HeaderCounts({ state }: { state: AppState }) {
+  const running =
+    state.inFlight?.running ?? state.items.filter((i) => i.executionStatus === "running").length;
+  const proposed =
+    state.inFlight?.proposed ?? state.items.filter((i) => i.executionStatus === "proposed").length;
+  const over = running > state.settings.maxWorkers;
+  return (
+    <span
+      className={`header-counts${over ? " over" : ""}`}
+      title={over ? "実行中が worker 上限を超えています(止めはしません)" : "実行中 / 承認待ち"}
+    >
+      実行中 {running} / 承認待ち {proposed}
+    </span>
   );
 }
 
@@ -85,9 +163,50 @@ export default function App() {
 // ---------------------------------------------------------------------------
 function QueueView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [decomposeFor, setDecomposeFor] = useState<Item | null>(null);
+  const [filter, setFilter] = useState<FilterState>(emptyFilter);
+  const [filterOpen, setFilterOpen] = useState(false);
+
+  // 『/』で控えめな検索バーをトグル(input/textarea 非フォーカス時のみ)。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      setFilterOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const visible = filterIsEmpty(filter) ? state.queue : applyFilter(state.queue, filter);
+  // 実績ゼロ(初日): LabelEvent 総数 < 閾値で「学習中」を第一級表示。totalLabels 未提供なら出さない。
+  const coldDay = state.totalLabels != null && state.totalLabels < COLD_THRESHOLD;
+  const learning = coldDay;
 
   return (
     <>
+      {filterOpen && (
+        <FilterBar
+          items={state.queue}
+          projects={state.projects}
+          filter={filter}
+          setFilter={setFilter}
+          onClose={() => {
+            setFilterOpen(false);
+            setFilter(emptyFilter());
+          }}
+        />
+      )}
+
+      {/* 実績ゼロ初日の第一級メッセージ (§4 末 Jカーブ・期待値管理)。 */}
+      {coldDay && (
+        <div className="cold-banner" role="note">
+          今は線を学習中です。あと {Math.max(1, COLD_THRESHOLD - (state.totalLabels ?? 0))}{" "}
+          件ほどさばくと、自動に倒し始めます。序盤は助ける感ゼロでも、それは境界を学んでいる音です。
+        </div>
+      )}
+
       {/* コールドスタート=Jカーブの期待値管理 (§4 末, §5) */}
       {state.autoFolded > 0 && (
         <div className="cold-banner">
@@ -96,14 +215,19 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         </div>
       )}
 
-      {state.queue.length === 0 ? (
-        <div className="empty">キューは空です。新しいアイテムを登録すると分類されます。</div>
+      {visible.length === 0 ? (
+        <div className="empty">
+          {filterIsEmpty(filter)
+            ? "キューは空です。新しいアイテムを登録すると分類されます。"
+            : "絞り込み条件に一致するアイテムはありません。"}
+        </div>
       ) : (
-        state.queue.map((q) => (
+        visible.map((q) => (
           <QueueCard
             key={q.id}
             item={q}
             state={state}
+            learning={learning}
             onChange={onChange}
             onDecompose={() => setDecomposeFor(q)}
           />
@@ -120,35 +244,62 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
 function QueueCard({
   item,
   state,
+  learning,
   onChange,
   onDecompose,
 }: {
   item: QueueItem;
   state: AppState;
+  learning: boolean;
   onChange: () => void;
   onDecompose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const run = async (fn: () => Promise<unknown>) => {
+  const live = useLive();
+  // run: 操作後にカードを即消ししない(onChange でサーバの可視集合に委ね、Undo を残す)。
+  // 楽観ロック競合(409)は専用文言を aria-live に出して強制再取得する。
+  const run = async (fn: () => Promise<unknown>, doneMsg?: string) => {
     setBusy(true);
     try {
       await fn();
+      if (doneMsg) live(doneMsg);
       await onChange();
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg.startsWith("CONFLICT")) {
+        live("他所で更新されました。最新に更新します。");
+        await onChange();
+      } else {
+        live(`操作に失敗しました: ${msg}`);
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const proposed = item.executionStatus === "proposed";
+  const failed = item.executionStatus === "failed" || item.status === "blocked";
   // 監査サンプルは通常アイテムと見分けがつかない (§4-3): カード枠に特別扱いを残さない。
   const autoDone = item.autoExecuted && item.executionStatus === "succeeded";
+  const autoDoneGeneral = autoDone && item.domain === "general";
   const cls = `card${proposed ? " proposed" : ""}`;
+
+  // general 成果物の summary/output 分離: executionSummary/Output があればそれを優先、
+  // 無ければ executionResult を `summary\n\noutput` で分割(executor の連結形)。
+  const [splitSummary, splitOutput] = (() => {
+    if (item.executionSummary != null || item.executionOutput != null) {
+      return [item.executionSummary ?? "", item.executionOutput ?? ""];
+    }
+    const r = item.executionResult ?? "";
+    const parts = r.split(/\n\n/);
+    return [parts[0] ?? "", parts.slice(1).join("\n\n")];
+  })();
 
   return (
     <div className={cls}>
       <div className="card-head">
         <span className="card-title">{item.title}</span>
-        <ScoreBadges item={item} />
+        <ScoreBadges item={item} learning={learning} />
       </div>
       <div className="badges" style={{ marginTop: 6 }}>
         <ProjectChip
@@ -160,89 +311,257 @@ function QueueCard({
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
       </div>
-      {item.reason && <div className="reason">{item.reason}</div>}
+      {/* キュー一行理由はサーバの surfaceReason を優先(blocked/failed の種別を含む)。 */}
+      {(item.surfaceReason || item.reason) && (
+        <div className="reason">{item.surfaceReason || item.reason}</div>
+      )}
       <MiniScores item={item} />
 
-      {item.executionResult && (
+      {/* 漸進開示: 元の文脈(body)を畳んで見せる。 */}
+      {item.body && (
         <details className="exec">
-          <summary className="muted">実行結果 / メモを見る</summary>
-          <pre>{item.executionResult}</pre>
+          <summary className="muted">元の文脈を見る</summary>
+          <pre>{item.body}</pre>
         </details>
       )}
 
-      {autoDone && (
-        // 自動実行済みの安く取り消せる経路 (§4-4). 結果サマリは上の executionResult details が出している。
+      {/* artifacts / sourceUrl のリンクチップ (read-only 痕跡)。 */}
+      <ArtifactChips artifacts={item.artifacts} sourceUrl={item.sourceUrl} />
+
+      {/* 実行結果: general は summary/output を分離表示、それ以外は連結を1ペイン。 */}
+      {(item.executionResult || splitOutput) && (
+        <details className="exec">
+          <summary className="muted">
+            {proposed ? "計画プレビュー(実行されたら何が起きるか)を見る" : "実行結果 / メモを見る"}
+          </summary>
+          {item.domain === "general" && splitOutput ? (
+            <>
+              {splitSummary && <pre className="exec-summary">{splitSummary}</pre>}
+              <pre className="exec-output">{splitOutput}</pre>
+            </>
+          ) : (
+            <pre>{item.executionResult}</pre>
+          )}
+          {/* 取消時の巻き戻し手順 (自動実行しない=人間ワンタップ)。 */}
+          {item.rollbackPlan && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              <b>取り消し時の巻き戻し手順(自動実行しません):</b>
+              <pre>{item.rollbackPlan}</pre>
+            </div>
+          )}
+        </details>
+      )}
+
+      {/* general 成果物の出口: コピー / この方向で直す。 */}
+      {autoDoneGeneral && (
+        <GeneralOutlet item={item} run={run} busy={busy} output={splitOutput || item.executionResult || ""} />
+      )}
+
+      {/* 再浮上カード: 実行失敗/保留のワンタップ復旧 (再実行/エスカレ/却下)。 */}
+      {failed && (
         <div className="actions" style={{ marginTop: 10 }}>
-          <button className="danger" disabled={busy} onClick={() => run(() => api.cancel(item.id))}>
+          <span className="badge disp-human">再浮上</span>
+          <button
+            className="primary"
+            disabled={busy}
+            onClick={() => run(() => api.execute(item.id), "再実行しました")}
+          >
+            再実行
+          </button>
+          <button
+            disabled={busy}
+            title="この種類は当面上げて(締め)"
+            onClick={() => run(() => api.escalateCategory(item.id), "この種類を当面エスカレに締めました")}
+          >
+            エスカレ
+          </button>
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() => run(() => api.action(item.id, "reject"), "却下しました")}
+          >
+            却下
+          </button>
+          {busy && <span className="spinner">実行中…</span>}
+        </div>
+      )}
+
+      {!autoDone && !failed && (
+        <div className="actions" style={{ marginTop: 10 }}>
+          {proposed ? (
+            // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
+            <>
+              <span className="badge disp-escalate">承認待ち</span>
+              <button
+                className="primary"
+                disabled={busy}
+                onClick={() => run(() => api.approve(item.id), "承認して実行しました")}
+              >
+                承認して実行
+              </button>
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+              >
+                取り消す
+              </button>
+            </>
+          ) : (
+            // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3)。
+            <>
+              {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
+              <button disabled={busy} onClick={() => run(() => api.action(item.id, "do"), "着手しました")}>
+                やる
+              </button>
+              {item.kind === "node" ? (
+                <button disabled={busy} onClick={onDecompose}>
+                  分解する
+                </button>
+              ) : (
+                <button disabled={busy} onClick={() => run(() => api.execute(item.id), "実行を開始しました")}>
+                  実行する
+                </button>
+              )}
+              {item.kind === "node" && !item.projectId && (
+                <button
+                  disabled={busy}
+                  title="この問いを案件(入れ物)に格上げし、サブツリーごと紐付ける"
+                  onClick={() => run(() => api.toProject(item.id), "案件に昇格しました")}
+                >
+                  案件に昇格
+                </button>
+              )}
+              <button disabled={busy} onClick={() => run(() => api.action(item.id, "demote"), "粒度を下げました")}>
+                粒度を下げる
+              </button>
+              <Reclassify itemId={item.id} current={item.disposition} run={run} />
+              <button
+                disabled={busy}
+                title="この種類はもう上げるな(自動に倒す)"
+                onClick={() => run(() => api.action(item.id, "mute_category"), "この種類を自動に倒しました")}
+              >
+                もう上げるな
+              </button>
+              <button
+                disabled={busy}
+                title="この種類は当面上げて(エスカレ固定・締め)"
+                onClick={() => run(() => api.escalateCategory(item.id), "この種類を当面エスカレに締めました")}
+              >
+                当面は上げて
+              </button>
+              <span className="spacer" />
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() => run(() => api.action(item.id, "reject"), "却下しました")}
+              >
+                却下
+              </button>
+            </>
+          )}
+          {busy && <span className="spinner">実行中…</span>}
+        </div>
+      )}
+
+      {/* auto-done: 監査キューに見分けつかない形で混ぜる (§4-3)。autoDone は「やる(着手戻し)」が
+          意味的に変なので、監査向けに『取り消す / 分類し直す』に限定する。reclassify→escalate は
+          サーバが audit_bad に写像する(actions.ts)。 */}
+      {autoDone && (
+        <div className="actions" style={{ marginTop: 10 }}>
+          {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+          >
             取り消す
           </button>
+          <Reclassify itemId={item.id} current={item.disposition} run={run} />
           <span className="muted" style={{ fontSize: 12 }}>
-            痕跡は履歴に残るが、副作用は自動では巻き戻されません。
+            痕跡は履歴に残ります。
           </span>
           {busy && <span className="spinner">実行中…</span>}
         </div>
       )}
 
-      {!autoDone && (
-      <div className="actions" style={{ marginTop: 10 }}>
-        {proposed ? (
-          // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
-          <>
-            <span className="badge disp-escalate">承認待ち</span>
-            <button className="primary" disabled={busy} onClick={() => run(() => api.approve(item.id))}>
-              承認して実行
-            </button>
-            <button className="danger" disabled={busy} onClick={() => run(() => api.cancel(item.id))}>
-              取り消す
-            </button>
-          </>
-        ) : (
-          // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3):
-          // 教師信号はこれら通常アクションからサーバ側で導出する (src/server/actions.ts)。
-          <>
-            {/* DECISIONS.md L45: 枠なし・控えめなチップ1つだけ許容。アクション集合は通常と同一。 */}
-            {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
-            <button disabled={busy} onClick={() => run(() => api.action(item.id, "do"))}>
-              やる
-            </button>
-            {item.kind === "node" ? (
-              <button disabled={busy} onClick={onDecompose}>
-                分解する
-              </button>
-            ) : (
-              <button disabled={busy} onClick={() => run(() => api.execute(item.id))}>
-                実行する
-              </button>
-            )}
-            {item.kind === "node" && !item.projectId && (
-              <button
-                disabled={busy}
-                title="この問いを案件(入れ物)に格上げし、サブツリーごと紐付ける"
-                onClick={() => run(() => api.toProject(item.id))}
-              >
-                案件に昇格
-              </button>
-            )}
-            <button disabled={busy} onClick={() => run(() => api.action(item.id, "demote"))}>
-              粒度を下げる
-            </button>
-            <Reclassify itemId={item.id} current={item.disposition} run={run} />
-            <button
-              disabled={busy}
-              title="この種類はもう上げるな(自動に倒す)"
-              onClick={() => run(() => api.action(item.id, "mute_category"))}
-            >
-              もう上げるな
-            </button>
-            <span className="spacer" />
-            <button className="danger" disabled={busy} onClick={() => run(() => api.action(item.id, "reject"))}>
-              却下
-            </button>
-          </>
-        )}
-        {busy && <span className="spinner">実行中…</span>}
-      </div>
+      {/* 処分=ラベルの Undo: 直近1手の逆適用。カードを即消ししない前提で控えめに出す。 */}
+      {item.undoableLabel && (
+        <div style={{ marginTop: 6 }}>
+          <button
+            className="undo-inline"
+            disabled={busy}
+            title="直前のさばきを取り消す"
+            onClick={() => run(() => api.undoLabel(item.id), "直前のさばきを取り消しました")}
+          >
+            取り消す（{undoLabelText(item.undoableLabel.action)}）
+          </button>
+        </div>
       )}
+    </div>
+  );
+}
+
+function undoLabelText(action: string): string {
+  switch (action) {
+    case "do":
+      return "やる";
+    case "reject":
+      return "却下";
+    case "reclassify":
+    case "override":
+      return "分類し直し";
+    case "mute_category":
+      return "もう上げるな";
+    default:
+      return action;
+  }
+}
+
+// general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
+function GeneralOutlet({
+  item,
+  run,
+  busy,
+  output,
+}: {
+  item: QueueItem;
+  run: (fn: () => Promise<unknown>, doneMsg?: string) => Promise<void>;
+  busy: boolean;
+  output: string;
+}) {
+  const live = useLive();
+  const [instruction, setInstruction] = useState("");
+  return (
+    <div className="actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
+      <button
+        disabled={!output}
+        onClick={() => {
+          navigator.clipboard?.writeText(output);
+          live("成果物をコピーしました");
+        }}
+      >
+        コピー
+      </button>
+      <input
+        type="text"
+        placeholder="この方向で直す(一行指示)"
+        value={instruction}
+        onChange={(e) => setInstruction(e.target.value)}
+        style={{ flex: 1, minWidth: 180 }}
+        aria-label="この方向で直す(一行指示)"
+      />
+      <button
+        className="primary"
+        disabled={busy || !instruction.trim()}
+        onClick={() =>
+          run(() => api.reExecute(item.id, instruction.trim()), "この方向で再実行しました").then(() =>
+            setInstruction(""),
+          )
+        }
+      >
+        この方向で直す
+      </button>
     </div>
   );
 }
@@ -416,6 +735,17 @@ function DecomposeModal({
   const [err, setErr] = useState<string | null>(null);
   // StrictMode の二重起動でも item.id ごとに分解リクエストを1回だけ発火させる ref ガード。
   const requestedFor = useRef<string | null>(null);
+  // a11y: 初期 focus(閉じるボタン)と、閉じたら発火元へ focus 復帰。
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const titleId = `decompose-title-${item.id}`;
+
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    return () => {
+      opener?.focus?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (requestedFor.current === item.id) return;
@@ -447,10 +777,23 @@ function DecomposeModal({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+      >
         <div className="row" style={{ marginBottom: 12 }}>
-          <h3 style={{ margin: 0, flex: 1 }}>分解: {item.title}</h3>
-          <button onClick={onClose}>閉じる</button>
+          <h3 id={titleId} style={{ margin: 0, flex: 1 }}>
+            分解: {item.title}
+          </h3>
+          <button ref={closeBtnRef} onClick={onClose}>
+            閉じる
+          </button>
         </div>
         <p className="muted" style={{ fontSize: 12.5 }}>
           割り方の選択肢。サイクル長は不確実性に反比例（不明な段はPoCで情報を買う短サイクル §2.3）。
@@ -481,12 +824,17 @@ function DecomposeModal({
                     )}
                   </span>
                   {c.spec && (
-                    <div
-                      className="muted"
-                      style={{ fontSize: 11.5, marginLeft: 14, opacity: 0.85, whiteSpace: "pre-wrap" }}
-                    >
-                      {c.spec}
-                    </div>
+                    <details style={{ marginLeft: 14, marginTop: 2 }}>
+                      <summary className="muted" style={{ fontSize: 11.5, cursor: "pointer" }}>
+                        詳細 / spec を見る
+                      </summary>
+                      <div
+                        className="muted"
+                        style={{ fontSize: 11.5, opacity: 0.85, whiteSpace: "pre-wrap", marginTop: 4 }}
+                      >
+                        {c.spec}
+                      </div>
+                    </details>
                   )}
                 </li>
               ))}
@@ -657,7 +1005,10 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
         <textarea
           rows={5}
           style={{ width: "100%" }}
-          placeholder="例: BtoB SaaSの請求管理。TS/Node/Postgres。決済はStripe。本番操作は必ず人間承認。詳細は各repoのdocs参照。"
+          placeholder={
+            "ソフト開発の例: BtoB SaaSの請求管理。TS/Node/Postgres。決済はStripe。本番操作は必ず人間承認。詳細は各repoのdocs参照。\n" +
+            "一般業務の例: 採用広報の運用。社外公開物は必ず人間確認。トーンは丁寧・簡潔。関係者: 法務/PR。"
+          }
           defaultValue={s.productContext}
           onBlur={(e) => set({ productContext: e.target.value })}
         />
@@ -755,6 +1106,51 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
             headless(claude -p)で動かす — tmux不要・検証は速いが将来課金リスク (§6)
           </span>
         </label>
+      </div>
+
+      {/* MCP 接続スニペット (コピー可) + 直近の捕獲。サーバ未提供時(undefined)は出さない。 */}
+      {(state.mcpEndpoint || state.captureStats) && (
+        <div className="panel">
+          <h3>MCP 接続 / 取り込み</h3>
+          {state.mcpEndpoint && <McpSnippet endpoint={state.mcpEndpoint} />}
+          {state.captureStats && (
+            <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+              直近の捕獲: {state.captureStats.count} 件
+              {state.captureStats.lastAt != null
+                ? ` / 最終 ${new Date(state.captureStats.lastAt).toLocaleString("ja-JP")}`
+                : ""}
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function McpSnippet({ endpoint }: { endpoint: string }) {
+  const live = useLive();
+  const snippet = `claude mcp add --transport http winnow ${endpoint}`;
+  return (
+    <>
+      <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+        Claude などの MCP クライアントから、作業中に直接アイテムを捕獲する口。次のコマンドで接続できます。
+      </p>
+      <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+        <pre
+          className="exec-output"
+          style={{ flex: 1, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+        >
+          {snippet}
+        </pre>
+        <button
+          aria-label="MCP 接続コマンドをコピー"
+          onClick={() => {
+            navigator.clipboard?.writeText(snippet);
+            live("MCP 接続コマンドをコピーしました");
+          }}
+        >
+          コピー
+        </button>
       </div>
     </>
   );
