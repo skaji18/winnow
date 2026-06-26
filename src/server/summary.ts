@@ -29,6 +29,8 @@ export interface WeeklySummary {
   failed: number;
   // 要棚卸し: updatedAt 14日以上前 × in_progress/blocked、または子なし node(放置された問い)。
   needsReview: number;
+  // 引き取り待ち (§3.5): 実行完了・人間の受領/採用待ちの現在件数 (放置PR等の可視化)。
+  awaitingHandoff: number;
   line: string;
 }
 
@@ -121,6 +123,12 @@ export function weekly(): WeeklySummary {
     reviewCutoff,
   );
 
+  // --- 引き取り待ち: 実行完了・人間の受領/採用待ちの現在件数 (§3.5 ループ可視化)。
+  // status='review' なので塩漬け監査(classified)・要棚卸し(in_progress/blocked)のどちらにも乗らない。
+  const awaitingHandoff = count(
+    "SELECT COUNT(*) AS c FROM items WHERE executionStatus='awaiting_handoff'",
+  );
+
   const tip = tippedCategories.length > 0 ? ` / 自動較正: ${tippedCategories.join(", ")}` : "";
   const delta = (() => {
     const d = auto - autoPrevAdj;
@@ -129,10 +137,11 @@ export function weekly(): WeeklySummary {
   })();
   const accident = auditBad > 0 ? `事故${auditBad}` : "事故0(今週は自動事故の検出なし)";
   const review = needsReview > 0 ? ` / 要棚卸し${needsReview}件` : "";
+  const handoff = awaitingHandoff > 0 ? ` / 引き取り待ち${awaitingHandoff}件` : "";
   const line =
     `今週: 自動${auto}(先週比${delta}) / 上げ${escalated} / 覆し${overridden} / ` +
     `締め${tightenedCount}・緩め${loosenedCount} / 監査${audited} / ${accident} / ` +
-    `塩漬け${stale} / 失敗${failed}${review}${tip}`;
+    `塩漬け${stale} / 失敗${failed}${review}${handoff}${tip}`;
 
   return {
     auto,
@@ -148,6 +157,7 @@ export function weekly(): WeeklySummary {
     stale,
     failed,
     needsReview,
+    awaitingHandoff,
     line,
   };
 }

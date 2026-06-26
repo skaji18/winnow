@@ -65,6 +65,12 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 - **不可逆 または 高ステークス → 自動着火せず「承認待ち」（`executionStatus: "proposed"`）。**
 - 可逆・低ステークス・横断衝突なし → 自動着火。
 
+実行完了後の引き取り（handoff）:
+
+- **引き取り待ち**（`executionStatus: "awaiting_handoff"`、`status: "review"`）: 実行は成功したが成果物に人間の責任（レビュー／採用）が残るとき、`done` に沈めずキュー前面に出す状態。人間が**受け取る**（`POST /api/items/:id/accept` → label `receive`）と `succeeded`/`done` に進む。「やって終わり」（純ローカル・低ステークス・可逆・外部成果物なし）は従来どおり即 `done`。
+- 引き取り要否は新しい申告軸を立てず、外部成果物 `artifacts` の有無／`reversible===false`／高ステークス／外部送信の許可（`externalApproved`）から導出する（`handoffRequired`）。
+- **承認＝外部送信のゴーサイン**: `allowExternalSend`（既定 OFF）が ON のとき、承認すると worker に「このアイテムに限り push/PR 作成を実行してよい。マージ・本番デプロイ・削除はしない」を伝える。PR作成＝可逆な提示／マージ＝不可逆な採用の非対称（採用は人間が外で）。
+
 分類側ゲート（`classifier.ts`）: `confidence` が必要バー
 `requiredConf = min(0.98, 0.5 + 0.4 * escalationTightness + calibBump)`（= 0.5..0.98。
 `calibBump` はビン較正の締め下駄）を下回る、または `stakes > 0.7 && reversibility < 0.5`

@@ -140,6 +140,8 @@ export interface Settings {
   productContext: string;
   // 自動実行の一時停止スイッチ (server domain.ts と整合。ヘッダトグルが消費)。
   pauseAuto: boolean;
+  // 外部送信(push/PR作成)の解禁スイッチ。既定 OFF。承認時のみ worker に外部送信を許可する (§3.4)。
+  allowExternalSend: boolean;
 }
 
 export interface WeeklySummary {
@@ -157,6 +159,8 @@ export interface WeeklySummary {
   failed: number;
   // 要棚卸し件数 (server summary.ts と整合)。
   needsReview: number;
+  // 引き取り待ち件数 (§3.5)。
+  awaitingHandoff: number;
   line: string;
 }
 

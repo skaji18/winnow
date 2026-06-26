@@ -252,6 +252,12 @@ export interface Settings {
   claudeAllowedFlags: string[];
   // 過負荷時に capture を即 classify せず inbox 保留にする閾値。0 で無効=現状維持。
   captureInboxHoldThreshold: number;
+  // 外部送信(push/PR作成)の解禁スイッチ (§3.4)。false=既定では、人間がワンタップ承認しても
+  // worker に外部送信ゴーサイン(externalApproved)を渡さない=従来どおり push/PR は実行されない。
+  // true にすると承認時のみ「このアイテムに限り push/PR 作成を実行してよい(マージ/デプロイ/削除は不可)」を
+  // worker に伝える。緩め方向(外部副作用解禁)なので既定 OFF・明示オプトイン (締めるは速く緩めるは慎重に §3.6-3)。
+  // ※ winnow 本体は push しない。実行主体は worker セッションで、その ambient 権限の技術的制約は別レイヤ。
+  allowExternalSend: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -283,4 +289,5 @@ export const DEFAULT_SETTINGS: Settings = {
     "default",
   ],
   captureInboxHoldThreshold: 24,
+  allowExternalSend: false, // 緩め方向=既定 OFF。push/PR 作成は明示オプトイン (§3.6-3)。
 };

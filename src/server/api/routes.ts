@@ -357,6 +357,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       useHeadless: z.boolean().optional(),
       productContext: z.string().optional(),
       pauseAuto: z.boolean().optional(),
+      // 外部送信(push/PR作成)の解禁。既定 OFF=緩めはオプトイン (§3.6-3)。
+      allowExternalSend: z.boolean().optional(),
     })
     .strict();
   app.patch("/api/settings", async (req, reply) => {

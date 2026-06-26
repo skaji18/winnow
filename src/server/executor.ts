@@ -106,15 +106,24 @@ interface ExecuteOut {
  * required 条件(OR):
  *  (a) 外部に観測可能な成果物を作った (artifacts 非空) — PR/送信物/公開物。
  *  (b) 不可逆を自己申告した (reversible===false)。
- *  (c) 高ステークス。
+ *  (c) 高ステークス。※(c) 単独の項目は requestExecution で proposed に倒れ自動着火しないので、
+ *      ここに届くのは approve 済み実行が成功したとき=approve 経由限定の従属条件。
+ *  (d) 外部送信を人間が許可して実行した software (externalApproved)。artifacts 申告が空でも必ず
+ *      引き取りへ: 外部に出したのに痕跡ゼロはむしろ要確認。worker 申告依存の (a) の穴を塞ぐ安全弁。
  * いずれも無く純ローカル・低ステークス・可逆なら none(=やって終わり、done に沈める)。
- * (a) は本文の自己申告でなく実態痕跡なので過小申告の詐称に強い安全弁 (§3.2)。
+ * artifacts は worker の出力フィールド(実 git/PR 痕跡そのものではない)なので (a) 単独では詐称に
+ * 完全には強くない。(d) で「外部送信を許可した実行」を申告非依存に拾うことで取りこぼしを防ぐ。
  */
-function handoffRequired(item: Item, out: Partial<ExecuteOut>): boolean {
+function handoffRequired(
+  item: Item,
+  out: Partial<ExecuteOut>,
+  externalApproved = false,
+): boolean {
   const hasArtifacts = Array.isArray(out.artifacts) && out.artifacts.length > 0;
   const declaredIrreversible = out.reversible === false;
   const highStakes = (item.stakes ?? 0) > 0.7;
-  return hasArtifacts || declaredIrreversible || highStakes;
+  const approvedExternal = externalApproved && item.domain === "software";
+  return hasArtifacts || declaredIrreversible || highStakes || approvedExternal;
 }
 
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
@@ -213,12 +222,16 @@ export async function requestExecution(
  * blocked語義整理: 失敗(out.status==='failed')は status を blocked にせず in_progress に
  * 保ち、再浮上は executionStatus==='failed' で表す(queue の visible が拾う)。
  */
-function applyExecuteResult(itemId: string, out: Partial<ExecuteOut>): Item | null {
+function applyExecuteResult(
+  itemId: string,
+  out: Partial<ExecuteOut>,
+  opts: { externalApproved?: boolean } = {},
+): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
   const succeeded = out.status === "succeeded";
   // 引き取り要否 (§3.5): 成功かつ責任が残る成果物なら done に沈めず awaiting_handoff へ。
-  const handoff = succeeded && handoffRequired(item, out);
+  const handoff = succeeded && handoffRequired(item, out, opts.externalApproved === true);
   const updated = items.update(itemId, {
     executionStatus:
       out.status === "needs_human"
@@ -333,7 +346,9 @@ export async function runExecution(
     });
   }
 
-  return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>);
+  return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>, {
+    externalApproved: opts.externalApproved === true,
+  });
 }
 
 /**
@@ -419,7 +434,10 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   if (!item) return null;
   if (item.executionStatus !== "proposed") return item;
   // 人間が明示で押した=外部送信(push/PR作成)ゴーサイン。再拒否ループを断つ (§3.4)。
-  return runExecution(itemId, "", { externalApproved: true });
+  // ただし外部送信の解禁は settings.allowExternalSend のオプトイン時のみ(既定 OFF=緩めは慎重 §3.6-3)。
+  // OFF のときは従来どおりゲート解除のみで、worker は外部送信を needs_human で拒否し続ける。
+  const externalApproved = settings.get().allowExternalSend === true;
+  return runExecution(itemId, "", { externalApproved });
 }
 
 /**
@@ -432,11 +450,9 @@ export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   if (item.executionStatus !== "awaiting_handoff") return item;
-  return items.update(itemId, {
-    executionStatus: "succeeded",
-    status: "done",
-    executionResult: `${item.executionResult ?? ""}\n\n[引き取り済み]`.trim(),
-  });
+  // 受領済みは状態(executionStatus/status)と label_event 'receive' で表現する。executionResult への
+  // 文字列追記はしない(summary\n\noutput の後方互換連結を汚さない=表示連結の純度を保つ)。
+  return items.update(itemId, { executionStatus: "succeeded", status: "done" });
 }
 
 /**
@@ -459,10 +475,12 @@ export async function cancelExecution(itemId: string): Promise<Item | null> {
     : "取り消されました(痕跡は履歴に残ります)。副作用は自動では巻き戻されません。";
 
   // (2) 可逆性過大評価: 可逆と申告したのに巻き戻し手順が空 = 自己申告と実態が乖離。
+  // succeeded だけでなく awaiting_handoff(引き取り待ち=外部送信を伴う最も実害の大きいケース)も
+  // 対象に含める。これを外すと外部に出した handoff 項目の取り消しで締め学習が抜ける (§3.6-3 締めは速く)。
   const overclaimed =
     item.domain === "software" &&
     item.autoExecuted &&
-    item.executionStatus === "succeeded" &&
+    (item.executionStatus === "succeeded" || item.executionStatus === "awaiting_handoff") &&
     item.declaredReversible === true &&
     (!item.rollbackPlan || !item.rollbackPlan.trim());
   if (overclaimed && item.category) {

@@ -41,6 +41,8 @@ const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -
 // 大きいと期日/ステークスを手動並びが上書きして横断キューの主役性が崩れるので小さく保つ。
 const ORDER_COEF = 0.02;
 const STALE_DAYS = 3;
+// 引き取り待ちを最優先固定する日数。これを超えると handoffC を逓減させ前面固定を解く (§3.5/§4)。
+const HANDOFF_FRESH_DAYS = 3;
 const DAY_MS = 86_400_000;
 
 function dueBoost(x: Item): number {
@@ -64,7 +66,15 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
   const dueC = dueBoost(x);
   const orderC = -x.orderIndex * ORDER_COEF;
   // 引き取り待ち(実行完了・人間の受領/採用が必要)は前面に出す (§3.5)。止まった項目と同格で浮上。
-  const handoffC = x.executionStatus === "awaiting_handoff" ? 1.0 : 0;
+  // ただし永久最優先固定で『短いキュー』を埋めないよう、滞留が HANDOFF_FRESH_DAYS を超えたら寄与を
+  // 逓減させ天井を設ける(古い handoff を黙って消すのではなく前面固定だけ解く §4 アテンション配給)。
+  const handoffC =
+    x.executionStatus === "awaiting_handoff"
+      ? Math.max(
+          0.2,
+          1.0 - 0.2 * Math.max(0, (Date.now() - x.updatedAt) / DAY_MS - HANDOFF_FRESH_DAYS),
+        )
+      : 0;
   // auto-done general を僅かに前出し: 監査サンプル抽出が summary を glance しやすいよう
   // 取消ハンドルを上位に寄せる (Batch2 サンプラ優先抽出の土台。topReason には出さない)。
   const auditGlanceC =
@@ -93,11 +103,16 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
 function surfaceReasonOf(it: Item, ageDays: number | null): string {
   let base: string;
   if (it.executionStatus === "awaiting_handoff") {
-    // 引き取り待ち: 実行は完了。外部成果物(PR/リンク)があれば採用を、無ければ確認を促す (§3.5)。
+    // 引き取り待ち: なぜ handoff かで文言を出し分ける (handoffRequired の3条件に対応)。
+    // winnow は CI を見ない/採用(マージ)を実行しないので『即マージ』は促さず『確認のうえ採用は外で』に倒す。
     const hasArt = !!(it.artifacts && it.artifacts.trim() && it.artifacts.trim() !== "[]");
-    base = hasArt
-      ? "引き取り待ち: 成果物(PR/リンク等)を確認し、採用(マージ等)してください"
-      : "引き取り待ち: 成果物を確認してください";
+    if (hasArt) {
+      base = "引き取り待ち: PR/成果物を作成済み。CI等を確認してから採用(マージ等)はあなたが外で行ってください";
+    } else if (it.declaredReversible === false) {
+      base = "引き取り待ち: 不可逆な操作の可能性。実行結果を確認のうえ受領してください";
+    } else {
+      base = "引き取り待ち: 高ステークスの実行結果を確認のうえ受領してください";
+    }
   } else if (it.executionStatus === "failed") {
     const trace = (it.executionResult ?? "").trim().slice(0, 60);
     base = `実行失敗(再実行/エスカレ/却下)${trace ? `（${trace}）` : ""}`;

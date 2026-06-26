@@ -1083,6 +1083,18 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
             onChange={(e) => set({ auditRate: Number(e.target.value) })}
           />
         </label>
+        <label className="field">
+          <span>
+            外部送信(push/PR作成)を承認時に解禁: {s.allowExternalSend ? "ON" : "OFF"} — ON にすると
+            ワンタップ承認した実装タスクで worker が push / PR 作成まで実行できる(マージ・本番デプロイ・
+            削除はしない=人間)。緩め方向なので既定 OFF・明示オプトイン (§3.4/§3.6-3)
+          </span>
+          <input
+            type="checkbox"
+            checked={s.allowExternalSend}
+            onChange={(e) => set({ allowExternalSend: e.target.checked })}
+          />
+        </label>
       </div>
 
       <div className="panel">
