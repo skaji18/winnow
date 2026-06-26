@@ -195,8 +195,25 @@ function ProjectBoard({
       </p>
       <Kanban
         items={items}
-        onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
-        onStatusSelect={(id, status) => api.updateItem(id, { status }).then(onChange)}
+        onMove={(id, status) => {
+          // 楽観ロック: 現在の updatedAt を渡し、CONFLICT(他所更新)なら再取得へ。
+          const cur = items.find((i) => i.id === id);
+          api
+            .updateItem(id, { status }, cur?.updatedAt)
+            .then(onChange)
+            .catch((e) => {
+              if (String(e.message).startsWith("CONFLICT")) onChange();
+            });
+        }}
+        onStatusSelect={(id, status) => {
+          const cur = items.find((i) => i.id === id);
+          api
+            .updateItem(id, { status }, cur?.updatedAt)
+            .then(onChange)
+            .catch((e) => {
+              if (String(e.message).startsWith("CONFLICT")) onChange();
+            });
+        }}
         renderCard={(it) => (
           <>
             <div className="board-card-title">{it.title}</div>
@@ -264,7 +281,14 @@ function FlowList({ items, onChange }: { items: Item[]; onChange: () => void }) 
             </select>
             <select
               value={it.status}
-              onChange={(e) => api.updateItem(it.id, { status: e.target.value }).then(onChange)}
+              onChange={(e) =>
+                api
+                  .updateItem(it.id, { status: e.target.value }, it.updatedAt)
+                  .then(onChange)
+                  .catch((err) => {
+                    if (String(err.message).startsWith("CONFLICT")) onChange();
+                  })
+              }
             >
               {STATUSES.map((s) => (
                 <option key={s} value={s}>

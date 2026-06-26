@@ -22,6 +22,7 @@ import {
 import { getRuntimeState } from "../runtime-state.js";
 import { weekly } from "../summary.js";
 import { validateClaudeCmd } from "../security.js";
+import { redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
 import { SERVER_PORT } from "../config.js";
@@ -262,7 +263,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/items/:id/execute", async (req) => {
     const { id } = req.params as { id: string };
     const body = req.body ? executeSchema.parse(req.body) : {};
-    background(() => executor.requestExecution(id, body.instruction ?? ""));
+    // 人間のワンタップ実行/再実行は manual:true で呼ぶ → pauseAuto ガードを回避する
+    // (手動アクションは止めない=非対称)。自動経路(/api/state 掃き出し)は manual を渡さない。
+    background(() => executor.requestExecution(id, body.instruction ?? "", { manual: true }));
     return { started: true };
   });
   app.post("/api/items/:id/approve", async (req) => {
@@ -314,14 +317,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // --- sessions (terminal theater) -----------------------------------------
+  // 既知 session(listSessions の window 集合)だけを許可する照合。WS(index.ts)と同じ照合を
+  // REST にも掛け、任意 tmux ターゲットへの capture 注入を塞ぐ(WS で閉じた穴の REST 側非対称を解消)。
+  const isKnownSession = (name: string): boolean =>
+    new Set(getDriver().listSessions().map((s) => s.name)).has(name);
   app.get("/api/sessions", async () => getDriver().listSessions());
-  app.get("/api/sessions/:name/capture", async (req) => {
+  app.get("/api/sessions/:name/capture", async (req, reply) => {
     const { name } = req.params as { name: string };
-    return { text: await getDriver().capture(decodeURIComponent(name)) };
+    const decoded = decodeURIComponent(name);
+    if (!isKnownSession(decoded)) return reply.code(404).send({ error: "unknown session" });
+    return { text: await getDriver().capture(decoded) };
   });
-  app.get("/api/sessions/:name/attach", async (req) => {
+  app.get("/api/sessions/:name/attach", async (req, reply) => {
     const { name } = req.params as { name: string };
-    return { command: getDriver().attachCommand(decodeURIComponent(name)) };
+    const decoded = decodeURIComponent(name);
+    if (!isKnownSession(decoded)) return reply.code(404).send({ error: "unknown session" });
+    return { command: getDriver().attachCommand(decoded) };
   });
   app.post("/api/ai/init", async () => {
     await ensureDriver();
@@ -362,20 +373,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // --- export / import (版数付き JSON・空DB復元限定) -------------------------
   // GET /api/export: 全テーブルを版数付き JSON で書き出す(read-only、winnow は外部送出しない)。
   // boolean は SQLite 由来の 0/1 のまま往復させる(import の直 INSERT が同じ表現で書き戻す)。
-  app.get("/api/export", async () => ({
-    version: SCHEMA_VERSION,
-    exportedAt: Date.now(),
-    data: {
-      items: items.all(),
-      labels: labels.all(),
-      rules: rules.all(),
-      categoryStats: categoryStats.all(),
-      projects: projects.all(),
-      sprints: sprints.all(),
-      jobs: jobs.recent(1_000_000),
-      settings: settings.get(),
-    },
-  }));
+  // 伏字化: context.ts の最終ゲートが止める秘密が export 経由で素通しになる穴を塞ぐ。
+  // 最低限 productContext / claude*Cmd と items.body を redactSecrets に通す。
+  app.get("/api/export", async () => {
+    const s = settings.get();
+    const redactedSettings = {
+      ...s,
+      productContext: redactSecrets(s.productContext ?? ""),
+      claudeControlCmd: redactSecrets(s.claudeControlCmd ?? ""),
+      claudeWorkerCmd: redactSecrets(s.claudeWorkerCmd ?? ""),
+    };
+    const redactedItems = items.all().map((it) => ({
+      ...it,
+      body: typeof it.body === "string" ? redactSecrets(it.body) : it.body,
+    }));
+    return {
+      version: SCHEMA_VERSION,
+      exportedAt: Date.now(),
+      data: {
+        items: redactedItems,
+        labels: labels.all(),
+        rules: rules.all(),
+        categoryStats: categoryStats.all(),
+        projects: projects.all(),
+        sprints: sprints.all(),
+        jobs: jobs.recent(1_000_000),
+        settings: redactedSettings,
+      },
+    };
+  });
 
   // POST /api/import: 空DB復元限定(merge 禁止)。items/projects 件数 0 で「空」と判定
   // (settings seed 行は db.ts が必ず作るので判定に含めない)。版数照合の上、復元する。

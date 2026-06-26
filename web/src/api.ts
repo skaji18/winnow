@@ -39,8 +39,15 @@ export const api = {
     sourceUrl?: string | null;
   }) => j<Item>("/api/items", { method: "POST", body: JSON.stringify(input) }),
 
-  updateItem: (id: string, patch: Partial<Item>) =>
-    j<Item>(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  // expectedUpdatedAt を渡すと楽観ロックが有効化される(サーバが現在の updatedAt と
+  // 不一致なら 409 CONFLICT)。未指定=チェックなし=後方互換。
+  updateItem: (id: string, patch: Partial<Item>, expectedUpdatedAt?: number) =>
+    j<Item>(`/api/items/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(
+        expectedUpdatedAt != null ? { ...patch, expectedUpdatedAt } : patch,
+      ),
+    }),
 
   deleteItem: (id: string) => j(`/api/items/${id}`, { method: "DELETE" }),
 

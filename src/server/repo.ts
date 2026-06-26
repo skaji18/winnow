@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db.js";
+import { validateClaudeCmd } from "./security.js";
 import {
   type CategoryStat,
   type Disposition,
@@ -480,6 +481,20 @@ export const jobs = {
         .get(ts) as { c: number }
     ).c;
   },
+  /**
+   * 指定窓 [from, to) 内に成功した execute ジョブの DISTINCT itemId 数。
+   * 先週比(autoPrev)を差分でなく直接窓で数えるため(包含窓の DISTINCT 差で相殺・過小になる罠を回避)。
+   */
+  succeededExecuteItemsBetween(from: number, to: number): number {
+    return (
+      db
+        .prepare(
+          `SELECT COUNT(DISTINCT itemId) AS c FROM jobs
+           WHERE status='succeeded' AND kindOfWork='execute' AND finishedAt >= ? AND finishedAt < ?`,
+        )
+        .get(from, to) as { c: number }
+    ).c;
+  },
 };
 
 export const projects = {
@@ -646,15 +661,41 @@ export function importData(payload: ImportPayload): {
   // settings はシード行を上書き(import の設定で復元)。
   if (payload.settings) {
     const merged = { ...DEFAULT_SETTINGS, ...payload.settings } as Settings;
+    // import が PATCH /api/settings の起動コマンド許可リストを迂回する穴を塞ぐ。
+    // claudeControlCmd/WorkerCmd を validateClaudeCmd で検証し、不正なら DEFAULT へ落とす
+    // (settings 検証の単一窓口に揃える。RCE 面を import 経路からも閉じる)。
+    if (!validateClaudeCmd(merged.claudeControlCmd, merged.claudeAllowedFlags)) {
+      merged.claudeControlCmd = DEFAULT_SETTINGS.claudeControlCmd;
+    }
+    if (!validateClaudeCmd(merged.claudeWorkerCmd, merged.claudeAllowedFlags)) {
+      merged.claudeWorkerCmd = DEFAULT_SETTINGS.claudeWorkerCmd;
+    }
     db.prepare("UPDATE settings SET json = ? WHERE id = 1").run(JSON.stringify(merged));
   }
-  return {
-    projects: restoreRows("projects", payload.projects ?? []),
-    sprints: restoreRows("sprints", payload.sprints ?? []),
-    items: restoreRows("items", payload.items ?? []),
-    labels: restoreRows("label_events", payload.labels ?? []),
-    rules: restoreRows("rules", payload.rules ?? []),
-    categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
-    jobs: restoreRows("jobs", payload.jobs ?? []),
-  };
+
+  // items.parentId は即時(非DEFERRABLE) FK。export は親→子順を保証しないため、
+  // foreign_keys=ON のまま子→親順に INSERT すると FK 違反 throw する。
+  // better-sqlite3 は db.transaction 内の PRAGMA を無視するため、トランザクション外で
+  // foreign_keys=OFF にして restoreRows 群を流し、foreign_key_check で整合確認後 ON に戻す。
+  db.pragma("foreign_keys = OFF");
+  try {
+    const result = {
+      projects: restoreRows("projects", payload.projects ?? []),
+      sprints: restoreRows("sprints", payload.sprints ?? []),
+      items: restoreRows("items", payload.items ?? []),
+      labels: restoreRows("label_events", payload.labels ?? []),
+      rules: restoreRows("rules", payload.rules ?? []),
+      categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
+      jobs: restoreRows("jobs", payload.jobs ?? []),
+    };
+    const fkViolations = db.pragma("foreign_key_check") as unknown[];
+    if (fkViolations.length > 0) {
+      throw new Error(
+        `import: foreign_key_check failed: ${JSON.stringify(fkViolations)}`,
+      );
+    }
+    return result;
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
 }

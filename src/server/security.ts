@@ -52,8 +52,10 @@ function hostPortAllowed(raw: string): boolean {
  * Origin 無し (同一オリジン GET / curl / MCP クライアント) は許容。
  */
 export function originAllowed(req: FastifyRequest): boolean {
+  // Host 必須: 欠落を deny に倒す(localhost 単一ユーザ前提なので支障なし)。
+  // Host を省ける細工クライアントに Origin/Host ゲートが効かない穴を塞ぐ。dev(:5174)許可は維持。
   const host = firstHeader(req.headers.host);
-  if (host && !hostPortAllowed(host)) return false;
+  if (!host || !hostPortAllowed(host)) return false;
 
   const origin = firstHeader(req.headers.origin);
   if (origin && origin !== "null" && !hostPortAllowed(origin)) return false;

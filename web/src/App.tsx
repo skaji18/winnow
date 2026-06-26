@@ -485,8 +485,15 @@ function QueueCard({
         </div>
       )}
 
-      {/* 処分=ラベルの Undo: 直近1手の逆適用。カードを即消ししない前提で控えめに出す。 */}
-      {item.undoableLabel && (
+      {/* 処分=ラベルの Undo: 直近1手の逆適用。カードを即消ししない前提で控えめに出す。
+          締め由来(escalateCategory が記録する override→escalate)は汎用 Undo を出さない:
+          rule は残るのに disposition だけ緩むと締めを片手で部分巻き戻しできてしまい、背骨
+          『締めは速く緩めは慎重』の非対称が崩れるため(緩めは正規路=分類し直しで)。 */}
+      {item.undoableLabel &&
+        !(
+          item.undoableLabel.action === "override" &&
+          item.undoableLabel.toDisposition === "escalate"
+        ) && (
         <div style={{ marginTop: 6 }}>
           <button
             className="undo-inline"

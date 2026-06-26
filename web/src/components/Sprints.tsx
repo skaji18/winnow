@@ -62,8 +62,25 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
           </p>
           <Kanban
             items={inSprint}
-            onMove={(id, status) => api.updateItem(id, { status }).then(onChange)}
-            onStatusSelect={(id, status) => api.updateItem(id, { status }).then(onChange)}
+            onMove={(id, status) => {
+              // 楽観ロック: 現在の updatedAt を渡し、CONFLICT(他所更新)なら再取得へ。
+              const cur = inSprint.find((i) => i.id === id);
+              api
+                .updateItem(id, { status }, cur?.updatedAt)
+                .then(onChange)
+                .catch((e) => {
+                  if (String(e.message).startsWith("CONFLICT")) onChange();
+                });
+            }}
+            onStatusSelect={(id, status) => {
+              const cur = inSprint.find((i) => i.id === id);
+              api
+                .updateItem(id, { status }, cur?.updatedAt)
+                .then(onChange)
+                .catch((e) => {
+                  if (String(e.message).startsWith("CONFLICT")) onChange();
+                });
+            }}
             renderCard={(it) => <SprintCard item={it} state={state} onChange={onChange} />}
           />
 

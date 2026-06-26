@@ -101,7 +101,12 @@ interface ExecuteOut {
 }
 
 /** リーフをどう実行するか決める。可逆なら着火、不可逆/高ステークスなら提案止まり。 */
-export async function requestExecution(itemId: string, instruction = ""): Promise<Item | null> {
+export async function requestExecution(
+  itemId: string,
+  instruction = "",
+  opts: { manual?: boolean } = {},
+): Promise<Item | null> {
+  const manual = opts.manual === true;
   const item = items.get(itemId);
   if (!item) return null;
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
@@ -109,11 +114,27 @@ export async function requestExecution(itemId: string, instruction = ""): Promis
   // failed のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
   // 再浮上した failed 項目の再実行 (Batch5 のワンタップ / 起動時 reconcile が failed に倒した
   // 項目) はここを通って再着火する。
-  if (item.executionStatus && item.executionStatus !== "none" && item.executionStatus !== "failed") return item;
-  // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution は自動着火経路専用
-  // (キュー掃き出し・classify末尾の即時着火・在庫再適用)。approveExecution は runExecution を
-  // 直呼びしここを通らない=手動承認の逃げ道は止めない。proposed に倒して痕跡を残す。
-  if (settings.get().pauseAuto) {
+  // 例外: succeeded かつ instruction 非空の「この方向で直す」(reExecute) は再走を許す。
+  //   reExecute は GeneralOutlet の auto-done(succeeded) 項目からしか来ないため、succeeded を
+  //   通すための専用緩和。可逆/承認ゲートは後段でそのまま効く。再走前に executionStatus を
+  //   none 相当へ戻して runExecution に進めるようにする。
+  const isReExecute = item.executionStatus === "succeeded" && instruction.trim() !== "";
+  if (
+    item.executionStatus &&
+    item.executionStatus !== "none" &&
+    item.executionStatus !== "failed" &&
+    !isReExecute
+  )
+    return item;
+  if (isReExecute) {
+    items.update(itemId, { executionStatus: "none" });
+  }
+  // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution の自動着火経路
+  // (キュー掃き出し・classify末尾の即時着火・在庫再適用)は manual 無しで呼ばれ、ここで
+  // proposed に倒して痕跡を残す。一方、人間のワンタップ(POST /api/items/:id/execute)は
+  // manual:true で呼ばれ、このガードをスキップする(手動アクションを止めない=非対称)。
+  // approveExecution は runExecution を直呼びしここを通らない=手動承認の逃げ道も維持。
+  if (!manual && settings.get().pauseAuto) {
     return items.update(itemId, {
       executionStatus: "proposed",
       executionResult: "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。",

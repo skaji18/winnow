@@ -18,7 +18,9 @@ const CODE_SCHEMA_VERSION = 1;
 export const SCHEMA_VERSION = CODE_SCHEMA_VERSION;
 
 function getUserVersion(): number {
-  return Number(db.pragma("user_version", { simple: true })) ?? 0;
+  // Number(undefined) は NaN で ?? は発火しないため、NaN を明示的に 0 へ落とす。
+  const v = Number(db.pragma("user_version", { simple: true }));
+  return Number.isFinite(v) ? v : 0;
 }
 function setUserVersion(v: number): void {
   // PRAGMA に値はバインドできない。v は MIGRATIONS の数値定数由来なので算出済み整数のみ。
@@ -239,9 +241,13 @@ CREATE TABLE label_events (
   createdAt INTEGER NOT NULL,
   FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE SET NULL
 );`);
+    // 旧 remove は単純 DELETE で label_events を掃除しなかったため孤児 itemId が残りうる。
+    // 新FK (ON DELETE SET NULL) と整合させるべく、items に存在しない itemId は NULL 化して複写。
+    // これをしないと直後の foreign_key_check が孤児を新FK違反と検出し起動を恒久ブロックする。
     d.exec(
       `INSERT INTO label_events (id,itemId,action,fromDisposition,toDisposition,category,note,createdAt)
-       SELECT id,itemId,action,fromDisposition,toDisposition,category,note,createdAt FROM label_events_old`,
+       SELECT id, CASE WHEN itemId IN (SELECT id FROM items) THEN itemId ELSE NULL END,
+              action,fromDisposition,toDisposition,category,note,createdAt FROM label_events_old`,
     );
     d.exec("DROP TABLE label_events_old");
     d.exec("CREATE INDEX IF NOT EXISTS idx_labels_item ON label_events(itemId)");

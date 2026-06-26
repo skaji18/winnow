@@ -67,6 +67,10 @@ interface ClassifyOut {
 const clamp01 = (n: unknown): number =>
   typeof n === "number" && isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.5;
 
+// classify() の共有 in-flight ガード。capture 起点(capture.ts)と /api/state の sweep
+// (routes.ts)の双方がこの同一 Set を通るため、継ぎ目での二重発火を確実に防ぐ。
+const inFlight = new Set<string>();
+
 /**
  * 分類器 (REQUIREMENTS §3.2). 流れ:
  *  AI が三値+確信度+スコア+カテゴリを提案
@@ -78,29 +82,66 @@ export async function classify(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
 
-  const cfg = settings.get();
-  const driver = await ensureDriver();
-  const job = jobs.create({
-    itemId,
-    role: "control",
-    kindOfWork: "classify",
-    sessionName: null,
-    status: "running",
-    startedAt: Date.now(),
-    finishedAt: null,
-    output: null,
-    error: null,
-    ipcId: null,
-  });
+  // 共有 in-flight ガード: 既に classify 中なら現状を返して二重発火を防ぐ(capture×sweep の継ぎ目)。
+  if (inFlight.has(itemId)) return items.get(itemId);
+  inFlight.add(itemId);
+  try {
+    return await classifyInner(itemId, item);
+  } finally {
+    inFlight.delete(itemId);
+  }
+}
 
-  const res = await driver.dispatch({
-    id: randomUUID(),
-    role: "control",
-    label: `分類: ${item.title.slice(0, 30)}`,
-    prompt: classifyPrompt(item, buildContextBlock(item), categories.knownWithRecency()),
-    expectJson: true,
-    timeoutMs: 90_000,
-  });
+async function classifyInner(itemId: string, item: Item): Promise<Item | null> {
+  const cfg = settings.get();
+
+  // ensureDriver/dispatch が throw する経路(driver 初期化失敗・preflight NG 等)を受け、
+  // 通常の失敗パスと同形に倒して inbox から外す(無限再試行を止める)。
+  let res: Awaited<ReturnType<Awaited<ReturnType<typeof ensureDriver>>["dispatch"]>>;
+  let job: ReturnType<typeof jobs.create> | null = null;
+  try {
+    const driver = await ensureDriver();
+    job = jobs.create({
+      itemId,
+      role: "control",
+      kindOfWork: "classify",
+      sessionName: null,
+      status: "running",
+      startedAt: Date.now(),
+      finishedAt: null,
+      output: null,
+      error: null,
+      ipcId: null,
+    });
+
+    res = await driver.dispatch({
+      id: randomUUID(),
+      role: "control",
+      label: `分類: ${item.title.slice(0, 30)}`,
+      prompt: classifyPrompt(item, buildContextBlock(item), categories.knownWithRecency()),
+      expectJson: true,
+      timeoutMs: 90_000,
+    });
+  } catch (e) {
+    // 環境不全由来の throw。job が立っていれば failed に閉じ、item を envEscalated で classified へ。
+    if (job) {
+      jobs.update(job.id, {
+        status: "failed",
+        finishedAt: Date.now(),
+        error: classifyJobError(String(e)),
+      });
+    }
+    return items.update(itemId, {
+      status: "classified",
+      disposition: "escalate",
+      confidence: 0,
+      reason: `[env] 分類起動失敗: ${e}`,
+      category: "unclassified",
+      rawDisposition: null,
+      rawConfidence: 0,
+      envEscalated: true,
+    });
+  }
 
   jobs.update(job.id, {
     sessionName: res.sessionName,
