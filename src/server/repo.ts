@@ -83,6 +83,11 @@ export const items = {
     const r = db.prepare("SELECT * FROM items WHERE id = ?").get(id) as Row | undefined;
     return r ? mapItem(r) : null;
   },
+  // 外部冪等キーで既存を検索 (capture の重複 no-op/追記)。非null時一意(部分ユニーク索引)。
+  findByExternalKey(key: string): Item | null {
+    const r = db.prepare("SELECT * FROM items WHERE externalKey = ?").get(key) as Row | undefined;
+    return r ? mapItem(r) : null;
+  },
   children(parentId: string | null): Item[] {
     const rows = (
       parentId === null
@@ -218,6 +223,11 @@ export const labels = {
        VALUES (@id,@itemId,@action,@fromDisposition,@toDisposition,@category,@note,@createdAt)`,
     ).run(ev);
     return ev;
+  },
+  all(): LabelEvent[] {
+    return db
+      .prepare("SELECT * FROM label_events ORDER BY createdAt ASC")
+      .all() as LabelEvent[];
   },
   since(ts: number): LabelEvent[] {
     return db
@@ -533,3 +543,76 @@ export const settings = {
     return merged;
   },
 };
+
+// --- export/import (空DB復元限定) -------------------------------------------
+// 表の実カラム集合(PRAGMA table_info)に存在する列だけを INSERT する汎用復元。これで
+// export の行形(mapItem 由来の JS boolean 等)を版1スキーマに書き戻せる。SQLite に渡せない
+// 値(boolean→0/1、配列/オブジェクト→JSON 文字列)だけ正規化する。0/1 はそのまま往復。
+function normalizeForSqlite(v: unknown): unknown {
+  if (v === undefined) return null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (v !== null && typeof v === "object") return JSON.stringify(v);
+  return v;
+}
+
+function restoreRows(table: string, rows: Array<Record<string, unknown>>): number {
+  if (!rows.length) return 0;
+  const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  const insert = db.transaction((rs: Array<Record<string, unknown>>) => {
+    for (const row of rs) {
+      const present = cols.filter((c) => c in row);
+      if (present.length === 0) continue;
+      const placeholders = present.map((c) => `@${c}`).join(",");
+      const params: Record<string, unknown> = {};
+      for (const c of present) params[c] = normalizeForSqlite(row[c]);
+      db.prepare(
+        `INSERT INTO ${table} (${present.join(",")}) VALUES (${placeholders})`,
+      ).run(params);
+    }
+  });
+  insert(rows);
+  return rows.length;
+}
+
+export interface ImportPayload {
+  items?: Array<Record<string, unknown>>;
+  labels?: Array<Record<string, unknown>>;
+  rules?: Array<Record<string, unknown>>;
+  categoryStats?: Array<Record<string, unknown>>;
+  projects?: Array<Record<string, unknown>>;
+  sprints?: Array<Record<string, unknown>>;
+  jobs?: Array<Record<string, unknown>>;
+  settings?: Record<string, unknown>;
+}
+
+/**
+ * 空DB復元。呼び出し側(routes)が空DB判定・版数照合済みである前提。merge はしない。
+ * 復元順序は FK 親→子(projects/sprints → items → label_events/jobs)。部分ユニーク externalKey の
+ * 不変条件(非null時一意)は export 元が保証している前提(空DBなので衝突は復元元の重複のみ)。
+ */
+export function importData(payload: ImportPayload): {
+  items: number;
+  projects: number;
+  sprints: number;
+  labels: number;
+  rules: number;
+  categoryStats: number;
+  jobs: number;
+} {
+  // settings はシード行を上書き(import の設定で復元)。
+  if (payload.settings) {
+    const merged = { ...DEFAULT_SETTINGS, ...payload.settings } as Settings;
+    db.prepare("UPDATE settings SET json = ? WHERE id = 1").run(JSON.stringify(merged));
+  }
+  return {
+    projects: restoreRows("projects", payload.projects ?? []),
+    sprints: restoreRows("sprints", payload.sprints ?? []),
+    items: restoreRows("items", payload.items ?? []),
+    labels: restoreRows("label_events", payload.labels ?? []),
+    rules: restoreRows("rules", payload.rules ?? []),
+    categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
+    jobs: restoreRows("jobs", payload.jobs ?? []),
+  };
+}

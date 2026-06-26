@@ -44,6 +44,17 @@ const captureInputShape = {
     .boolean()
     .optional()
     .describe("既定 true。まとめて大量投入する時など、即時分類を避けたい場合のみ false。"),
+  externalKey: z
+    .string()
+    .optional()
+    .describe(
+      "外部ソース由来の冪等キー。同じ作業を再度 capture する時は同じ externalKey を渡すと重複しない" +
+        "(既存があれば本文を追記し no-op になる)。取り込みcron/バッチ投入で重複を防ぐのに使う。",
+    ),
+  sourceUrl: z
+    .string()
+    .optional()
+    .describe("原典(課題/PR/ドキュメント等)へ戻る URL があれば渡す。read-only 痕跡として保存する。"),
 };
 
 /**

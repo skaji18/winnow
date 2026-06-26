@@ -8,9 +8,22 @@ import * as decomposer from "../decomposer.js";
 import * as executor from "../executor.js";
 import * as promotion from "../promotion.js";
 import { autoFoldedCount, queue } from "../queue.js";
-import { items, jobs, labels, projects, rules, settings, sprints } from "../repo.js";
+import {
+  categoryStats,
+  importData,
+  items,
+  jobs,
+  labels,
+  projects,
+  rules,
+  settings,
+  sprints,
+} from "../repo.js";
 import { getRuntimeState } from "../runtime-state.js";
 import { weekly } from "../summary.js";
+import { validateClaudeCmd } from "../security.js";
+import { validateProjectDir } from "../paths.js";
+import { SCHEMA_VERSION } from "../db.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -22,6 +35,12 @@ function background(fn: () => Promise<unknown>): void {
 // 点火する。overlapする /api/state ポーリングからの二重起動を防ぐため、
 // 起動中の id を保持して重複ディスパッチをスキップする。
 const igniting = new Set<string>();
+
+// inbox 保留のドレイン (§3.4 キュー開封発火に相乗り)。capture が過負荷で classify を発火せず
+// inbox に積んだ未分類 Item を、キュー開封(=/api/state 取得)時に sweep して classify を背景発火する。
+// WIP天井(worker資源・igniting Set)とは別資源(control 直列)・別ループ・別 Set で管理する
+// (両 Set を混同しない。budget は worker 専用で classify には適用しない)。
+const classifying = new Set<string>();
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // One-shot snapshot powering the whole UI.
@@ -54,6 +73,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
       }
     }
+    // inbox 保留のドレイン: 過負荷で classify を発火せず inbox に積まれた未分類 Item
+    // (status==='inbox' && disposition===null) をキュー開封時に classify 背景発火する。
+    // 別ループ・別 Set(classifying)で二重発火を防ぐ。control 直列なので budget は適用しない
+    // (失敗=escalate とバックプレッシャ=inbox 保留→開封時 sweep ドレインを区別する §3.4)。
+    for (const it of items.all()) {
+      if (it.status === "inbox" && it.disposition === null && !classifying.has(it.id)) {
+        classifying.add(it.id);
+        background(() => classify(it.id).finally(() => classifying.delete(it.id)));
+      }
+    }
     return {
       items: items.all(),
       queue: queue(),
@@ -75,10 +104,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // 「雑に貼る」入口は capture サービスに一本化 (REST と MCP が同じ経路を通る)。
   app.post("/api/items", async (req) => captureItem(captureSchema.parse(req.body)));
 
-  // 汎用更新。監査/自動化/来歴フィールド (auditSampled, humanOverrode,
-  // autoExecuted, executionStatus, executionResult, createdAt, updatedAt, id) は
-  // 意図的に除外し、専用の action/audit/execute/cancel ルートからしか動かせない
-  // ようにする (簿記の信頼性を守る)。.strict() で未知キーも拒否。
+  // 汎用更新。人間が手で編集してよいのは編集系フィールドのみ。
+  // 分類器/較正フィールド (disposition/confidence/reason/stakes/reversibility/category/
+  // rawDisposition/rawConfidence) は意図的に除外する=背骨「口はバカ・分類器が賢い」の機械的強制
+  // (人間が disposition=auto を直書きして分類器/監査をバイパスし auto-leaf を注入する穴を塞ぐ)。
+  // disposition の人間変更は POST /api/items/:id/action(reclassify) に一本化されている
+  // (label_event + recordOutcome を出す唯一の正規路なので機能欠落なし)。
+  // 監査/自動化/来歴 (auditSampled/humanOverrode/autoExecuted/executionStatus/executionResult/
+  // createdAt/updatedAt/id) も従来どおり除外。.strict() で範囲外キーは 400。
   const patchSchema = z
     .object({
       title: z.string().min(1).optional(),
@@ -90,12 +123,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       status: z
         .enum(["inbox", "classified", "in_progress", "review", "done", "rejected", "blocked"])
         .optional(),
-      disposition: z.enum(["auto", "escalate", "human"]).nullable().optional(),
-      confidence: z.number().min(0).max(1).nullable().optional(),
-      reason: z.string().nullable().optional(),
-      stakes: z.number().min(0).max(1).nullable().optional(),
-      reversibility: z.number().min(0).max(1).nullable().optional(),
-      category: z.string().nullable().optional(),
       process: z.enum(["waterfall", "iterative"]).nullable().optional(),
       domain: z.enum(["software", "general"]).optional(),
       projectDir: z.string().nullable().optional(),
@@ -103,11 +130,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       sprintId: z.string().nullable().optional(),
       dueDate: z.number().nullable().optional(),
       priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
+      // 楽観ロック (If-Unmodified-Since 相当)。未指定=チェックしない=現状維持(後方互換)。
+      expectedUpdatedAt: z.number().optional(),
     })
     .strict();
-  app.patch("/api/items/:id", async (req) => {
+  app.patch("/api/items/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const patch = patchSchema.parse(req.body);
+    const { expectedUpdatedAt, ...patch } = patchSchema.parse(req.body);
+    const cur = items.get(id);
+    if (!cur) return reply.code(404).send({ error: "not found" });
+    // 楽観ロック: その間に他所で変わっていれば 409 で弾く(全列上書きの黙った巻き戻り防止)。
+    if (expectedUpdatedAt !== undefined && cur.updatedAt !== expectedUpdatedAt) {
+      return reply.code(409).send({ error: "stale", current: cur });
+    }
+    // projectDir 検証: 絶対パス必須・realpath 化・機微パス拒否。不正は 400。
+    // (capture/decompose は escalate に倒すが、ここは人間の直接編集なので即時 400 で気づかせる。)
+    if (patch.projectDir !== undefined) {
+      const v = validateProjectDir(patch.projectDir);
+      if (v.escalate) return reply.code(400).send({ error: v.reason ?? "invalid projectDir" });
+      patch.projectDir = v.dir;
+    }
     return items.update(id, patch);
   });
 
@@ -261,20 +303,80 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // --- settings / 再調律スライダー ------------------------------------------
-  const settingsSchema = z.object({
-    auditRate: z.number().min(0).max(1).optional(),
-    escalationTightness: z.number().min(0).max(1).optional(),
-    maxWorkers: z.number().int().min(1).max(8).optional(),
-    claudeControlCmd: z.string().optional(),
-    claudeWorkerCmd: z.string().optional(),
-    useHeadless: z.boolean().optional(),
-    productContext: z.string().optional(),
-  });
-  app.patch("/api/settings", async (req) => {
+  // claudeAllowedFlags 自体は PATCH 対象に含めない=許可リスト緩めの穴を作らない(非対称:
+  // 締めるのは速く、緩めるは慎重に。緩めたい時はコード/DB 直編集)。
+  const settingsSchema = z
+    .object({
+      auditRate: z.number().min(0).max(1).optional(),
+      escalationTightness: z.number().min(0).max(1).optional(),
+      maxWorkers: z.number().int().min(1).max(8).optional(),
+      claudeControlCmd: z.string().optional(),
+      claudeWorkerCmd: z.string().optional(),
+      useHeadless: z.boolean().optional(),
+      productContext: z.string().optional(),
+      pauseAuto: z.boolean().optional(),
+    })
+    .strict();
+  app.patch("/api/settings", async (req, reply) => {
     const patch = settingsSchema.parse(req.body);
+    // 起動コマンド許可リスト: 先頭トークン=claude 固定 + settings.claudeAllowedFlags 内のトークンのみ。
+    // RCE 面(任意コマンド注入)を閉じる。範囲外トークンを含む更新は 400。
+    const allowed = settings.get().claudeAllowedFlags;
+    for (const key of ["claudeControlCmd", "claudeWorkerCmd"] as const) {
+      const cmd = patch[key];
+      if (cmd !== undefined && !validateClaudeCmd(cmd, allowed)) {
+        return reply.code(400).send({ error: `disallowed command tokens in ${key}` });
+      }
+    }
     const updated = settings.update(patch);
     if (patch.useHeadless !== undefined) resetDriver(); // ドライバ選択をやり直す
     return updated;
+  });
+
+  // --- export / import (版数付き JSON・空DB復元限定) -------------------------
+  // GET /api/export: 全テーブルを版数付き JSON で書き出す(read-only、winnow は外部送出しない)。
+  // boolean は SQLite 由来の 0/1 のまま往復させる(import の直 INSERT が同じ表現で書き戻す)。
+  app.get("/api/export", async () => ({
+    version: SCHEMA_VERSION,
+    exportedAt: Date.now(),
+    data: {
+      items: items.all(),
+      labels: labels.all(),
+      rules: rules.all(),
+      categoryStats: categoryStats.all(),
+      projects: projects.all(),
+      sprints: sprints.all(),
+      jobs: jobs.recent(1_000_000),
+      settings: settings.get(),
+    },
+  }));
+
+  // POST /api/import: 空DB復元限定(merge 禁止)。items/projects 件数 0 で「空」と判定
+  // (settings seed 行は db.ts が必ず作るので判定に含めない)。版数照合の上、復元する。
+  const importSchema = z.object({
+    version: z.number(),
+    data: z.object({
+      items: z.array(z.record(z.unknown())).optional(),
+      labels: z.array(z.record(z.unknown())).optional(),
+      rules: z.array(z.record(z.unknown())).optional(),
+      categoryStats: z.array(z.record(z.unknown())).optional(),
+      projects: z.array(z.record(z.unknown())).optional(),
+      sprints: z.array(z.record(z.unknown())).optional(),
+      jobs: z.array(z.record(z.unknown())).optional(),
+      settings: z.record(z.unknown()).optional(),
+    }),
+  });
+  app.post("/api/import", async (req, reply) => {
+    const payload = importSchema.parse(req.body);
+    if (payload.version !== SCHEMA_VERSION) {
+      return reply
+        .code(409)
+        .send({ error: `version mismatch: payload v${payload.version} != code v${SCHEMA_VERSION}` });
+    }
+    const empty = items.all().length === 0 && projects.all().length === 0;
+    if (!empty) return reply.code(409).send({ error: "import requires empty DB" });
+    const r = importData(payload.data);
+    return { ok: true, ...r };
   });
 
   app.get("/api/summary", async () => weekly());

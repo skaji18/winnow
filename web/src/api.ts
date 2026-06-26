@@ -1,9 +1,18 @@
 import type { AppState, Disposition, Item, Priority, Project, Settings, Sprint } from "./types.js";
 
+// 同一オリジン保証: サーバが index.html に注入したローカルシークレットを window から読み、
+// 状態変更系リクエストに x-winnow-secret として乗せる(他オリジンの fetch はこれを読めない)。
+// dev (Vite:5174) では未注入だが、サーバ側 security.ts が dev はシークレット免除する。
+const LOCAL_SECRET: string | undefined = (
+  globalThis as unknown as { __WINNOW_SECRET__?: string }
+).__WINNOW_SECRET__;
+
 async function j<T>(url: string, opts?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (LOCAL_SECRET) headers["x-winnow-secret"] = LOCAL_SECRET;
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: { ...headers, ...(opts?.headers as Record<string, string> | undefined) },
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json() as Promise<T>;

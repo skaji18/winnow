@@ -12,6 +12,7 @@ import { getDriver } from "./ai/index.js";
 import { reconcileOnBoot, inFlightCount } from "./executor.js";
 import { preflightCheck } from "./ai/preflight.js";
 import { getRuntimeState, setReconcile, setPreflight } from "./runtime-state.js";
+import { registerSecurityHook, LOCAL_SECRET, originAllowed } from "./security.js";
 
 ensureDirs();
 
@@ -34,7 +35,22 @@ try {
 
 const app = Fastify({ logger: { level: "warn" } });
 
+// zod の検証エラー (範囲外キー/型不一致) は 500 でなく 400 で返す (入力不正はクライアント起因)。
+// patchSchema 等の .strict() に弾かれた範囲外キーがここで 400 になる。それ以外は既定処理。
+app.setErrorHandler((err, _req, reply) => {
+  const e = err as { name?: string; statusCode?: number; issues?: unknown };
+  if (e.name === "ZodError" || Array.isArray(e.issues)) {
+    reply.code(400).send({ error: "invalid request", issues: e.issues });
+    return;
+  }
+  reply.send(err);
+});
+
 await app.register(fastifyWebsocket);
+// 全ルート登録前に Origin/Host 許可リスト + ローカルシークレットの onRequest フックを張る
+// (DNS rebinding / 他オリジン誘導の防御。認証ではなく同一オリジン保証)。/healthz・/ws・
+// 静的配信は対象外。dev (Vite:5174) は security.ts 側で許容+シークレット免除される。
+registerSecurityHook(app);
 await registerRoutes(app);
 // Claude 等の MCP クライアントが作業中に直接アイテムを捕獲できる口 (§8 「MCPで寄生」)。
 await registerMcp(app);
@@ -55,9 +71,21 @@ app.get("/healthz", async () => {
 // Live terminal theater (§4 "ワンクリックで端末を開いて結果も出し切る").
 // Streams `tmux capture-pane` for a session over WebSocket.
 app.get("/ws/terminal", { websocket: true }, (socket, req) => {
+  // (a) Origin/Host 検証: ブラウザ経由の他オリジン誘導を弾く(WS は onRequest フック対象外なのでここで)。
+  if (!originAllowed(req)) {
+    socket.close();
+    return;
+  }
   const url = new URL(req.url, "http://localhost");
   const session = url.searchParams.get("session");
   if (!session) {
+    socket.close();
+    return;
+  }
+  // (b) session 許可リスト照合: listSessions の既知 window 集合にあるものだけ capture する
+  //     (任意 tmux ターゲットの capture 注入を塞ぐ。端末描画は解析しない=read-only のまま)。
+  const known = new Set(getDriver().listSessions().map((s) => s.name));
+  if (!known.has(session)) {
     socket.close();
     return;
   }
@@ -67,8 +95,9 @@ app.get("/ws/terminal", { websocket: true }, (socket, req) => {
     try {
       const text = await getDriver().capture(session);
       if (socket.readyState === socket.OPEN) socket.send(text);
-    } catch {
-      /* ignore transient capture errors */
+    } catch (e) {
+      // 握り潰さずログだけは残す (背骨: エラーを黙って捨てない)。
+      app.log.warn({ err: e }, "terminal capture tick failed");
     }
     if (alive) setTimeout(tick, 1000);
   };
@@ -82,7 +111,22 @@ app.get("/ws/terminal", { websocket: true }, (socket, req) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webDist = path.resolve(__dirname, "../../web/dist");
 if (fs.existsSync(webDist)) {
-  await app.register(fastifyStatic, { root: webDist });
+  // index 配信は自前(シークレット注入)、static は CSS/JS 等のアセット配信に限定。
+  await app.register(fastifyStatic, { root: webDist, index: false });
+
+  // index.html を読み、</head> 直前にローカルシークレットを注入して返す。
+  // 同一オリジンに限り window.__WINNOW_SECRET__ に乗る=他オリジンの fetch はシークレットを読めない。
+  // (これは認証ではなく同一オリジン保証。ログイン UI は無い。)
+  const sendIndexWithSecret = (reply: import("fastify").FastifyReply): void => {
+    const html = fs.readFileSync(path.join(webDist, "index.html"), "utf8");
+    const inject = `<script>window.__WINNOW_SECRET__=${JSON.stringify(LOCAL_SECRET)}</script>`;
+    const out = html.includes("</head>")
+      ? html.replace("</head>", `${inject}</head>`)
+      : inject + html;
+    reply.type("text/html").send(out);
+  };
+
+  app.get("/", async (_req, reply) => sendIndexWithSecret(reply));
   app.setNotFoundHandler((req, reply) => {
     if (
       req.url.startsWith("/api") ||
@@ -91,7 +135,8 @@ if (fs.existsSync(webDist)) {
     ) {
       reply.code(404).send({ error: "not found" });
     } else {
-      reply.sendFile("index.html");
+      // SPA フォールバック: 未知パスは index.html(シークレット注入版)を返す。
+      sendIndexWithSecret(reply);
     }
   });
 }

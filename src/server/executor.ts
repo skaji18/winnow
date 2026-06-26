@@ -9,6 +9,8 @@ import { buildContextBlock } from "./context.js";
 import type { Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
 import { recordOutcome } from "./calibration.js";
+import { validateProjectDir } from "./paths.js";
+import { classifyJobError } from "./errors.js";
 
 // 実行とトリガー (REQUIREMENTS §3.4). 自動実行は可逆性で段を分ける:
 //  可逆な実行 → 自動着火 / 不可逆・高ステークス → 提案して人間ワンタップ承認。
@@ -117,8 +119,18 @@ export async function requestExecution(itemId: string): Promise<Item | null> {
       executionResult: "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。",
     });
   }
-  // Batch5 申し送り: ここ(kindチェックの直前)に auto source 検証(confidence==null なら escalate)を
-  // 挿入する予定。本バッチでは触らない。
+  // auto source 検証 (背骨「口はバカ・分類器が賢い」の executor 側の最終ゲート)。
+  // 分類器は auto に倒すとき必ず confidence を入れる (classifier.ts normalize/clamp01)。
+  // 自動着火経路で disposition==='auto' なのに confidence==null = 分類器/監査を経ていない疑い
+  // (人間が PATCH で直接 disposition=auto を書いた等)。分類由来でないと判断し、自動着火せず
+  // 安全側に escalate に倒す(分類器経由は必ず confidence を持つので誤爆しない)。
+  if (item.disposition === "auto" && item.confidence == null) {
+    return items.update(itemId, {
+      disposition: "escalate",
+      status: "classified",
+      executionResult: "auto の出所が分類器でないため安全側にエスカレートしました。",
+    });
+  }
   if (item.kind !== "leaf") {
     return items.update(itemId, {
       executionResult: "ノードは直接実行できません。先に分解してください。",
@@ -204,6 +216,18 @@ export async function runExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
 
+  // 防御的 projectDir 検証(最終ゲート): headless-driver が req.cwd を無検証 cwd にする穴を、
+  // dispatch に渡る前に塞ぐ。不正(相対/機微パス)なら実行せず proposed に倒して人間確認へ。
+  if (item.projectDir != null) {
+    const v = validateProjectDir(item.projectDir);
+    if (v.escalate) {
+      return items.update(itemId, {
+        executionStatus: "proposed",
+        executionResult: `作業ディレクトリが不正のため実行を保留しました(${v.reason ?? "検証失敗"})。`,
+      });
+    }
+  }
+
   items.update(itemId, { executionStatus: "running", status: "in_progress" });
   const driver = await ensureDriver();
   // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
@@ -237,7 +261,8 @@ export async function runExecution(itemId: string): Promise<Item | null> {
     status: res.ok ? "succeeded" : "failed",
     finishedAt: Date.now(),
     output: res.raw,
-    error: res.error ?? null,
+    // クォータ/レート起因の失敗は "quota: ..." 接頭辞付けで種別を残す。
+    error: classifyJobError(res.error),
   });
 
   if (!res.ok) {

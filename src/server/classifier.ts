@@ -8,6 +8,7 @@ import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
 import { categories, items, jobs, rules, settings } from "./repo.js";
 import { isProvisionalTitle, normalizeCategory } from "./text.js";
+import { classifyJobError } from "./errors.js";
 
 // 締めた escalate(rawDisposition=auto なのに tightness で escalate に倒した)に混ぜる監査の割合。
 // 通常 auto より低率で、緩めた境界の検証を継続するための簿記。
@@ -106,7 +107,8 @@ export async function classify(itemId: string): Promise<Item | null> {
     status: res.ok ? "succeeded" : "failed",
     finishedAt: Date.now(),
     output: res.raw,
-    error: res.error ?? null,
+    // クォータ/レート起因の失敗は "quota: ..." 接頭辞付けで種別を残す(/healthz・デバッグ用)。
+    error: classifyJobError(res.error),
   });
 
   if (!res.ok) {
@@ -192,7 +194,10 @@ export async function classify(itemId: string): Promise<Item | null> {
   // 新たに分類された auto leaf を /api/state ポーリングを待たず発火させる。
   // 掃き出しとの二重着火は requestExecution 冒頭の executionStatus ガードが吸収するため調整不要。
   if (updated && updated.disposition === "auto" && updated.kind === "leaf") {
-    void executor.requestExecution(updated.id).catch(() => {});
+    // 握り潰さずログだけは残す(背骨: エラーを黙って捨てない)。
+    void executor
+      .requestExecution(updated.id)
+      .catch((e) => console.error("[winnow] auto-ignite after classify failed:", e));
   }
 
   return updated;
