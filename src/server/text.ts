@@ -28,6 +28,16 @@ export function isProvisionalTitle(title: string, body: string): boolean {
  * - 前後の引用符・括弧の装飾を剥がす (AIが時々付けてくる「…」や"…")。
  * 大文字小文字は畳まない(英字頭字語の表示を壊さない/意味の寄せ込みは案A側)。
  */
+/**
+ * confidence をビン(0..4)へ写す (§3.6 ビン較正のキー)。floor(clamp01(conf)*5) を 0..4 に
+ * clamp。null/未定義は中央ビンへ寄せず、呼び出し側で rawConfidence ?? confidence を渡す前提。
+ * AI不要・決定論的。
+ */
+export function confBinOf(conf: number | null | undefined): number {
+  const c = typeof conf === "number" && isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5;
+  return Math.max(0, Math.min(4, Math.floor(c * 5)));
+}
+
 export function normalizeCategory(raw: string): string {
   return (raw ?? "")
     .normalize("NFKC")

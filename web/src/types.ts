@@ -28,6 +28,10 @@ export interface Item {
   stakes: number | null;
   reversibility: number | null;
   category: string | null;
+  // tightness/ゲート前の AI 生提案 (較正母数の源)。読み取り専用。サーバ未提供時 undefined=現状維持。
+  rawDisposition?: Disposition | null;
+  rawConfidence?: number | null;
+  envEscalated?: boolean;
   process: "waterfall" | "iterative" | null;
   uncertaintyResolved: boolean;
   autoExecuted: boolean;
@@ -105,6 +109,13 @@ export interface WeeklySummary {
   overridden: number;
   audited: number;
   tippedCategories: string[];
+  autoPrev: number;
+  escalatedPrev: number;
+  tightenedCount: number;
+  loosenedCount: number;
+  auditBad: number;
+  stale: number;
+  failed: number;
   line: string;
 }
 

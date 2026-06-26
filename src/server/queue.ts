@@ -20,6 +20,8 @@ export function queue(): QueueItem[] {
     if (it.executionStatus === "proposed") return true;
     if (it.status !== "classified") return false;
     // エスカレーション/人間案件は出す
+    // escalate/human は出す。tightness が締めた escalate(rawDisposition='auto')で監査サンプル
+    // されたものもここに含まれ、見分け不能のまま継続監視される (追加表示は不要)。
     if (it.disposition === "escalate" || it.disposition === "human") return true;
     // 自動だが監査サンプルされたものは「見分けつかない形」で混ぜる (§4-3)
     if (it.disposition === "auto" && it.auditSampled) return true;
@@ -43,7 +45,12 @@ export function queue(): QueueItem[] {
     return score(b) - score(a);
   });
 
-  return visible.map((it) => ({ ...it, isAudit: it.disposition === "auto" && it.auditSampled }));
+  // isAudit: 最終 auto の監査サンプル、または tightness が締めた escalate(生提案 auto)の監査
+  // サンプル。後者も「確認(自動処理)」チップを出し見分け不能にする (§4-3)。
+  return visible.map((it) => ({
+    ...it,
+    isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
+  }));
 }
 
 /** 自動で畳まれた(キューに出ない)アイテム数。コールドスタート期待値管理に使う。 */

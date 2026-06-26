@@ -229,6 +229,18 @@ export const labels = {
       .prepare("SELECT * FROM label_events WHERE itemId = ? ORDER BY createdAt DESC")
       .all(itemId) as LabelEvent[];
   },
+  /** カテゴリ × アクション群で件数を数える (summary の方向別締緩・符号ズレ補正の母数)。 */
+  countByCategoryAction(category: string, actions: LabelAction[], since: number): number {
+    if (actions.length === 0) return 0;
+    const ph = actions.map(() => "?").join(",");
+    return (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM label_events WHERE category = ? AND action IN (${ph}) AND createdAt >= ?`,
+        )
+        .get(category, ...actions, since) as { c: number }
+    ).c;
+  },
 };
 
 export const rules = {
@@ -292,6 +304,30 @@ export const categories = {
       .all() as { category: string }[];
     return rows.map((r) => r.category);
   },
+  /**
+   * known() に直近使用数を添えたもの (発生源抑制の強化)。items の category 別件数を添えて
+   * 使用実績の多い既存語彙を分類プロンプトで優先再利用させる。意味クラスタリングはしない。
+   * recentCount は items 上の総出現数 (createdAt 降順の重みは付けず単純カウント=決定論)。
+   */
+  knownWithRecency(): { category: string; recentCount: number }[] {
+    const rows = db
+      .prepare(
+        `SELECT k.category AS category,
+            (SELECT COUNT(*) FROM items i
+               WHERE i.category = k.category AND i.category IS NOT NULL AND i.category <> '') AS recentCount
+         FROM (
+           SELECT DISTINCT category FROM (
+             SELECT category FROM items WHERE category IS NOT NULL AND category <> ''
+             UNION SELECT category FROM rules
+             UNION SELECT category FROM category_stats
+           ) WHERE category IS NOT NULL AND category <> ''
+             AND category NOT IN ('uncategorized','unclassified')
+         ) k
+         ORDER BY recentCount DESC, k.category ASC`,
+      )
+      .all() as { category: string; recentCount: number }[];
+    return rows;
+  },
 };
 
 export const categoryStats = {
@@ -324,6 +360,20 @@ export const categoryStats = {
       .prepare("SELECT * FROM category_stats WHERE category = ?")
       .all(category) as CategoryStat[];
   },
+  /**
+   * 全ビンを SUM して旧来の (category, aiDisposition) 単位の集計を再現する後方互換ヘルパ。
+   * learned auto tip の Wilson 下限判定はビン横断で行うのでこちらを使う。confBin は便宜上 0。
+   */
+  aggregated(category: string): CategoryStat[] {
+    return db
+      .prepare(
+        `SELECT category, aiDisposition, 0 AS confBin,
+            SUM(agreed) AS agreed, SUM(overturned) AS overturned, SUM(overturnedToAuto) AS overturnedToAuto
+         FROM category_stats WHERE category = ?
+         GROUP BY category, aiDisposition`,
+      )
+      .all(category) as CategoryStat[];
+  },
 };
 
 export const jobs = {
@@ -347,6 +397,28 @@ export const jobs = {
     return db
       .prepare("SELECT * FROM jobs ORDER BY createdAt DESC LIMIT ?")
       .all(limit) as ExecutionJob[];
+  },
+  /** classify/execute の失敗ジョブ数 (summary の failed 集計)。finishedAt 基準。 */
+  failedSince(ts: number): number {
+    return (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM jobs
+           WHERE status='failed' AND kindOfWork IN ('classify','execute') AND finishedAt >= ?`,
+        )
+        .get(ts) as { c: number }
+    ).c;
+  },
+  /** 成功した execute ジョブの DISTINCT itemId 数 (summary の auto 件数のイベント基準)。 */
+  succeededExecuteItemsSince(ts: number): number {
+    return (
+      db
+        .prepare(
+          `SELECT COUNT(DISTINCT itemId) AS c FROM jobs
+           WHERE status='succeeded' AND kindOfWork='execute' AND finishedAt >= ?`,
+        )
+        .get(ts) as { c: number }
+    ).c;
   },
 };
 
