@@ -8,7 +8,10 @@ const LOCAL_SECRET: string | undefined = (
 ).__WINNOW_SECRET__;
 
 async function j<T>(url: string, opts?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // ボディ無し POST に Content-Type: application/json を付けると Fastify が空ボディを
+  // FST_ERR_CTP_EMPTY_JSON_BODY で弾く(分解する/classify/execute 等)。ボディがあるときだけ付ける。
+  const headers: Record<string, string> = {};
+  if (opts?.body != null) headers["Content-Type"] = "application/json";
   if (LOCAL_SECRET) headers["x-winnow-secret"] = LOCAL_SECRET;
   const res = await fetch(url, {
     ...opts,
