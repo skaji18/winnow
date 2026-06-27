@@ -463,6 +463,18 @@ export const jobs = {
       )
       .all() as ExecutionJob[];
   },
+  /**
+   * ある item の最新の execute ジョブ (timed_out の late sentinel 回収で ipcId を引くため)。
+   * 1 item が再実行で複数 execute ジョブを持ちうるので createdAt 降順の先頭=今回の実行を採る。
+   */
+  latestExecuteForItem(itemId: string): ExecutionJob | null {
+    const r = db
+      .prepare(
+        "SELECT * FROM jobs WHERE itemId=? AND role='worker' AND kindOfWork='execute' ORDER BY createdAt DESC LIMIT 1",
+      )
+      .get(itemId) as ExecutionJob | undefined;
+    return r ?? null;
+  },
   /** classify/execute の失敗ジョブ数 (summary の failed 集計)。finishedAt 基準。 */
   failedSince(ts: number): number {
     return (

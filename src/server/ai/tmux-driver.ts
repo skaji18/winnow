@@ -21,9 +21,13 @@ interface Waiter {
   cancel: () => void;
 }
 
-// Default upper bound for how long dispatch will wait for a free worker before
+// Fallback upper bound for how long dispatch will wait for a free worker before
 // declaring failure. Keeps the request queue from hanging forever when every
-// session is busy or wedged on a permission prompt (deadlock fix #2).
+// session is busy or wedged on a permission prompt (deadlock fix #2). The live
+// value comes from settings.acquireTimeoutMs; this is only the floor used when
+// that is unset/0. NOTE: acquire wait is now decoupled from the per-request work
+// timeout (req.timeoutMs) — a 10-min execute must not also wait 10 min for a
+// worker (proposal 5: acquire timeout ≠ work timeout).
 const ACQUIRE_TIMEOUT_MS = 120_000;
 
 /**
@@ -159,8 +163,15 @@ export class TmuxDriver implements AiDriver {
     // rather than throwing through awaiting callers (deadlock fix #2).
     let s: Session;
     try {
-      s = await this.acquire(req.role, req.timeoutMs);
+      // Acquire wait is bounded by acquireTimeoutMs (pool contention), NOT by the
+      // request's work timeout. A long execute (10 min) should give up waiting for
+      // a free worker far sooner than it would run.
+      const acquireMs = settings.get().acquireTimeoutMs || ACQUIRE_TIMEOUT_MS;
+      s = await this.acquire(req.role, acquireMs);
     } catch (e) {
+      // No free/any session → the request never dispatched. Mark poolBusy so the
+      // executor treats it as a transient "busy" state (re-runnable), not a hard
+      // execution failure (proposal 5).
       return {
         ok: false,
         data: null,
@@ -168,6 +179,7 @@ export class TmuxDriver implements AiDriver {
         sessionName: null,
         error: (e as Error).message,
         durationMs: Date.now() - started,
+        poolBusy: true,
       };
     }
 
@@ -216,13 +228,17 @@ export class TmuxDriver implements AiDriver {
       const durationMs = Date.now() - started;
 
       if (!ok) {
+        // Work timeout: we stopped waiting for the done sentinel, but the pane may
+        // still be running. Flag timedOut so the executor can keep the job for late
+        // sentinel recovery instead of declaring a hard failure (§4-4).
         return {
           ok: false,
           data: null,
           raw: "",
           sessionName: tmux.target(s.window),
-          error: `タイムアウト(${timeoutMs}ms)。セッションが許可プロンプトで止まっている可能性。`,
+          error: `タイムアウト(${timeoutMs}ms)。セッションが許可プロンプトで止まっているか、実行が長引いている可能性。`,
           durationMs,
+          timedOut: true,
         };
       }
 

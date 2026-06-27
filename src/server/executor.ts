@@ -6,7 +6,7 @@ import { executePrompt } from "./ai/prompts.js";
 import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
 import { buildContextBlock } from "./context.js";
-import type { Item } from "./domain.js";
+import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
 import { recordOutcome } from "./calibration.js";
 import { validateProjectDir } from "./paths.js";
@@ -137,9 +137,11 @@ export async function requestExecution(
   if (!item) return null;
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
   // executionStatus は "none" 既定で null にならない (db.ts DEFAULT 'none')。
-  // failed のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
+  // failed / timed_out のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
   // 再浮上した failed 項目の再実行 (Batch5 のワンタップ / 起動時 reconcile が failed に倒した
-  // 項目) はここを通って再着火する。
+  // 項目) と、work timeout で timed_out に倒した項目の「待たず再実行」はここを通って再着火する
+  // (timed_out からの再実行は新しい ipcId のジョブを立て、旧 sentinel は latestExecuteForItem が
+  //  最新を返すので誤って当たらない)。
   // 例外: succeeded かつ instruction 非空の「この方向で直す」(reExecute) は再走を許す。
   //   reExecute は GeneralOutlet の auto-done(succeeded) 項目からしか来ないため、succeeded を
   //   通すための専用緩和。可逆/承認ゲートは後段でそのまま効く。再走前に executionStatus を
@@ -149,6 +151,7 @@ export async function requestExecution(
     item.executionStatus &&
     item.executionStatus !== "none" &&
     item.executionStatus !== "failed" &&
+    item.executionStatus !== "timed_out" &&
     !isReExecute
   )
     return item;
@@ -324,7 +327,7 @@ export async function runExecution(
     prompt: executePrompt(item, buildContextBlock(item), instruction, opts.externalApproved === true),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
-    timeoutMs: 600_000,
+    timeoutMs: settings.get().executeTimeoutMs || 600_000,
   });
 
   jobs.update(job.id, {
@@ -338,7 +341,28 @@ export async function runExecution(
 
   if (!res.ok) {
     // blocked語義整理: 実行失敗は status を blocked にせず in_progress に保つ。
-    // 可視性は queue の executionStatus==='failed' フィルタが担保する。
+    // 可視性は queue の executionStatus フィルタ(failed/timed_out)が担保する。
+    //
+    // (1) プール枯渇 (acquire timeout / no worker): 実行はそもそもディスパッチされていない。
+    //     再試行で解ける一時失敗なので「混雑」と明示して区別する (proposal 5: acquire≠work timeout)。
+    if (res.poolBusy) {
+      return items.update(itemId, {
+        executionStatus: "failed",
+        status: "in_progress",
+        executionResult: `ワーカー混雑のため実行できませんでした(${res.error ?? "no worker"})。実行そのものの失敗ではありません。空き次第そのままワンタップで再実行してください。`,
+      });
+    }
+    // (2) work timeout: winnow は待つのをやめたが worker セッションは走り続けている可能性。
+    //     timed_out に倒して job(ipcId)を残し、late sentinel 回収 (sweepLateExecutions /
+    //     reconcileOnBoot) に委ねる。成功した作業を黙って捨てて二重実行させない (§4-4)。
+    if (res.timedOut) {
+      return items.update(itemId, {
+        executionStatus: "timed_out",
+        status: "in_progress",
+        executionResult: `実行がタイムアウト上限(${settings.get().executeTimeoutMs || 600_000}ms)を超過しました。バックグラウンドで継続中の可能性があり、完了すれば自動で取り込みます。待たずに再実行/却下もできます。`,
+      });
+    }
+    // (3) それ以外 (JSON 解析失敗・dispatch 不可等) は従来どおりの実行失敗。
     return items.update(itemId, {
       executionStatus: "failed",
       status: "in_progress",
@@ -371,12 +395,76 @@ export function inFlightCount(): { running: number; proposed: number; awaitingHa
 }
 
 /**
+ * done sentinel + res.json があれば取り込み、applyExecuteResult で item を決着させて job も
+ * 閉じる(取り込めたら true)。reconcileOnBoot(起動時)と sweepLateExecutions(平常運転中の
+ * timed_out 回収)で共有する。AI は起動せず IPC sentinel を read-only に参照するだけ。
+ * ipcId 無し / done 未出現 / parse 失敗 は false(呼び出し側がフォールバックを決める)。
+ */
+function tryTakeInSentinel(job: ExecutionJob): boolean {
+  if (!job.ipcId) return false;
+  const donePath = path.join(PATHS.ipc, `${job.ipcId}.done`);
+  const resPath = path.join(PATHS.ipc, `${job.ipcId}.res.json`);
+  if (!fs.existsSync(donePath)) return false;
+  try {
+    const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
+    const out = parseJson(raw) as Partial<ExecuteOut>;
+    applyExecuteResult(job.itemId, out);
+    jobs.update(job.id, {
+      status: out.status === "failed" ? "failed" : "succeeded",
+      finishedAt: Date.now(),
+      output: raw,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 平常運転中の late sentinel 回収 (proposal 2)。work timeout で timed_out に倒した item は
+ * worker が後から完了して done sentinel を書きうる。それを起動を待たず取り込む:
+ *   - sentinel が現れていれば applyExecuteResult で succeeded/awaiting_handoff/done へ昇格 (recovered)。
+ *   - 現れないまま timedOutGraceMs を超過したら failed へ落として再浮上させる (agedOut。中間状態に
+ *     永久滞留させない)。
+ * /api/state の sweep から背景発火する(AI 非起動の read-only 処理)。手動で再実行/却下された item は
+ * executionStatus が timed_out でなくなり自然に対象外=回収と競合しない(新しい実行の ipcId が別なので
+ * 古い sentinel を誤って当てることもない: latestExecuteForItem が常に最新ジョブを返す)。
+ */
+export function sweepLateExecutions(): { recovered: number; agedOut: number } {
+  let recovered = 0;
+  let agedOut = 0;
+  const graceMs = settings.get().timedOutGraceMs || 1_800_000;
+  for (const it of items.all()) {
+    if (it.executionStatus !== "timed_out") continue;
+    const job = jobs.latestExecuteForItem(it.id);
+    if (job && tryTakeInSentinel(job)) {
+      recovered++;
+      continue;
+    }
+    // まだ sentinel が無い。timed_out に倒してから graceMs を超えたら failed へ落とす
+    // (updatedAt は timed_out をセットした瞬間)。
+    if (Date.now() - it.updatedAt > graceMs) {
+      items.update(it.id, {
+        executionStatus: "failed",
+        status: "in_progress",
+        executionResult:
+          "実行がタイムアウト後も完了を確認できませんでした(猶予超過)。再実行/エスカレ/却下できます。",
+      });
+      agedOut++;
+    }
+  }
+  return { recovered, agedOut };
+}
+
+/**
  * 起動時 reconcile(index.ts が db 初期化直後・listen 前に一度だけ呼ぶ)。
  * 前回プロセスで running のまま中断した execute ジョブを、jobs.ipcId 経由で done
  * sentinel を探して決定論で決着させる:
  *   - done sentinel + res.json があれば取り込み(applyExecuteResult)→ recovered++
  *   - 無い / ipcId=null / parse 失敗 → executionStatus='failed'・status='in_progress'
  *     (blocked にしない)に倒し executionResult に痕跡 → 再浮上経路(queue)が拾う → failedOver++
+ * さらに、前回プロセスで timed_out のまま落ちた item も sweepLateExecutions で回収/猶予超過判定する
+ * (起動を跨いで完了した worker の成果を取りこぼさない)。
  * AI は一切起動しない(driver.init() を呼ばず、IPC sentinel と DB のみ参照する read-only
  * 痕跡処理)。同期(better-sqlite3 同期API + fs 同期API)。一度きり・冪等
  * (決着済み job は status を running から外すので二度と拾わない)。
@@ -393,39 +481,24 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
       continue;
     }
 
-    let takenIn = false;
-    if (job.ipcId) {
-      const donePath = path.join(PATHS.ipc, `${job.ipcId}.done`);
-      const resPath = path.join(PATHS.ipc, `${job.ipcId}.res.json`);
-      if (fs.existsSync(donePath)) {
-        try {
-          const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
-          const out = parseJson(raw) as Partial<ExecuteOut>;
-          applyExecuteResult(job.itemId, out);
-          jobs.update(job.id, {
-            status: out.status === "failed" ? "failed" : "succeeded",
-            finishedAt: Date.now(),
-            output: raw,
-          });
-          recovered++;
-          takenIn = true;
-        } catch {
-          /* parse 失敗 → 下の failed フォールバックへ倒す */
-        }
-      }
+    if (tryTakeInSentinel(job)) {
+      recovered++;
+      continue;
     }
 
-    if (!takenIn) {
-      items.update(job.itemId, {
-        executionStatus: "failed",
-        status: "in_progress",
-        executionResult:
-          "前回セッション中に中断(再起動時 reconcile)。再実行/エスカレ/却下できます。",
-      });
-      jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
-      failedOver++;
-    }
+    items.update(job.itemId, {
+      executionStatus: "failed",
+      status: "in_progress",
+      executionResult:
+        "前回セッション中に中断(再起動時 reconcile)。再実行/エスカレ/却下できます。",
+    });
+    jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
+    failedOver++;
   }
+  // timed_out のまま跨いだ item の回収/猶予判定 (job.status は failed なので上の running 走査に
+  // 載らない。共有 sweep で別途決着させる)。回収できた分は recovered に合算する。
+  const late = sweepLateExecutions();
+  recovered += late.recovered;
   return { recovered, failedOver };
 }
 

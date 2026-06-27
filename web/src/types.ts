@@ -7,6 +7,8 @@ export type ExecutionStatus =
   | "none"
   | "queued"
   | "running"
+  // work timeout 超過。worker は継続中かもしれず、done sentinel が現れたら自動取り込み (§4-4)。
+  | "timed_out"
   | "succeeded"
   | "failed"
   | "proposed"
@@ -148,6 +150,12 @@ export interface Settings {
   pauseAuto: boolean;
   // 外部送信(push/PR作成)の解禁スイッチ。既定 OFF。承認時のみ worker に外部送信を許可する (§3.4)。
   allowExternalSend: boolean;
+  // AI op タイムアウト (ms)。設定パネルで調整可能 (server domain.ts と整合)。
+  executeTimeoutMs: number;
+  decomposeTimeoutMs: number;
+  classifyTimeoutMs: number;
+  acquireTimeoutMs: number;
+  timedOutGraceMs: number;
 }
 
 export interface WeeklySummary {
