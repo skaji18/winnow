@@ -59,6 +59,69 @@ export function demote(itemId: string): Item | null {
   return items.update(itemId, { rung: next });
 }
 
+/**
+ * 問いに戻す (send_back): AIが auto/leaf と賭けた項目を、人間が「これは要件検討が要る問いだ」と
+ * 倒して node へ降格し再分解の俎上に戻す。disposition軸の reclassify に対称な kind軸のリカバリで、
+ * §2.1 の最頻事故(方向性未確定ノードを実行に流す)の事後是正。締め方向(安全側)なので安く速く打てる。
+ *
+ * revive-as-node: kind=node(executor の kind!=='leaf' 門番で自動着火が止まる) +
+ * disposition=escalate(kind=node だけだと queue が auto を畳んで不可視になるため、可視化と
+ * 二重の着火停止を兼ねて escalate へ倒す) + executionStatus=none + status=classified +
+ * uncertaintyResolved=false(将来の子の点火ゲートを締める)。node 化で UI の「分解する」が出る。
+ *
+ * 着手後(succeeded/awaiting_handoff)は先に cancelExecution(巻き戻し手順の提示 §4-4 +
+ * 可逆性過大評価の即締め)を通してから revive する。reExecute 中(running)は対象外=defer。
+ *
+ * 教師信号(§3.6): 「auto に流したが実は要件未確定」は過小エスカレーションの遅発現。ただし着手前は
+ * 実害が出る前の取りこぼしなので auditBad:false で即締めせず overturned(Wilson 母数)に積むだけ。
+ * disposition が auto→escalate と動くときだけ記録する(kind誤りを disposition軸の agreed に
+ * 誤記録して母数を汚さない)。ループ防止: 同一 item の2回目以降の send_back は母数に積まない。
+ */
+export async function sendBack(itemId: string): Promise<Item | null> {
+  const item = items.get(itemId);
+  if (!item) return null;
+  // 実行中(running)は対象外。fail/timeout/完了を待つ(running 割り込み UI は defer §5)。
+  if (item.executionStatus === "running") return item;
+
+  const from = item.disposition;
+  // 実行後(成功/引き取り待ち)は先に cancel を通す(巻き戻し提示 + 可逆性過大評価の締め)。
+  // cancel は status=rejected/executionStatus=cancelled に倒すが、後段の revive が上書きで戻す。
+  if (item.executionStatus === "succeeded" || item.executionStatus === "awaiting_handoff") {
+    await executor.cancelExecution(itemId);
+  }
+
+  // ループ防止: 既に send_back 済みなら母数に積まない(重複計上防止)。label は毎回残す。
+  const firstSendBack = !labels.forItem(itemId).some((e) => e.action === "send_back");
+  labels.record({
+    itemId,
+    action: "send_back",
+    fromDisposition: from,
+    toDisposition: "escalate",
+    category: item.category,
+    note: item.autoExecuted ? "送り返し(着手後)" : "送り返し(着手前)",
+  });
+  // 教師信号は disposition が auto→escalate と動くときだけ。env-escalated は母数に積まない。
+  if (firstSendBack && from === "auto") {
+    const rawDisp = item.envEscalated ? null : (item.rawDisposition ?? "auto");
+    if (rawDisp) {
+      recordOutcome(item.category, rawDisp, "escalate", {
+        confBin: confBinOf(item.rawConfidence ?? item.confidence),
+      });
+    }
+  }
+
+  return items.update(itemId, {
+    kind: "node",
+    disposition: "escalate",
+    status: "classified",
+    executionStatus: "none",
+    autoExecuted: false,
+    uncertaintyResolved: false,
+    humanOverrode: from !== "escalate",
+    reason: "要件検討のため問いに戻しました（分解してください）",
+  });
+}
+
 /** 分類し直す: 人間が disposition を覆す。境界線への明示ナッジ＝教師信号。 */
 export function reclassify(itemId: string, to: Disposition): Item | null {
   const item = items.get(itemId);
@@ -274,6 +337,24 @@ export function undoLastLabel(itemId: string): Item | null {
     case "reject": {
       patch.status = "classified";
       if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      break;
+    }
+    case "send_back": {
+      // send_back: kind=leaf→node, disposition=from→escalate に倒し(auto のとき overturned を積んだ)。
+      // 逆適用は降格部分だけ戻す: kind→leaf, disposition→from, status→classified。実行後 send_back で
+      // 合成された cancel(巻き戻し提示)は戻さない(winnow は巻き戻しを能動実行しない §4-4)。
+      patch.kind = "leaf";
+      if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      patch.status = "classified";
+      patch.humanOverrode = false;
+      // 母数の unbump は「この send_back が積んだ分」だけ。ev 以外に send_back が残っていれば
+      // この ev は2回目以降=母数に積んでいないので unbump しない(record 側のループ防止と対称)。
+      const otherSendBack = labels
+        .forItem(itemId)
+        .some((e) => e.id !== ev.id && e.action === "send_back");
+      if (!otherSendBack && ev.fromDisposition === "auto" && ev.category && rawDisp === "auto") {
+        categoryStats.unbump(ev.category, "auto", "overturned", confBin);
+      }
       break;
     }
     case "reclassify":

@@ -23,6 +23,9 @@ export interface WeeklySummary {
   loosenedCount: number;
   // 自動事故の検出件数 (audit_bad)。0 なら「検出なし」を明示。
   auditBad: number;
+  // 問いに戻した件数 (send_back §2.1)。auto/leaf と賭けた項目が実は問いだった逆流。
+  // 着手後増=分類器の executableReady 過信 / 着手前増=人間が分類器を信頼していない or 早すぎる着火。
+  sentBack: number;
   // 塩漬け監査: 監査サンプルされたのに未消化のまま長期滞留している件数 (払っていない監査税)。
   stale: number;
   // 環境不全由来 escalate + 失敗ジョブ件数。
@@ -80,6 +83,11 @@ export function weekly(): WeeklySummary {
   );
   const auditBad = count(
     "SELECT COUNT(*) AS c FROM label_events WHERE action='audit_bad' AND createdAt>=?",
+    since,
+  );
+  // 問いに戻した件数 (leaf→node 降格。kind誤りの是正)。tightened とは別建てで濁らせない。
+  const sentBack = count(
+    "SELECT COUNT(*) AS c FROM label_events WHERE action='send_back' AND createdAt>=?",
     since,
   );
 
@@ -141,10 +149,11 @@ export function weekly(): WeeklySummary {
   const accident = auditBad > 0 ? `事故${auditBad}` : "事故0(今週は自動事故の検出なし)";
   const review = needsReview > 0 ? ` / 要棚卸し${needsReview}件` : "";
   const handoff = awaitingHandoff > 0 ? ` / 引き取り待ち${awaitingHandoff}件` : "";
+  const sent = sentBack > 0 ? ` / 送り返し${sentBack}件` : "";
   const line =
     `今週: 自動${auto}(先週比${delta}) / 上げ${escalated} / 覆し${overridden} / ` +
     `締め${tightenedCount}・緩め${loosenedCount} / 監査${audited} / ${accident} / ` +
-    `塩漬け${stale} / 失敗${failed}${review}${handoff}${tip}`;
+    `塩漬け${stale} / 失敗${failed}${review}${handoff}${sent}${tip}`;
 
   return {
     auto,
@@ -157,6 +166,7 @@ export function weekly(): WeeklySummary {
     tightenedCount,
     loosenedCount,
     auditBad,
+    sentBack,
     stale,
     failed,
     needsReview,

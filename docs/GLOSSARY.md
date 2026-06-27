@@ -110,6 +110,7 @@ AI が各アイテムをどう扱おうとしているかの三値。**内部キ
 | 監査チップ | `isAudit` / `chip-audit`（`確認(自動処理)`） | 監査サンプルとして抜き取られたカードに付く控えめなチップ。アクションは通常項目と同一。 |
 | 明示ルール / 学習した境界 | learned rule / `rules` | `category → disposition` の明示的な境界。学習由来（学習）か手動かを持ち、設定画面で「解除」できる。 |
 | 当面は上げて（即締め） | `escalateCategory`（`POST /api/items/:id/escalate-category`） | 「この種類は当面上げて」。`muteCategory`（もう上げるな＝自動に倒す）の対称で、`escalate` 固定の手動ルールを upsert し当該カテゴリの在庫へ即再適用する締め方向の正規路。 |
+| 問いに戻す（送り返し） | `send_back` / `sendBack`（`POST /api/items/:id/action` action=`send_back`） | AIが「やるだけ（auto/leaf）」と仕分けた項目を、人間が「実は要件検討が要る**問い**だ」と倒して `kind=node` へ降格し再分解の俎上に戻す。`reclassify`（disposition 軸の覆し）に対称な **kind 軸のリカバリ**。`disposition` を `escalate` に倒して可視化＋着火停止し、`uncertaintyResolved=false` で将来の子の点火ゲートを締める。着手後（succeeded/awaiting_handoff）は先に取り消し（巻き戻し提示）を通してから降格する。締め方向（安全側）の操作で、教師信号は過小エスカレーションとして既存 `overturned` に積む（即締めはせず Wilson 母数へ）。 |
 | 可逆性過大評価 | — | software の auto succeeded を取り消したとき、worker が可逆（`declaredReversible===true`）と自己申告したのに `rollbackPlan` が空＝自己申告と実態が乖離した状態。該当 category を即 `escalate` に締める（締め方向のみ）。 |
 | 信号の非対称 | — | 過剰エスカレーションは安く速く気づけ、過小エスカレーションは高く遅れて危険に現れる。ゆえに「**締めるのは速く、緩めるのは慎重に**」。 |
 
