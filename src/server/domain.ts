@@ -52,6 +52,13 @@ export type ExecutionStatus =
   | "awaiting_handoff"
   | "cancelled"; // 取り消された自動実行 (§4-4 安く取り消せる)
 
+/**
+ * 分解(decompose)の背景ジョブ状態 (§3.3)。execute と同じく非同期化し、オーバーレイを
+ * 閉じても割り方の候補を捨てない。none=未分解 / running=分解中 / ready=分解案あり(再オープンで
+ * 即表示) / failed=失敗(再試行可)。
+ */
+export type DecomposeStatus = "none" | "running" | "ready" | "failed";
+
 export interface Item {
   id: string;
   title: string;
@@ -88,6 +95,11 @@ export interface Item {
 
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+
+  // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。割り方の候補を JSON 文字列で
+  // 持ち、オーバーレイを閉じても捨てない／再オープンで AI を呼び直さず即表示する。
+  decomposeStatus: DecomposeStatus;
+  decomposeOptions: string | null; // ready 時の DecomposeOption[] を JSON 文字列で保持。
 
   // 実行成果物の分離保持 (§3.4)。executionResult は後方互換で連結文字列を維持し、
   // 以下は監査/取り消し提示のために分離して持つ。

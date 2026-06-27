@@ -14,6 +14,9 @@ export type ExecutionStatus =
   | "awaiting_handoff" // 実行完了・人間の引き取り(レビュー/採用)待ち (§3.5)
   | "cancelled";
 
+// 分解(decompose)の背景ジョブ状態 (server domain.ts のミラー)。
+export type DecomposeStatus = "none" | "running" | "ready" | "failed";
+
 export interface Item {
   id: string;
   title: string;
@@ -40,6 +43,9 @@ export interface Item {
   auditSampled: boolean;
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+  // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。サーバ未提供時 undefined="none" 扱い。
+  decomposeStatus?: DecomposeStatus;
+  decomposeOptions?: string | null; // ready 時の DecomposeOption[] を JSON 文字列で保持。
   // 実行成果物の分離保持 (§3.4)。サーバ未提供時 undefined=現状維持。UI 実装は Batch6。
   executionSummary?: string | null;
   executionOutput?: string | null;

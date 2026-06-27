@@ -26,10 +26,19 @@ export interface DecomposeOption {
   children: DecomposeOptionChild[];
 }
 
-/** 割り方の選択肢だけ返す(まだ木は作らない)。人間が選ぶ。 */
+/**
+ * 割り方の選択肢を AI に出させる(まだ木は作らない)。人間が選ぶ。
+ *
+ * execute と同じく背景ジョブとして走らせる前提 (routes が background() で叩く)。進行は
+ * item.decomposeStatus に永続化し、UI は /api/state ポーリングで映す。これでオーバーレイを
+ * 閉じても候補を捨てず、再オープン時は decomposeOptions から AI を呼び直さず即表示できる。
+ * 戻り値は後方互換のため候補配列だが、結果の真実源は item 側に書く。
+ */
 export async function propose(itemId: string): Promise<DecomposeOption[]> {
   const item = items.get(itemId);
   if (!item) return [];
+  // 着手を即座に可視化(running)。古い候補は破棄して running 中の取り違えを防ぐ。
+  items.update(itemId, { decomposeStatus: "running", decomposeOptions: null });
   const driver = await ensureDriver();
   const job = jobs.create({
     itemId,
@@ -61,9 +70,13 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
     error: res.error ?? null,
   });
 
-  if (!res.ok) return [];
+  if (!res.ok) {
+    // 環境不全(dispatch失敗/JSON解析失敗/タイムアウト)。失敗を永続化し UI が再試行を出せるように。
+    items.update(itemId, { decomposeStatus: "failed", decomposeOptions: null });
+    return [];
+  }
   const data = res.data as { options?: DecomposeOption[] };
-  return (data.options ?? []).map((o) => ({
+  const options: DecomposeOption[] = (data.options ?? []).map((o) => ({
     label: o.label ?? "(無題)",
     rationale: o.rationale ?? "",
     process: o.process === "waterfall" ? "waterfall" : "iterative",
@@ -77,6 +90,9 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
         typeof c.projectDir === "string" && c.projectDir.trim() ? c.projectDir.trim() : undefined,
     })),
   }));
+  // 候補を item にキャッシュ(ready)。オーバーレイ再オープンで AI を呼び直さず即表示する。
+  items.update(itemId, { decomposeStatus: "ready", decomposeOptions: JSON.stringify(options) });
+  return options;
 }
 
 /**
@@ -105,6 +121,8 @@ export async function applyOption(
     });
     created.push(item);
   }
+  // 割り方を採用したら親の分解キャッシュは用済み。none に戻し、古い候補が UI に残らないように。
+  items.update(parentId, { decomposeStatus: "none", decomposeOptions: null });
   // 各子を分類(=三値仕分け+kind付け直し)。直列でセッションを溶かさない。
   for (const c of created) {
     const updated = await classify(c.id);

@@ -224,9 +224,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return (await classify(id)) ?? { error: "not found" };
   });
 
+  // decompose も execute 同様に長くなりうるのでバックグラウンド化。UIは /api/state を
+  // ポーリングし item.decomposeStatus/decomposeOptions で進捗と結果を映す(オーバーレイを
+  // 閉じても候補を捨てない・再オープンで即表示)。
   app.post("/api/items/:id/decompose", async (req) => {
     const { id } = req.params as { id: string };
-    return { options: await decomposer.propose(id) };
+    background(() => decomposer.propose(id));
+    return { started: true };
   });
 
   const applySchema = z.object({
