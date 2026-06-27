@@ -243,7 +243,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
           {/* 着手中レーン: 自分で引き取ったタスク。ここから直接「完了/手放す」で閉じられる
               (案件/スプリントのボードに乗っていなくても完了できる継ぎ目)。 */}
           {visible.some((q) => q.lane === "in_progress") && (
-            <div className="lane-head">
+            <div className="lane-head" role="heading" aria-level={2}>
               <b>着手中</b>（自分で対応中。ここで完了にできます）
             </div>
           )}
@@ -404,8 +404,16 @@ function QueueCard({
           </button>
           <button
             disabled={busy}
-            title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定します(設定から解除可)"
-            onClick={() => run(() => api.escalateCategory(item.id), "この種類を今後すべて要確認にしました")}
+            title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
+                )
+              )
+                return;
+              run(() => api.escalateCategory(item.id), "この種類を今後すべて要確認にしました");
+            }}
           >
             この種類を今後すべて要確認に
           </button>
@@ -537,7 +545,7 @@ function QueueCard({
               </button>
               {/* スコープが広い操作(この1件でなく同じ種類すべての今後を永続的に変える)を視覚分離。 */}
               {item.category && (
-                <>
+                <span className="scope-group" role="group" aria-label="この種類すべてに適用する操作">
                   <span className="scope-sep" aria-hidden="true" />
                   <span className="scope-label">この種類すべてに:</span>
                   <button
@@ -560,17 +568,23 @@ function QueueCard({
                   </button>
                   <button
                     disabled={busy}
-                    title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定します(設定から解除可)"
-                    onClick={() =>
+                    title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
+                        )
+                      )
+                        return;
                       run(
                         () => api.escalateCategory(item.id),
                         "この種類を今後すべて要確認にしました",
-                      )
-                    }
+                      );
+                    }}
                   >
                     今後すべて要確認に
                   </button>
-                </>
+                </span>
               )}
               <span className="spacer" />
               <button
@@ -621,8 +635,9 @@ function QueueCard({
           ラベルは cancel(実行/成果物の取消)と紛れないよう『さばきを戻す』にする。
           カテゴリ締め(escalateCategory)は専用 action(escalate_category)で UNDOABLE から外して
           いるためここには出ない=締めは戻しにくい(背骨『締めは速く緩めは慎重』)。単件の
-          reclassify→escalate(override)は通常どおり戻せる。 */}
-      {item.undoableLabel && (
+          reclassify→escalate(override)は通常どおり戻せる。
+          着手中レーンでは『手放す(キューに戻す)』が同じ役割を果たすので、二重に出さない。 */}
+      {item.undoableLabel && !inProgress && (
         <div style={{ marginTop: 6 }}>
           <button
             className="undo-inline"
