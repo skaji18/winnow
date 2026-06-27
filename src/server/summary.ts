@@ -68,8 +68,10 @@ export function weekly(): WeeklySummary {
     since,
   );
 
+  // escalate_category は旧来 action='override'(toDisposition=escalate) で記録していた経緯があり、
+  // 専用 action へ分離後もメトリクスを不変に保つため override と同列に算入する。
   const overridden = count(
-    "SELECT COUNT(*) AS c FROM label_events WHERE action = 'override' AND createdAt>=?",
+    "SELECT COUNT(*) AS c FROM label_events WHERE action IN ('override','escalate_category') AND createdAt>=?",
     since,
   );
   const audited = count(
@@ -88,9 +90,10 @@ export function weekly(): WeeklySummary {
   const tippedCategories = learnedSince.map((r) => `${r.category}→${r.forcedDisposition}`);
   let tightenedCount = learnedSince.filter((r) => r.forcedDisposition !== "auto").length;
   let loosenedCount = learnedSince.filter((r) => r.forcedDisposition === "auto").length;
-  // LabelEvent の override/reclassify を to で締め(escalate/human)/緩め(auto)に積む。
+  // LabelEvent の override/reclassify/escalate_category を to で締め(escalate/human)/緩め(auto)に積む。
+  // escalate_category は分離前 override として締めに算入されていたため同列に維持(メトリクス不変)。
   tightenedCount += count(
-    "SELECT COUNT(*) AS c FROM label_events WHERE action IN ('override','reclassify') AND toDisposition IN ('escalate','human') AND createdAt>=?",
+    "SELECT COUNT(*) AS c FROM label_events WHERE action IN ('override','reclassify','escalate_category') AND toDisposition IN ('escalate','human') AND createdAt>=?",
     since,
   );
   loosenedCount += count(

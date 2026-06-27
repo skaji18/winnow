@@ -168,7 +168,8 @@ export type LabelAction =
   | "do" // やる (= disposition human/escalate を是認して着手)
   | "demote" // 下段へ降ろす
   | "reclassify" // 分類し直す
-  | "mute_category" // この種類はもう上げるな
+  | "mute_category" // この種類はもう上げるな (カテゴリを auto 固定)
+  | "escalate_category" // この種類は今後すべて要確認 (カテゴリを escalate 固定。mute の対称)
   | "approve" // 不可逆実行を承認
   | "receive" // 引き取り: 成果物を確認/採用し handoff を完了にした (§3.5)
   | "reject" // 却下

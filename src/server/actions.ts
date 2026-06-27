@@ -308,8 +308,10 @@ export function undoLastLabel(itemId: string): Item | null {
     case "audit_bad":
     case "approve":
     case "demote":
+    case "escalate_category":
     default:
-      // これらは標準の Undo 対象にしない (監査教師信号/承認/降格は別経路で扱う)。安全側で no-op。
+      // これらは標準の Undo 対象にしない (監査教師信号/承認/降格/カテゴリ締めは別経路で扱う)。
+      // escalate_category は UNDOABLE 外なので UI からは呼ばれない(締めは戻しにくい)。安全側で no-op。
       break;
   }
 
@@ -331,9 +333,14 @@ export function escalateCategory(itemId: string): Item | null {
     source: "manual",
     note: "この種類は当面上げて(手動・締め)",
   });
+  // 専用 action 'escalate_category' で記録する (mute_category と対称)。単件の reclassify→escalate
+  // (action='override') と同じ label_event を出していた頃は、UI の Undo 抑止が両者を区別できず
+  // 単件の覆しの取り消しまで巻き添えで無効化していた。専用 action にして UNDOABLE から外すことで、
+  // 「カテゴリ締めは戻しにくい・単件の覆しは戻せる」を両立する。週次集計は summary.ts 側で
+  // override と同様に締め/覆しへ算入する(メトリクスは不変)。
   labels.record({
     itemId,
-    action: "override",
+    action: "escalate_category",
     fromDisposition: item.disposition,
     toDisposition: "escalate",
     category: item.category,

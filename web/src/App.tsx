@@ -248,16 +248,45 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
             : "絞り込み条件に一致するアイテムはありません。"}
         </div>
       ) : (
-        visible.map((q) => (
-          <QueueCard
-            key={q.id}
-            item={q}
-            state={state}
-            learning={learning}
-            onChange={onChange}
-            onDecompose={() => setDecomposeForId(q.id)}
-          />
-        ))
+        <>
+          {/* さばく場(キュー)。仕分けと処分を行う面。 */}
+          {visible
+            .filter((q) => q.lane !== "in_progress")
+            .map((q) => (
+              <QueueCard
+                key={q.id}
+                item={q}
+                state={state}
+                learning={learning}
+                onChange={onChange}
+                onDecompose={() => setDecomposeForId(q.id)}
+              />
+            ))}
+          {/* 着手中レーン: 自分で引き取ったタスク。ここから直接「完了/手放す」で閉じられる
+              (案件/スプリントのボードに乗っていなくても完了できる継ぎ目)。件数つきで折り畳み可
+              (native details=キーボード/SR対応)。溜まっても短いキューを圧迫しすぎないよう畳める。 */}
+          {(() => {
+            const inProg = visible.filter((q) => q.lane === "in_progress");
+            if (inProg.length === 0) return null;
+            return (
+              <details className="lane-section" open>
+                <summary className="lane-head">
+                  <b>着手中 {inProg.length}件</b>（自分で対応中。ここで完了にできます）
+                </summary>
+                {inProg.map((q) => (
+                  <QueueCard
+                    key={q.id}
+                    item={q}
+                    state={state}
+                    learning={learning}
+                    onChange={onChange}
+                    onDecompose={() => setDecomposeForId(q.id)}
+                  />
+                ))}
+              </details>
+            );
+          })()}
+        </>
       )}
 
       {decomposeFor && (
@@ -315,6 +344,9 @@ function QueueCard({
   const timedOut = item.executionStatus === "timed_out";
   // 引き取り待ち (§3.5): 実行完了・人間の受領/採用が必要。done に沈めず前面に出す。
   const handoff = item.executionStatus === "awaiting_handoff";
+  // 着手中レーン (queue.ts が lane='in_progress' を計算済み): 自分で引き取って作業中。
+  // 完了/手放すをここで直接出し、ボードへ行かなくてもキュー内で閉じられるようにする。
+  const inProgress = item.lane === "in_progress";
   // 監査サンプルは通常アイテムと見分けがつかない (§4-3): カード枠に特別扱いを残さない。
   const autoDone = item.autoExecuted && item.executionStatus === "succeeded";
   const autoDoneGeneral = autoDone && item.domain === "general";
@@ -394,7 +426,7 @@ function QueueCard({
         </details>
       )}
 
-      {/* general 成果物の出口: コピー / この方向で直す。 */}
+      {/* general 成果物の出口: コピー / この指示でやり直す。 */}
       {autoDoneGeneral && (
         <GeneralOutlet item={item} run={run} busy={busy} output={splitOutput || item.executionResult || ""} />
       )}
@@ -412,10 +444,18 @@ function QueueCard({
           </button>
           <button
             disabled={busy}
-            title="この種類は当面上げて(締め)"
-            onClick={() => run(() => api.escalateCategory(item.id), "この種類を当面エスカレに締めました")}
+            title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
+                )
+              )
+                return;
+              run(() => api.escalateCategory(item.id), "この種類を今後すべて要確認にしました");
+            }}
           >
-            エスカレ
+            この種類を今後すべて要確認に
           </button>
           <button
             className="danger"
@@ -436,16 +476,16 @@ function QueueCard({
           <button
             className="primary"
             disabled={busy}
-            title="成果物を確認/採用した。完了にする(マージ等の採用操作は別途あなたが外で行う)"
-            onClick={() => run(() => api.accept(item.id), "受け取って完了にしました")}
+            title="成果物を確認した。winnow 上は完了にする(マージ/送信などの採用操作は別途あなたが外で行う)"
+            onClick={() => run(() => api.accept(item.id), "確認して完了にしました(採用は外で)")}
           >
-            受け取る(完了)
+            確認して完了（採用は外で）
           </button>
           <button
             className="danger"
             disabled={busy}
             title="成果物を取り消す(痕跡は履歴に残る。巻き戻し手順があれば提示)"
-            onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+            onClick={() => run(() => api.cancel(item.id), "成果物を取り消しました")}
           >
             取り消す
           </button>
@@ -453,7 +493,30 @@ function QueueCard({
         </div>
       )}
 
-      {!autoDone && !failed && !timedOut && !handoff && (
+      {/* 着手中: 自分で引き取って作業中。完了/手放すで閉じる(ボード不要の完了導線)。 */}
+      {inProgress && (
+        <div className="actions" style={{ marginTop: 10 }}>
+          <span className="badge">着手中</span>
+          <button
+            className="primary"
+            disabled={busy}
+            title="自分で対応し終えた。完了にする"
+            onClick={() => run(() => api.updateItem(item.id, { status: "done" }), "完了にしました")}
+          >
+            完了にする
+          </button>
+          <button
+            disabled={busy}
+            title="まだやらない。着手を取りやめてキュー(未着手)に戻す"
+            onClick={() => run(() => api.updateItem(item.id, { status: "classified" }), "キューに戻しました")}
+          >
+            手放す（キューに戻す）
+          </button>
+          {busy && <span className="spinner">実行中…</span>}
+        </div>
+      )}
+
+      {!autoDone && !failed && !timedOut && !handoff && !inProgress && (
         <div className="actions" style={{ marginTop: 10 }}>
           {proposed ? (
             // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
@@ -469,17 +532,25 @@ function QueueCard({
               <button
                 className="danger"
                 disabled={busy}
-                onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+                title="この実行提案を取り消す(実行しない)"
+                onClick={() => run(() => api.cancel(item.id), "提案を取り消しました")}
               >
-                取り消す
+                提案を取り消す
               </button>
             </>
           ) : (
             // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3)。
             <>
               {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
-              <button disabled={busy} onClick={() => run(() => api.action(item.id, "do"), "着手しました")}>
-                やる
+              <button
+                className="primary"
+                disabled={busy}
+                title="自分で引き取って着手する。完了は下の『着手中』レーン(または案件/スプリントのボード)で"
+                onClick={() =>
+                  run(() => api.action(item.id, "do"), "着手中にしました。完了は『着手中』レーンで")
+                }
+              >
+                自分でやる（着手）
               </button>
               {item.kind === "node" ? (
                 <button disabled={busy} onClick={onDecompose}>
@@ -490,8 +561,12 @@ function QueueCard({
                       : "分解する"}
                 </button>
               ) : (
-                <button disabled={busy} onClick={() => run(() => api.execute(item.id), "実行を開始しました")}>
-                  実行する
+                <button
+                  disabled={busy}
+                  title="AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
+                  onClick={() => run(() => api.execute(item.id), "AI に実行を依頼しました")}
+                >
+                  AIに実行させる
                 </button>
               )}
               {item.kind === "node" && !item.projectId && (
@@ -503,24 +578,50 @@ function QueueCard({
                   案件に昇格
                 </button>
               )}
-              <button disabled={busy} onClick={() => run(() => api.action(item.id, "demote"), "粒度を下げました")}>
-                粒度を下げる
-              </button>
               <Reclassify itemId={item.id} current={item.disposition} run={run} />
-              <button
-                disabled={busy}
-                title="この種類はもう上げるな(自動に倒す)"
-                onClick={() => run(() => api.action(item.id, "mute_category"), "この種類を自動に倒しました")}
-              >
-                もう上げるな
-              </button>
-              <button
-                disabled={busy}
-                title="この種類は当面上げて(エスカレ固定・締め)"
-                onClick={() => run(() => api.escalateCategory(item.id), "この種類を当面エスカレに締めました")}
-              >
-                当面は上げて
-              </button>
+              {/* スコープが広い操作(この1件でなく同じ種類すべての今後を永続的に変える)を視覚分離。 */}
+              {item.category && (
+                <span className="scope-group" role="group" aria-label="この種類すべてに適用する操作">
+                  <span className="scope-sep" aria-hidden="true" />
+                  <span className="scope-label">この種類すべてに:</span>
+                  <button
+                    disabled={busy}
+                    title="同じ種類のタスクを今後すべて自動処理にし、在庫もまとめて自動実行します(設定から解除可)"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          "この種類のタスクを今後すべて自動処理にします。たまっている同種も自動実行されます。よろしいですか?(設定からあとで解除できます)",
+                        )
+                      )
+                        return;
+                      run(
+                        () => api.action(item.id, "mute_category"),
+                        "この種類を今後すべて自動で処理にしました",
+                      );
+                    }}
+                  >
+                    今後すべて自動で
+                  </button>
+                  <button
+                    disabled={busy}
+                    title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
+                        )
+                      )
+                        return;
+                      run(
+                        () => api.escalateCategory(item.id),
+                        "この種類を今後すべて要確認にしました",
+                      );
+                    }}
+                  >
+                    今後すべて要確認に
+                  </button>
+                </span>
+              )}
               <span className="spacer" />
               <button
                 className="danger"
@@ -541,12 +642,22 @@ function QueueCard({
       {autoDone && (
         <div className="actions" style={{ marginTop: 10 }}>
           {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
+          {item.isAudit && (
+            <button
+              disabled={busy}
+              title="この自動処理は妥当だった、と確認する(分類器への正のフィードバック)"
+              onClick={() => run(() => api.audit(item.id, true), "妥当だったと確認しました")}
+            >
+              妥当だった（確認OK）
+            </button>
+          )}
           <button
             className="danger"
             disabled={busy}
-            onClick={() => run(() => api.cancel(item.id), "取り消しました")}
+            title="この自動実行を取り消す(痕跡は履歴に残る)"
+            onClick={() => run(() => api.cancel(item.id), "実行を取り消しました")}
           >
-            取り消す
+            実行を取り消す
           </button>
           <Reclassify itemId={item.id} current={item.disposition} run={run} />
           <span className="muted" style={{ fontSize: 12 }}>
@@ -557,22 +668,20 @@ function QueueCard({
       )}
 
       {/* 処分=ラベルの Undo: 直近1手の逆適用。カードを即消ししない前提で控えめに出す。
-          締め由来(escalateCategory が記録する override→escalate)は汎用 Undo を出さない:
-          rule は残るのに disposition だけ緩むと締めを片手で部分巻き戻しできてしまい、背骨
-          『締めは速く緩めは慎重』の非対称が崩れるため(緩めは正規路=分類し直しで)。 */}
-      {item.undoableLabel &&
-        !(
-          item.undoableLabel.action === "override" &&
-          item.undoableLabel.toDisposition === "escalate"
-        ) && (
+          ラベルは cancel(実行/成果物の取消)と紛れないよう『さばきを戻す』にする。
+          カテゴリ締め(escalateCategory)は専用 action(escalate_category)で UNDOABLE から外して
+          いるためここには出ない=締めは戻しにくい(背骨『締めは速く緩めは慎重』)。単件の
+          reclassify→escalate(override)は通常どおり戻せる。
+          着手中レーンでは『手放す(キューに戻す)』が同じ役割を果たすので、二重に出さない。 */}
+      {item.undoableLabel && !inProgress && (
         <div style={{ marginTop: 6 }}>
           <button
             className="undo-inline"
             disabled={busy}
-            title="直前のさばきを取り消す"
+            title="直前のさばき(分類/着手など)を取り消して元に戻す"
             onClick={() => run(() => api.undoLabel(item.id), "直前のさばきを取り消しました")}
           >
-            取り消す（{undoLabelText(item.undoableLabel.action)}）
+            さばきを戻す（{undoLabelText(item.undoableLabel.action)}）
           </button>
         </div>
       )}
@@ -583,14 +692,14 @@ function QueueCard({
 function undoLabelText(action: string): string {
   switch (action) {
     case "do":
-      return "やる";
+      return "着手";
     case "reject":
       return "却下";
     case "reclassify":
     case "override":
       return "分類し直し";
     case "mute_category":
-      return "もう上げるな";
+      return "この種類を自動化";
     default:
       return action;
   }
@@ -623,22 +732,23 @@ function GeneralOutlet({
       </button>
       <input
         type="text"
-        placeholder="この方向で直す(一行指示)"
+        placeholder="直す方向を一行で指示(例: もっと簡潔に / 表形式で)"
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         style={{ flex: 1, minWidth: 180 }}
-        aria-label="この方向で直す(一行指示)"
+        aria-label="直す方向を一行で指示"
       />
       <button
         className="primary"
         disabled={busy || !instruction.trim()}
+        title="左の一行指示を踏まえて、同じ実行をやり直す"
         onClick={() =>
-          run(() => api.reExecute(item.id, instruction.trim()), "この方向で再実行しました").then(() =>
+          run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました").then(() =>
             setInstruction(""),
           )
         }
       >
-        この方向で直す
+        この指示でやり直す
       </button>
     </div>
   );
@@ -651,17 +761,31 @@ function Reclassify({
 }: {
   itemId: string;
   current: Disposition | null;
-  run: (fn: () => Promise<unknown>) => Promise<void>;
+  run: (fn: () => Promise<unknown>, doneMsg?: string) => Promise<void>;
 }) {
+  // 操作メニュー化: 常に見出し『分類し直す…』を表示し、選んだ段へ覆す(教師信号)。
+  // 現在の分類は title に出す(value に束縛して「○○に変更」が現状と一致する誤読を避ける)。
+  const cur = current ? DISPOSITION_LABEL[current] : "未分類";
   return (
     <select
-      value={current ?? "escalate"}
-      title="分類し直す(境界線への明示ナッジ=教師信号)"
-      onChange={(e) => run(() => api.action(itemId, "reclassify", e.target.value as Disposition))}
+      value=""
+      aria-label="分類し直す"
+      title={`分類し直す(現在: ${cur})。境界線への明示ナッジ=教師信号になります`}
+      onChange={(e) => {
+        const to = e.target.value;
+        if (!to) return;
+        run(
+          () => api.action(itemId, "reclassify", to as Disposition),
+          `「${DISPOSITION_LABEL[to as Disposition]}」に分類し直しました`,
+        );
+      }}
     >
-      <option value="auto">→自動</option>
-      <option value="escalate">→要確認</option>
-      <option value="human">→要判断</option>
+      <option value="" disabled>
+        分類し直す…
+      </option>
+      <option value="auto">自動に変更</option>
+      <option value="escalate">要確認に変更</option>
+      <option value="human">要判断に変更</option>
     </select>
   );
 }

@@ -158,9 +158,11 @@ export function queue(): QueueItem[] {
     if (it.status === "done" || it.status === "rejected") return false;
     // 5) 提案待ち(不可逆実行のワンタップ承認)は必ず出す。
     if (it.executionStatus === "proposed") return true;
-    // 6) 【寄生表示】in_progress × human(=あなたが着手中)は薄い区画用に出す。
-    //    実行中の auto/running はキューに溢れさせない(従来どおり出さない)。
-    if (it.status === "in_progress" && it.disposition === "human") return true;
+    // 6) 【寄生表示】人手で着手中(doIt)はキュー内『着手中』レーンに薄く出す。判別子は
+    //    executionStatus==='none'(=AIが一度も触っていない=人間が引き取った)。disposition で
+    //    縛ると escalate を「自分でやる」した項目が human にならず消える穴があったため修正。
+    //    AI実行中(running)は溢れさせない/AI失敗(failed)は step3 で別途再浮上させる(ここでは扱わない)。
+    if (it.status === "in_progress" && it.executionStatus === "none") return true;
     if (it.status !== "classified") return false;
     // 7) エスカレーション/人間案件は常に出す(main の挙動=現状維持)。tightness が締めた
     //    escalate も含まれ監査される。背骨『締めは速く緩めは慎重』に従い、人間が一度も見ていない
@@ -176,7 +178,7 @@ export function queue(): QueueItem[] {
 
   // 寄生表示(着手中レーン)はソート後に末尾へ回す: 通常キューを先頭、in_progress を末尾。
   const laneOf = (it: Item): "queue" | "in_progress" =>
-    it.status === "in_progress" && it.disposition === "human" ? "in_progress" : "queue";
+    it.status === "in_progress" && it.executionStatus === "none" ? "in_progress" : "queue";
   visible.sort((a, b) => {
     const la = laneOf(a) === "in_progress" ? 1 : 0;
     const lb = laneOf(b) === "in_progress" ? 1 : 0;

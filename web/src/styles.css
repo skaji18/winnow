@@ -223,6 +223,19 @@ nav.tabs button[aria-selected="true"]::before { content: "▸ "; }
 }
 .undo-inline:hover { background: none; color: var(--text); }
 
+/* 着手中レーンの小見出し (キュー=さばく場 / ボード=作業の場 の継ぎ目を可視化)。
+   折り畳み可能な native details/summary。 */
+.lane-section { margin-top: 16px; }
+.lane-head { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+summary.lane-head { cursor: pointer; }
+.lane-head b { color: var(--text); }
+/* カテゴリ単位(スコープが広い)操作の視覚分離。
+   scope-group は role=group の意味付けだけ担い、レイアウトは display:contents で
+   親 .actions の flex にそのまま流す(視覚は据え置き)。 */
+.actions .scope-group { display: contents; }
+.actions .scope-label { font-size: 11px; color: var(--muted); align-self: center; margin-left: 4px; }
+.actions .scope-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
+
 /* 検索バー ('/' で出る控えめなもの)。 */
 .filter-bar {
   background: var(--panel); border: 1px solid var(--border);
