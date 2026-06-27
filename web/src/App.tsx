@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
 import {
   ArtifactChips,
@@ -166,7 +166,12 @@ function HeaderCounts({ state }: { state: AppState }) {
 // キュー: 火の海ではなくエスカレーションだけの短いキュー (§4)
 // ---------------------------------------------------------------------------
 function QueueView({ state, onChange }: { state: AppState; onChange: () => void }) {
-  const [decomposeFor, setDecomposeFor] = useState<Item | null>(null);
+  // id だけ保持し、表示直前に live state から引き直す。これでポーリングで decomposeStatus が
+  // running→ready と動いてもモーダルが古いスナップショットに固定されない。
+  const [decomposeForId, setDecomposeForId] = useState<string | null>(null);
+  const decomposeFor = decomposeForId
+    ? (state.items.find((i) => i.id === decomposeForId) ?? null)
+    : null;
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterOpen, setFilterOpen] = useState(false);
 
@@ -233,13 +238,18 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
             state={state}
             learning={learning}
             onChange={onChange}
-            onDecompose={() => setDecomposeFor(q)}
+            onDecompose={() => setDecomposeForId(q.id)}
           />
         ))
       )}
 
       {decomposeFor && (
-        <DecomposeModal item={decomposeFor} onClose={() => setDecomposeFor(null)} onChange={onChange} />
+        <DecomposeModal
+          key={decomposeFor.id}
+          item={decomposeFor}
+          onClose={() => setDecomposeForId(null)}
+          onChange={onChange}
+        />
       )}
     </>
   );
@@ -317,6 +327,11 @@ function QueueCard({
         />
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
+        {/* 分解の背景ジョブ進捗を静かに前面化する引っぱりナッジ (§3.3, §4)。 */}
+        {item.decomposeStatus === "running" && <span className="badge">分解中…</span>}
+        {item.decomposeStatus === "ready" && (
+          <span className="badge disp-escalate">分解案あり</span>
+        )}
       </div>
       {/* キュー一行理由はサーバの surfaceReason を優先(blocked/failed の種別を含む)。 */}
       {(item.surfaceReason || item.reason) && (
@@ -448,7 +463,11 @@ function QueueCard({
               </button>
               {item.kind === "node" ? (
                 <button disabled={busy} onClick={onDecompose}>
-                  分解する
+                  {item.decomposeStatus === "ready"
+                    ? "分解案を見る"
+                    : item.decomposeStatus === "running"
+                      ? "分解の進捗を見る"
+                      : "分解する"}
                 </button>
               ) : (
                 <button disabled={busy} onClick={() => run(() => api.execute(item.id), "実行を開始しました")}>
@@ -769,14 +788,32 @@ function DecomposeModal({
   onClose: () => void;
   onChange: () => void;
 }) {
-  const [options, setOptions] = useState<DecomposeOption[] | null>(null);
+  const live = useLive();
   const [applying, setApplying] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  // StrictMode の二重起動でも item.id ごとに分解リクエストを1回だけ発火させる ref ガード。
-  const requestedFor = useRef<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  // item.id ごとに分解リクエストを1回だけ発火させる ref ガード(StrictMode 二重起動・再レンダ対策)。
+  const kickedFor = useRef<string | null>(null);
+  // aria-live の重複読み上げ抑止(同じ局面を何度も読まない)。
+  const announced = useRef<string>("");
   // a11y: 初期 focus(閉じるボタン)と、閉じたら発火元へ focus 復帰。
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `decompose-title-${item.id}`;
+
+  // 進捗・結果は item(ポーリングで更新される live state)から導出する。モーダルは fetch を
+  // 所有しない=閉じても分解は続く・再オープンで decomposeOptions から即表示。
+  const status = item.decomposeStatus ?? "none";
+  const options = useMemo<DecomposeOption[] | null>(() => {
+    if (status !== "ready" || !item.decomposeOptions) return null;
+    try {
+      return JSON.parse(item.decomposeOptions) as DecomposeOption[];
+    } catch {
+      return null;
+    }
+  }, [status, item.decomposeOptions]);
+  // none=点火待ち/直後、running=分解中。どちらも「待っている」局面として扱う。
+  const waiting = status === "none" || status === "running";
+  // failed、または ready なのに候補が空/壊れている=やり直しが要る局面。
+  const needsRetry = status === "failed" || (status === "ready" && (!options || options.length === 0));
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
@@ -786,22 +823,33 @@ function DecomposeModal({
     };
   }, []);
 
+  // 未分解(none)で開かれたら分解を背景発火。結果はポーリングで受け取る(戻り値は使わない)。
   useEffect(() => {
-    if (requestedFor.current === item.id) return;
-    requestedFor.current = item.id;
-    let cancelled = false;
-    api
-      .decompose(item.id)
-      .then((r) => {
-        if (!cancelled) setOptions(r.options);
-      })
-      .catch((e) => {
-        if (!cancelled) setErr((e as Error).message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [item.id]);
+    if (status === "none" && kickedFor.current !== item.id) {
+      kickedFor.current = item.id;
+      api.decompose(item.id).catch(() => {});
+    }
+  }, [item.id, status]);
+
+  // 経過タイマー: 待機中だけ動かす。バックエンドは進捗を出さない(dispatch は単発)ので、
+  // 経過秒だけが唯一“嘘でない”動く信号。% は出さない。
+  useEffect(() => {
+    if (!waiting) return;
+    setElapsed(0);
+    const t0 = Date.now();
+    const iv = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [waiting]);
+
+  // 状態遷移を単一 aria-live 領域へ読み上げ(視覚と同期・重複抑止)。
+  useEffect(() => {
+    const key = waiting ? "waiting" : options && options.length ? "ready" : needsRetry ? "retry" : "";
+    if (!key || announced.current === key) return;
+    announced.current = key;
+    if (key === "waiting") live("AIが割り方を考えています");
+    else if (key === "ready") live(`割り方の候補が ${options?.length ?? 0}件 揃いました`);
+    else if (key === "retry") live("分解に失敗しました。再試行できます");
+  }, [waiting, options, needsRetry, live]);
 
   const apply = async (opt: DecomposeOption) => {
     setApplying(true);
@@ -812,6 +860,13 @@ function DecomposeModal({
     } finally {
       setApplying(false);
     }
+  };
+
+  // 再試行: 失敗/空から分解をもう一度発火。読み上げ済みフラグも戻す。
+  const retry = () => {
+    kickedFor.current = item.id;
+    announced.current = "";
+    api.decompose(item.id).catch(() => {});
   };
 
   return (
@@ -837,9 +892,23 @@ function DecomposeModal({
         <p className="muted" style={{ fontSize: 12.5 }}>
           割り方の選択肢。サイクル長は不確実性に反比例（不明な段はPoCで情報を買う短サイクル §2.3）。
         </p>
-        {err && <div className="cold-banner">分解に失敗: {err}</div>}
-        {!options && !err && <p className="spinner">AIが割り方を考えています…</p>}
-        {options?.length === 0 && <p className="muted">提案が得られませんでした。</p>}
+        {waiting && <DecomposeWaiting elapsed={elapsed} />}
+        {needsRetry && (
+          <div className="actions" style={{ marginTop: 4, flexWrap: "wrap" }}>
+            <div
+              className="cold-banner"
+              role="alert"
+              style={{ flexBasis: "100%", marginBottom: 8 }}
+            >
+              {status === "failed"
+                ? "分解に失敗しました。AI セッションが混んでいるか、応答を解釈できませんでした。"
+                : "今回は割り方の提案が得られませんでした。"}
+            </div>
+            <button className="primary" onClick={retry}>
+              再試行
+            </button>
+          </div>
+        )}
         {options?.map((opt, i) => (
           <div className="option-card" key={i}>
             <div className="row">
@@ -878,6 +947,30 @@ function DecomposeModal({
                 </li>
               ))}
             </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 分解の待機表示: 経過秒(唯一の正直な動く信号)+ 結果が降る場所を示すスケルトン。
+// 「閉じても続く」ことを明記し、フリーズではなく作業中だと伝える (§3.3, §4)。
+function DecomposeWaiting({ elapsed }: { elapsed: number }) {
+  return (
+    <div className="decompose-wait">
+      <p className="spinner" style={{ marginBottom: 2 }}>
+        AIが割り方を考えています…
+      </p>
+      <p className="muted" style={{ fontSize: 11.5, margin: "0 0 10px" }}>
+        経過 {elapsed}秒 ／ 通常は数十秒かかります。閉じても分解は続きます（あとで開き直すと結果が出ています）。
+      </p>
+      <div aria-hidden="true">
+        {[0, 1, 2].map((n) => (
+          <div className="option-card skeleton" key={n}>
+            <div className="skel-line" style={{ width: "42%" }} />
+            <div className="skel-line" style={{ width: "78%" }} />
+            <div className="skel-line short" style={{ width: "60%" }} />
           </div>
         ))}
       </div>
