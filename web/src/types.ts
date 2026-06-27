@@ -7,12 +7,17 @@ export type ExecutionStatus =
   | "none"
   | "queued"
   | "running"
+  // work timeout 超過。worker は継続中かもしれず、done sentinel が現れたら自動取り込み (§4-4)。
+  | "timed_out"
   | "succeeded"
   | "failed"
   | "proposed"
   | "approved"
   | "awaiting_handoff" // 実行完了・人間の引き取り(レビュー/採用)待ち (§3.5)
   | "cancelled";
+
+// 分解(decompose)の背景ジョブ状態 (server domain.ts のミラー)。
+export type DecomposeStatus = "none" | "running" | "ready" | "failed";
 
 export interface Item {
   id: string;
@@ -40,6 +45,9 @@ export interface Item {
   auditSampled: boolean;
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+  // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。サーバ未提供時 undefined="none" 扱い。
+  decomposeStatus?: DecomposeStatus;
+  decomposeOptions?: string | null; // ready 時の DecomposeOption[] を JSON 文字列で保持。
   // 実行成果物の分離保持 (§3.4)。サーバ未提供時 undefined=現状維持。UI 実装は Batch6。
   executionSummary?: string | null;
   executionOutput?: string | null;
@@ -143,6 +151,12 @@ export interface Settings {
   pauseAuto: boolean;
   // 外部送信(push/PR作成)の解禁スイッチ。既定 OFF。承認時のみ worker に外部送信を許可する (§3.4)。
   allowExternalSend: boolean;
+  // AI op タイムアウト (ms)。設定パネルで調整可能 (server domain.ts と整合)。
+  executeTimeoutMs: number;
+  decomposeTimeoutMs: number;
+  classifyTimeoutMs: number;
+  acquireTimeoutMs: number;
+  timedOutGraceMs: number;
 }
 
 export interface WeeklySummary {

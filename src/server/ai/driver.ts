@@ -27,6 +27,21 @@ export interface AiResult {
   sessionName: string | null;
   error?: string;
   durationMs: number;
+  /**
+   * True ONLY when the failure is a work timeout (we stopped waiting for the
+   * done sentinel) — NOT for acquire/no-worker/JSON-parse failures. Lets the
+   * executor distinguish "may still be running in the background" (→ timed_out,
+   * recover the late sentinel) from a genuine failure (§4-4 fire-and-forget に
+   * しない). Undefined/false on every non-timeout path.
+   */
+  timedOut?: boolean;
+  /**
+   * True when the failure is pool contention (no free session / acquire
+   * timeout) — the request never dispatched. Re-running once a worker frees
+   * will succeed, so the executor surfaces this as a transient "busy" state
+   * rather than a hard failure (proposal 5: acquire timeout ≠ work timeout).
+   */
+  poolBusy?: boolean;
 }
 
 export interface SessionInfo {

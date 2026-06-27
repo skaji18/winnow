@@ -59,8 +59,10 @@ export const api = {
   toProject: (id: string) =>
     j<{ project: Project; assigned: number }>(`/api/items/${id}/to-project`, { method: "POST" }),
 
+  // 背景ジョブを点火するだけ(即返し)。結果は /api/state ポーリングの
+  // item.decomposeStatus / decomposeOptions で受け取る。
   decompose: (id: string) =>
-    j<{ options: DecomposeOption[] }>(`/api/items/${id}/decompose`, { method: "POST" }),
+    j<{ started: boolean }>(`/api/items/${id}/decompose`, { method: "POST" }),
 
   applyDecompose: (id: string, option: DecomposeOption) =>
     j<{ created: Item[] }>(`/api/items/${id}/decompose/apply`, {

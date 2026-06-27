@@ -50,6 +50,8 @@ function mapItem(r: Row): Item {
     auditSampled: boolize(r.auditSampled),
     executionStatus: r.executionStatus as Item["executionStatus"],
     executionResult: (r.executionResult as string) ?? null,
+    decomposeStatus: (r.decomposeStatus as Item["decomposeStatus"]) ?? "none",
+    decomposeOptions: (r.decomposeOptions as string) ?? null,
     executionSummary: (r.executionSummary as string) ?? null,
     executionOutput: (r.executionOutput as string) ?? null,
     rollbackPlan: (r.rollbackPlan as string) ?? null,
@@ -148,6 +150,8 @@ export const items = {
       auditSampled: input.auditSampled ?? false,
       executionStatus: input.executionStatus ?? "none",
       executionResult: input.executionResult ?? null,
+      decomposeStatus: input.decomposeStatus ?? "none",
+      decomposeOptions: input.decomposeOptions ?? null,
       executionSummary: input.executionSummary ?? null,
       executionOutput: input.executionOutput ?? null,
       rollbackPlan: input.rollbackPlan ?? null,
@@ -165,8 +169,8 @@ export const items = {
       updatedAt: ts,
     };
     db.prepare(
-      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,dueDate,priority,createdAt,updatedAt)
-       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@dueDate,@priority,@createdAt,@updatedAt)`,
+      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,dueDate,priority,createdAt,updatedAt)
+       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@dueDate,@priority,@createdAt,@updatedAt)`,
     ).run({
       ...item,
       envEscalated: item.envEscalated ? 1 : 0,
@@ -185,7 +189,7 @@ export const items = {
     if (!current) return null;
     const merged = { ...current, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
     ).run({
       ...merged,
       envEscalated: merged.envEscalated ? 1 : 0,
@@ -458,6 +462,18 @@ export const jobs = {
         "SELECT * FROM jobs WHERE role='worker' AND kindOfWork='execute' AND status='running' ORDER BY createdAt ASC",
       )
       .all() as ExecutionJob[];
+  },
+  /**
+   * ある item の最新の execute ジョブ (timed_out の late sentinel 回収で ipcId を引くため)。
+   * 1 item が再実行で複数 execute ジョブを持ちうるので createdAt 降順の先頭=今回の実行を採る。
+   */
+  latestExecuteForItem(itemId: string): ExecutionJob | null {
+    const r = db
+      .prepare(
+        "SELECT * FROM jobs WHERE itemId=? AND role='worker' AND kindOfWork='execute' ORDER BY createdAt DESC LIMIT 1",
+      )
+      .get(itemId) as ExecutionJob | undefined;
+    return r ?? null;
   },
   /** classify/execute の失敗ジョブ数 (summary の failed 集計)。finishedAt 基準。 */
   failedSince(ts: number): number {

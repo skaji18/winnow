@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, type DecomposeOption } from "./api.js";
 import {
   ArtifactChips,
@@ -152,12 +152,29 @@ function HeaderCounts({ state }: { state: AppState }) {
     state.inFlight?.awaitingHandoff ??
     state.items.filter((i) => i.executionStatus === "awaiting_handoff").length;
   const over = running > state.settings.maxWorkers;
+  // proposal 6: 実行中の最長経過秒を添える。auto 実行はキューに溢れさせない設計なので、ヘッダの
+  // この数字が「動いている」唯一の正直な信号になる(running 中は updatedAt≒着火時刻で固定=近似に使える)。
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (running <= 0) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const longestSec =
+    running > 0
+      ? Math.floor(
+          state.items
+            .filter((i) => i.executionStatus === "running")
+            .reduce((mx, i) => Math.max(mx, Date.now() - i.updatedAt), 0) / 1000,
+        )
+      : 0;
   return (
     <span
       className={`header-counts${over ? " over" : ""}`}
       title={over ? "実行中が worker 上限を超えています(止めはしません)" : "実行中 / 承認待ち / 引き取り待ち"}
     >
-      実行中 {running} / 承認待ち {proposed} / 引き取り待ち {handoff}
+      実行中 {running}
+      {running > 0 ? `（最長 ${longestSec}s）` : ""} / 承認待ち {proposed} / 引き取り待ち {handoff}
     </span>
   );
 }
@@ -166,7 +183,12 @@ function HeaderCounts({ state }: { state: AppState }) {
 // キュー: 火の海ではなくエスカレーションだけの短いキュー (§4)
 // ---------------------------------------------------------------------------
 function QueueView({ state, onChange }: { state: AppState; onChange: () => void }) {
-  const [decomposeFor, setDecomposeFor] = useState<Item | null>(null);
+  // id だけ保持し、表示直前に live state から引き直す。これでポーリングで decomposeStatus が
+  // running→ready と動いてもモーダルが古いスナップショットに固定されない。
+  const [decomposeForId, setDecomposeForId] = useState<string | null>(null);
+  const decomposeFor = decomposeForId
+    ? (state.items.find((i) => i.id === decomposeForId) ?? null)
+    : null;
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterOpen, setFilterOpen] = useState(false);
 
@@ -237,7 +259,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
                 state={state}
                 learning={learning}
                 onChange={onChange}
-                onDecompose={() => setDecomposeFor(q)}
+                onDecompose={() => setDecomposeForId(q.id)}
               />
             ))}
           {/* 着手中レーン: 自分で引き取ったタスク。ここから直接「完了/手放す」で閉じられる
@@ -258,7 +280,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
                     state={state}
                     learning={learning}
                     onChange={onChange}
-                    onDecompose={() => setDecomposeFor(q)}
+                    onDecompose={() => setDecomposeForId(q.id)}
                   />
                 ))}
               </details>
@@ -268,7 +290,12 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
       )}
 
       {decomposeFor && (
-        <DecomposeModal item={decomposeFor} onClose={() => setDecomposeFor(null)} onChange={onChange} />
+        <DecomposeModal
+          key={decomposeFor.id}
+          item={decomposeFor}
+          onClose={() => setDecomposeForId(null)}
+          onChange={onChange}
+        />
       )}
     </>
   );
@@ -312,6 +339,9 @@ function QueueCard({
 
   const proposed = item.executionStatus === "proposed";
   const failed = item.executionStatus === "failed" || item.status === "blocked";
+  // work timeout 超過: 失敗確定ではない(継続中かも)が、待たず再実行/却下できるよう failed と同じ
+  // 復旧アクションを出す。バッジ文言だけ分ける。一行理由(surfaceReason)が状況を説明する。
+  const timedOut = item.executionStatus === "timed_out";
   // 引き取り待ち (§3.5): 実行完了・人間の受領/採用が必要。done に沈めず前面に出す。
   const handoff = item.executionStatus === "awaiting_handoff";
   // 着手中レーン (queue.ts が lane='in_progress' を計算済み): 自分で引き取って作業中。
@@ -349,6 +379,11 @@ function QueueCard({
         />
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
+        {/* 分解の背景ジョブ進捗を静かに前面化する引っぱりナッジ (§3.3, §4)。 */}
+        {item.decomposeStatus === "running" && <span className="badge">分解中…</span>}
+        {item.decomposeStatus === "ready" && (
+          <span className="badge disp-escalate">分解案あり</span>
+        )}
       </div>
       {/* キュー一行理由はサーバの surfaceReason を優先(blocked/failed の種別を含む)。 */}
       {(item.surfaceReason || item.reason) && (
@@ -396,10 +431,10 @@ function QueueCard({
         <GeneralOutlet item={item} run={run} busy={busy} output={splitOutput || item.executionResult || ""} />
       )}
 
-      {/* 再浮上カード: 実行失敗/保留のワンタップ復旧 (再実行/エスカレ/却下)。 */}
-      {failed && (
+      {/* 再浮上カード: 実行失敗/タイムアウト超過/保留のワンタップ復旧 (再実行/エスカレ/却下)。 */}
+      {(failed || timedOut) && (
         <div className="actions" style={{ marginTop: 10 }}>
-          <span className="badge disp-human">再浮上</span>
+          <span className="badge disp-human">{timedOut ? "タイムアウト超過" : "再浮上"}</span>
           <button
             className="primary"
             disabled={busy}
@@ -481,7 +516,7 @@ function QueueCard({
         </div>
       )}
 
-      {!autoDone && !failed && !handoff && !inProgress && (
+      {!autoDone && !failed && !timedOut && !handoff && !inProgress && (
         <div className="actions" style={{ marginTop: 10 }}>
           {proposed ? (
             // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
@@ -519,7 +554,11 @@ function QueueCard({
               </button>
               {item.kind === "node" ? (
                 <button disabled={busy} onClick={onDecompose}>
-                  分解する
+                  {item.decomposeStatus === "ready"
+                    ? "分解案を見る"
+                    : item.decomposeStatus === "running"
+                      ? "分解の進捗を見る"
+                      : "分解する"}
                 </button>
               ) : (
                 <button
@@ -893,14 +932,32 @@ function DecomposeModal({
   onClose: () => void;
   onChange: () => void;
 }) {
-  const [options, setOptions] = useState<DecomposeOption[] | null>(null);
+  const live = useLive();
   const [applying, setApplying] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  // StrictMode の二重起動でも item.id ごとに分解リクエストを1回だけ発火させる ref ガード。
-  const requestedFor = useRef<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  // item.id ごとに分解リクエストを1回だけ発火させる ref ガード(StrictMode 二重起動・再レンダ対策)。
+  const kickedFor = useRef<string | null>(null);
+  // aria-live の重複読み上げ抑止(同じ局面を何度も読まない)。
+  const announced = useRef<string>("");
   // a11y: 初期 focus(閉じるボタン)と、閉じたら発火元へ focus 復帰。
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `decompose-title-${item.id}`;
+
+  // 進捗・結果は item(ポーリングで更新される live state)から導出する。モーダルは fetch を
+  // 所有しない=閉じても分解は続く・再オープンで decomposeOptions から即表示。
+  const status = item.decomposeStatus ?? "none";
+  const options = useMemo<DecomposeOption[] | null>(() => {
+    if (status !== "ready" || !item.decomposeOptions) return null;
+    try {
+      return JSON.parse(item.decomposeOptions) as DecomposeOption[];
+    } catch {
+      return null;
+    }
+  }, [status, item.decomposeOptions]);
+  // none=点火待ち/直後、running=分解中。どちらも「待っている」局面として扱う。
+  const waiting = status === "none" || status === "running";
+  // failed、または ready なのに候補が空/壊れている=やり直しが要る局面。
+  const needsRetry = status === "failed" || (status === "ready" && (!options || options.length === 0));
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
@@ -910,22 +967,33 @@ function DecomposeModal({
     };
   }, []);
 
+  // 未分解(none)で開かれたら分解を背景発火。結果はポーリングで受け取る(戻り値は使わない)。
   useEffect(() => {
-    if (requestedFor.current === item.id) return;
-    requestedFor.current = item.id;
-    let cancelled = false;
-    api
-      .decompose(item.id)
-      .then((r) => {
-        if (!cancelled) setOptions(r.options);
-      })
-      .catch((e) => {
-        if (!cancelled) setErr((e as Error).message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [item.id]);
+    if (status === "none" && kickedFor.current !== item.id) {
+      kickedFor.current = item.id;
+      api.decompose(item.id).catch(() => {});
+    }
+  }, [item.id, status]);
+
+  // 経過タイマー: 待機中だけ動かす。バックエンドは進捗を出さない(dispatch は単発)ので、
+  // 経過秒だけが唯一“嘘でない”動く信号。% は出さない。
+  useEffect(() => {
+    if (!waiting) return;
+    setElapsed(0);
+    const t0 = Date.now();
+    const iv = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [waiting]);
+
+  // 状態遷移を単一 aria-live 領域へ読み上げ(視覚と同期・重複抑止)。
+  useEffect(() => {
+    const key = waiting ? "waiting" : options && options.length ? "ready" : needsRetry ? "retry" : "";
+    if (!key || announced.current === key) return;
+    announced.current = key;
+    if (key === "waiting") live("AIが割り方を考えています");
+    else if (key === "ready") live(`割り方の候補が ${options?.length ?? 0}件 揃いました`);
+    else if (key === "retry") live("分解に失敗しました。再試行できます");
+  }, [waiting, options, needsRetry, live]);
 
   const apply = async (opt: DecomposeOption) => {
     setApplying(true);
@@ -936,6 +1004,13 @@ function DecomposeModal({
     } finally {
       setApplying(false);
     }
+  };
+
+  // 再試行: 失敗/空から分解をもう一度発火。読み上げ済みフラグも戻す。
+  const retry = () => {
+    kickedFor.current = item.id;
+    announced.current = "";
+    api.decompose(item.id).catch(() => {});
   };
 
   return (
@@ -961,9 +1036,23 @@ function DecomposeModal({
         <p className="muted" style={{ fontSize: 12.5 }}>
           割り方の選択肢。サイクル長は不確実性に反比例（不明な段はPoCで情報を買う短サイクル §2.3）。
         </p>
-        {err && <div className="cold-banner">分解に失敗: {err}</div>}
-        {!options && !err && <p className="spinner">AIが割り方を考えています…</p>}
-        {options?.length === 0 && <p className="muted">提案が得られませんでした。</p>}
+        {waiting && <DecomposeWaiting elapsed={elapsed} />}
+        {needsRetry && (
+          <div className="actions" style={{ marginTop: 4, flexWrap: "wrap" }}>
+            <div
+              className="cold-banner"
+              role="alert"
+              style={{ flexBasis: "100%", marginBottom: 8 }}
+            >
+              {status === "failed"
+                ? "分解に失敗しました。AI セッションが混んでいるか、応答を解釈できませんでした。"
+                : "今回は割り方の提案が得られませんでした。"}
+            </div>
+            <button className="primary" onClick={retry}>
+              再試行
+            </button>
+          </div>
+        )}
         {options?.map((opt, i) => (
           <div className="option-card" key={i}>
             <div className="row">
@@ -1002,6 +1091,30 @@ function DecomposeModal({
                 </li>
               ))}
             </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 分解の待機表示: 経過秒(唯一の正直な動く信号)+ 結果が降る場所を示すスケルトン。
+// 「閉じても続く」ことを明記し、フリーズではなく作業中だと伝える (§3.3, §4)。
+function DecomposeWaiting({ elapsed }: { elapsed: number }) {
+  return (
+    <div className="decompose-wait">
+      <p className="spinner" style={{ marginBottom: 2 }}>
+        AIが割り方を考えています…
+      </p>
+      <p className="muted" style={{ fontSize: 11.5, margin: "0 0 10px" }}>
+        経過 {elapsed}秒 ／ 通常は数十秒かかります。閉じても分解は続きます（あとで開き直すと結果が出ています）。
+      </p>
+      <div aria-hidden="true">
+        {[0, 1, 2].map((n) => (
+          <div className="option-card skeleton" key={n}>
+            <div className="skel-line" style={{ width: "42%" }} />
+            <div className="skel-line" style={{ width: "78%" }} />
+            <div className="skel-line short" style={{ width: "60%" }} />
           </div>
         ))}
       </div>
@@ -1283,6 +1396,24 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
         </label>
       </div>
 
+      <div className="panel">
+        <h3>タイムアウト（実行が長い時に伸ばす）</h3>
+        <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+          「明らかに時間がかかる実行」を持つ環境で、AI op の締切を伸ばせる。実行(worker)が上限を超えると
+          <b>timed_out</b> に倒れ、worker が後から完了すれば<b>自動で取り込む</b>(待たず再実行も可 §4-4)。
+          ワーカー獲得(acquire)待ちは work timeout とは別軸（プール混雑＝再試行で解ける一時失敗）。
+        </p>
+        <SecField label="実行 worker" valueMs={s.executeTimeoutMs} onSet={(ms) => set({ executeTimeoutMs: ms })} />
+        <SecField label="分解 control" valueMs={s.decomposeTimeoutMs} onSet={(ms) => set({ decomposeTimeoutMs: ms })} />
+        <SecField label="分類 control" valueMs={s.classifyTimeoutMs} onSet={(ms) => set({ classifyTimeoutMs: ms })} />
+        <SecField label="ワーカー獲得待ち acquire" valueMs={s.acquireTimeoutMs} onSet={(ms) => set({ acquireTimeoutMs: ms })} />
+        <SecField
+          label="timed_out 猶予（超えたら failed）"
+          valueMs={s.timedOutGraceMs}
+          onSet={(ms) => set({ timedOutGraceMs: ms })}
+        />
+      </div>
+
       {/* MCP 接続スニペット (コピー可) + 直近の捕獲。サーバ未提供時(undefined)は出さない。 */}
       {(state.mcpEndpoint || state.captureStats) && (
         <div className="panel">
@@ -1299,6 +1430,36 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
         </div>
       )}
     </>
+  );
+}
+
+// タイムアウト設定の 1 行 (ms ↔ 秒の変換を吸収)。onBlur で確定し、キー毎の PATCH を避ける。
+// サーバ側 zod が範囲(秒換算で 5〜3600 等)を最終ゲートするので、ここは min 属性で誘導するだけ。
+function SecField({
+  label,
+  valueMs,
+  onSet,
+}: {
+  label: string;
+  valueMs: number;
+  onSet: (ms: number) => void | Promise<void>;
+}) {
+  return (
+    <label className="field">
+      <span>
+        {label}: {Math.round(valueMs / 1000)} 秒
+      </span>
+      <input
+        type="number"
+        min={5}
+        step={5}
+        defaultValue={Math.round(valueMs / 1000)}
+        onBlur={(e) => {
+          const sec = Number(e.target.value);
+          if (Number.isFinite(sec) && sec > 0) void onSet(Math.round(sec * 1000));
+        }}
+      />
+    </label>
   );
 }
 

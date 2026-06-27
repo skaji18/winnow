@@ -113,6 +113,10 @@ function surfaceReasonOf(it: Item, ageDays: number | null): string {
     } else {
       base = "引き取り待ち: 高ステークスの実行結果を確認のうえ受領してください";
     }
+  } else if (it.executionStatus === "timed_out") {
+    // work timeout 超過: 失敗確定ではなく「継続中かもしれない／完了すれば自動取り込み」。
+    const trace = (it.executionResult ?? "").trim().slice(0, 80);
+    base = `実行がタイムアウト上限を超過(継続中の可能性・完了すれば自動取り込み／待たず再実行も可)${trace ? `（${trace}）` : ""}`;
   } else if (it.executionStatus === "failed") {
     const trace = (it.executionResult ?? "").trim().slice(0, 60);
     base = `実行失敗(再実行/エスカレ/却下)${trace ? `（${trace}）` : ""}`;
@@ -144,8 +148,11 @@ export function queue(): QueueItem[] {
     if (it.executionStatus === "awaiting_handoff") return true;
     // 2) 自動実行が成功した分は §4-4「安く取り消せる」取消ハンドルとしてキューに残す。
     if (it.autoExecuted && it.executionStatus === "succeeded") return true;
-    // 3) 【最優先】止まった項目の再浮上: 実行失敗・人手保留は必ず出す(cancelled は 1) で除外済み)。
+    // 3) 【最優先】止まった項目の再浮上: 実行失敗・タイムアウト超過・人手保留は必ず出す
+    //    (cancelled は 1) で除外済み)。timed_out は失敗確定ではないが、人間が待たず再実行/却下
+    //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
     if (it.executionStatus === "failed") return true;
+    if (it.executionStatus === "timed_out") return true;
     if (it.status === "blocked") return true;
     // 4) done/rejected を畳む(3) の後なので失敗/blocked が優先)。
     if (it.status === "done" || it.status === "rejected") return false;

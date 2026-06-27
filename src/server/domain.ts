@@ -43,6 +43,11 @@ export type ExecutionStatus =
   | "none"
   | "queued"
   | "running"
+  // 実行ディスパッチが work timeout を超過した。winnow は待つのをやめたが worker セッションは
+  // 走り続けている可能性がある (§4-4 fire-and-forget にしない)。done sentinel が後から現れたら
+  // 平常運転中の sweep / 起動時 reconcile が取り込んで succeeded 等へ昇格させる。取り込めないまま
+  // 一定時間が過ぎたら failed へ落とす。failed と違い「まだ続行中かもしれない」を表す中間状態。
+  | "timed_out"
   | "succeeded"
   | "failed"
   | "proposed" // 不可逆/高ステークス: 提案済み、人間のワンタップ承認待ち (§3.4)
@@ -51,6 +56,13 @@ export type ExecutionStatus =
   // やって終わり(none)でない=done に沈めずキュー前面に出し、人間の受領で done に進む。
   | "awaiting_handoff"
   | "cancelled"; // 取り消された自動実行 (§4-4 安く取り消せる)
+
+/**
+ * 分解(decompose)の背景ジョブ状態 (§3.3)。execute と同じく非同期化し、オーバーレイを
+ * 閉じても割り方の候補を捨てない。none=未分解 / running=分解中 / ready=分解案あり(再オープンで
+ * 即表示) / failed=失敗(再試行可)。
+ */
+export type DecomposeStatus = "none" | "running" | "ready" | "failed";
 
 export interface Item {
   id: string;
@@ -88,6 +100,11 @@ export interface Item {
 
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+
+  // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。割り方の候補を JSON 文字列で
+  // 持ち、オーバーレイを閉じても捨てない／再オープンで AI を呼び直さず即表示する。
+  decomposeStatus: DecomposeStatus;
+  decomposeOptions: string | null; // ready 時の DecomposeOption[] を JSON 文字列で保持。
 
   // 実行成果物の分離保持 (§3.4)。executionResult は後方互換で連結文字列を維持し、
   // 以下は監査/取り消し提示のために分離して持つ。
@@ -263,6 +280,19 @@ export interface Settings {
   // worker に伝える。緩め方向(外部副作用解禁)なので既定 OFF・明示オプトイン (締めるは速く緩めるは慎重に §3.6-3)。
   // ※ winnow 本体は push しない。実行主体は worker セッションで、その ambient 権限の技術的制約は別レイヤ。
   allowExternalSend: boolean;
+
+  // --- AI op タイムアウト (ms)。従来はハードコード定数だった (§2.3 サイクル長は不確実性に反比例の
+  // 時間定数化)。「明らかに長い実行」を持つ案件で人間が締切を伸ばせるよう設定可能にする。
+  // 値は dispatch の work timeout (done sentinel 待ちの上限) に渡る。0/未指定は従来既定にフォールバック。
+  executeTimeoutMs: number; // worker 実行 (旧 600_000)
+  decomposeTimeoutMs: number; // control 分解 (旧 120_000)
+  classifyTimeoutMs: number; // control 分類 (旧 90_000)
+  // worker/control セッション獲得(acquire)待ちの上限。work timeout とは別軸 (プール枯渇=再試行で
+  // 解ける一時失敗 / work timeout=実行そのものの超過)。両者を同じ定数に潰さないため独立に持つ。
+  acquireTimeoutMs: number; // 旧 ACQUIRE_TIMEOUT_MS=120_000
+  // timed_out を late sentinel 回収できないまま放置する上限。これを超えたら failed へ落とす
+  // (中間状態に永久滞留させない)。
+  timedOutGraceMs: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -296,4 +326,10 @@ export const DEFAULT_SETTINGS: Settings = {
   ],
   captureInboxHoldThreshold: 24,
   allowExternalSend: false, // 緩め方向=既定 OFF。push/PR 作成は明示オプトイン (§3.6-3)。
+  // タイムアウト既定は従来のハードコード値を踏襲 (挙動の後方互換)。
+  executeTimeoutMs: 600_000, // 10 分
+  decomposeTimeoutMs: 120_000,
+  classifyTimeoutMs: 90_000,
+  acquireTimeoutMs: 120_000,
+  timedOutGraceMs: 1_800_000, // 30 分。timed_out のまま回収できなければ failed へ。
 };

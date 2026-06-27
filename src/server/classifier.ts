@@ -120,7 +120,7 @@ async function classifyInner(itemId: string, item: Item): Promise<Item | null> {
       label: `分類: ${item.title.slice(0, 30)}`,
       prompt: classifyPrompt(item, buildContextBlock(item), categories.knownWithRecency()),
       expectJson: true,
-      timeoutMs: 90_000,
+      timeoutMs: cfg.classifyTimeoutMs || 90_000,
     });
   } catch (e) {
     // 環境不全由来の throw。job が立っていれば failed に閉じ、item を envEscalated で classified へ。

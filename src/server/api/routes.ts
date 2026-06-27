@@ -85,6 +85,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         background(() => classify(it.id).finally(() => classifying.delete(it.id)));
       }
     }
+    // timed_out の late sentinel 回収 (proposal 2): work timeout 後に worker が完了して done
+    // sentinel を書いていれば、再起動を待たず取り込んで succeeded 等へ昇格させる。猶予超過分は
+    // failed へ落とす。AI 非起動の read-only/同期処理だが、/api/state 応答を妨げないよう背景発火する。
+    background(async () => {
+      executor.sweepLateExecutions();
+    });
     return {
       items: items.all(),
       queue: queue(),
@@ -224,9 +230,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return (await classify(id)) ?? { error: "not found" };
   });
 
+  // decompose も execute 同様に長くなりうるのでバックグラウンド化。UIは /api/state を
+  // ポーリングし item.decomposeStatus/decomposeOptions で進捗と結果を映す(オーバーレイを
+  // 閉じても候補を捨てない・再オープンで即表示)。
   app.post("/api/items/:id/decompose", async (req) => {
     const { id } = req.params as { id: string };
-    return { options: await decomposer.propose(id) };
+    background(() => decomposer.propose(id));
+    return { started: true };
   });
 
   const applySchema = z.object({
@@ -359,6 +369,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       pauseAuto: z.boolean().optional(),
       // 外部送信(push/PR作成)の解禁。既定 OFF=緩めはオプトイン (§3.6-3)。
       allowExternalSend: z.boolean().optional(),
+      // AI op タイムアウト (ms)。「明らかに長い実行」を持つ環境で締切を伸ばせるよう設定可能化。
+      // 上限ガード付き(極端値でプール占有が長期化するのを防ぐ)。acquire は work timeout と別軸。
+      executeTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
+      decomposeTimeoutMs: z.number().int().min(15_000).max(900_000).optional(),
+      classifyTimeoutMs: z.number().int().min(15_000).max(900_000).optional(),
+      acquireTimeoutMs: z.number().int().min(5_000).max(900_000).optional(),
+      timedOutGraceMs: z.number().int().min(60_000).max(86_400_000).optional(),
     })
     .strict();
   app.patch("/api/settings", async (req, reply) => {

@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS items (
   sprintId TEXT,
   dueDate INTEGER,
   priority TEXT NOT NULL DEFAULT 'normal',
+  decomposeStatus TEXT NOT NULL DEFAULT 'none',
+  decomposeOptions TEXT,
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,
   FOREIGN KEY (parentId) REFERENCES items(id) ON DELETE CASCADE
@@ -221,6 +223,11 @@ CREATE TABLE IF NOT EXISTS sprints (
   ensureColumn("items", "artifacts", "artifacts TEXT");
   ensureColumn("items", "sourceUrl", "sourceUrl TEXT");
   ensureColumn("items", "externalKey", "externalKey TEXT");
+  // 分解(decompose)を execute と同じく背景ジョブ化するための状態列。
+  // none=未分解 / running=分解中 / ready=分解案あり / failed=失敗。decomposeOptions は
+  // ready 時の DecomposeOption[] を JSON 文字列で保持し、オーバーレイ再オープンで即表示する。
+  ensureColumn("items", "decomposeStatus", "decomposeStatus TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn("items", "decomposeOptions", "decomposeOptions TEXT");
   ensureColumn("jobs", "ipcId", "ipcId TEXT");
 
   // --- 破壊的 table-rebuild (旧スキーマ検出時のみ一度きり) -----------------------
