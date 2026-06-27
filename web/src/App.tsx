@@ -241,24 +241,29 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
               />
             ))}
           {/* 着手中レーン: 自分で引き取ったタスク。ここから直接「完了/手放す」で閉じられる
-              (案件/スプリントのボードに乗っていなくても完了できる継ぎ目)。 */}
-          {visible.some((q) => q.lane === "in_progress") && (
-            <div className="lane-head" role="heading" aria-level={2}>
-              <b>着手中</b>（自分で対応中。ここで完了にできます）
-            </div>
-          )}
-          {visible
-            .filter((q) => q.lane === "in_progress")
-            .map((q) => (
-              <QueueCard
-                key={q.id}
-                item={q}
-                state={state}
-                learning={learning}
-                onChange={onChange}
-                onDecompose={() => setDecomposeFor(q)}
-              />
-            ))}
+              (案件/スプリントのボードに乗っていなくても完了できる継ぎ目)。件数つきで折り畳み可
+              (native details=キーボード/SR対応)。溜まっても短いキューを圧迫しすぎないよう畳める。 */}
+          {(() => {
+            const inProg = visible.filter((q) => q.lane === "in_progress");
+            if (inProg.length === 0) return null;
+            return (
+              <details className="lane-section" open>
+                <summary className="lane-head">
+                  <b>着手中 {inProg.length}件</b>（自分で対応中。ここで完了にできます）
+                </summary>
+                {inProg.map((q) => (
+                  <QueueCard
+                    key={q.id}
+                    item={q}
+                    state={state}
+                    learning={learning}
+                    onChange={onChange}
+                    onDecompose={() => setDecomposeFor(q)}
+                  />
+                ))}
+              </details>
+            );
+          })()}
         </>
       )}
 
@@ -437,9 +442,9 @@ function QueueCard({
             className="primary"
             disabled={busy}
             title="成果物を確認した。winnow 上は完了にする(マージ/送信などの採用操作は別途あなたが外で行う)"
-            onClick={() => run(() => api.accept(item.id), "確認済みにしました(採用は外で)")}
+            onClick={() => run(() => api.accept(item.id), "確認して完了にしました(採用は外で)")}
           >
-            確認済みにする（採用は外で）
+            確認して完了（採用は外で）
           </button>
           <button
             className="danger"
@@ -535,14 +540,6 @@ function QueueCard({
                 </button>
               )}
               <Reclassify itemId={item.id} current={item.disposition} run={run} />
-              <button
-                className="btn-ghost"
-                disabled={busy}
-                title="抽象度ラダーの表示を1段具体側へ。disposition/キュー順位/実行には影響せず、表示とAIの文脈ヒントだけが変わります"
-                onClick={() => run(() => api.action(item.id, "demote"), "抽象度を1段下げました")}
-              >
-                抽象度を1段下げる
-              </button>
               {/* スコープが広い操作(この1件でなく同じ種類すべての今後を永続的に変える)を視覚分離。 */}
               {item.category && (
                 <span className="scope-group" role="group" aria-label="この種類すべてに適用する操作">
@@ -725,7 +722,7 @@ function Reclassify({
 }: {
   itemId: string;
   current: Disposition | null;
-  run: (fn: () => Promise<unknown>) => Promise<void>;
+  run: (fn: () => Promise<unknown>, doneMsg?: string) => Promise<void>;
 }) {
   // 操作メニュー化: 常に見出し『分類し直す…』を表示し、選んだ段へ覆す(教師信号)。
   // 現在の分類は title に出す(value に束縛して「○○に変更」が現状と一致する誤読を避ける)。
@@ -738,7 +735,10 @@ function Reclassify({
       onChange={(e) => {
         const to = e.target.value;
         if (!to) return;
-        run(() => api.action(itemId, "reclassify", to as Disposition));
+        run(
+          () => api.action(itemId, "reclassify", to as Disposition),
+          `「${DISPOSITION_LABEL[to as Disposition]}」に分類し直しました`,
+        );
       }}
     >
       <option value="" disabled>
