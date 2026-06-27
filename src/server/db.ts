@@ -13,7 +13,7 @@ db.pragma("foreign_keys = ON");
 // CODE_SCHEMA_VERSION = コードが期待する版。DB の user_version がこれより小さければ
 // 版数順に MIGRATIONS の up を適用、大きければ (ダウングレード) 起動停止。
 // ---------------------------------------------------------------------------
-const CODE_SCHEMA_VERSION = 1;
+const CODE_SCHEMA_VERSION = 2;
 /** export/import ペイロードのメタに使う版数 (DDLには使わない)。 */
 export const SCHEMA_VERSION = CODE_SCHEMA_VERSION;
 
@@ -340,8 +340,28 @@ CREATE TABLE category_stats (
   );
 }
 
+/**
+ * 版1→版2 の up。
+ * 版1の migrateV0toV1 に decomposeStatus / decomposeOptions を「その場」で後付けしたが
+ * CODE_SCHEMA_VERSION を据え置いたため、既に user_version=1 まで上がっていた DB は
+ * migrateV0toV1 を二度と再実行せず両カラムを取りこぼした (= "no such column: decomposeStatus")。
+ * 版を 2 に繰り上げ、この欠落列を冪等に補填する。新規DB(版0→1で CREATE TABLE 済み)では no-op。
+ * 列追加のみで FK/PK 再構築は無いが、適用ループの規約に合わせ db.transaction は使わない。
+ */
+function migrateV1toV2(d: Database.Database): void {
+  function ensureColumn(table: string, column: string, ddl: string): void {
+    const has = (
+      d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    ).some((c) => c.name === column);
+    if (!has) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+  ensureColumn("items", "decomposeStatus", "decomposeStatus TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn("items", "decomposeOptions", "decomposeOptions TEXT");
+}
+
 const MIGRATIONS: { v: number; up: (d: Database.Database) => void }[] = [
   { v: 1, up: migrateV0toV1 },
+  { v: 2, up: migrateV1toV2 },
 ];
 
 // 版数順に適用。foreign_keys=OFF を要する table-rebuild を含むため db.transaction を使わず

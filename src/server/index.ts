@@ -10,6 +10,7 @@ import { registerRoutes } from "./api/routes.js";
 import { registerMcp } from "./mcp/transport.js";
 import { getDriver } from "./ai/index.js";
 import { reconcileOnBoot, inFlightCount } from "./executor.js";
+import { recoverStuckDecomposes } from "./decomposer.js";
 import { preflightCheck } from "./ai/preflight.js";
 import { getRuntimeState, setReconcile, setPreflight } from "./runtime-state.js";
 import { registerSecurityHook, LOCAL_SECRET, originAllowed } from "./security.js";
@@ -22,6 +23,8 @@ ensureDirs();
 try {
   const r = reconcileOnBoot();
   setReconcile({ ranAt: Date.now(), recovered: r.recovered, failedOver: r.failedOver });
+  // running のまま中断した decompose を failed に倒す (late 回収不可なので即決着)。
+  recoverStuckDecomposes();
 } catch (e) {
   console.error("[winnow] reconcile failed:", e);
 }

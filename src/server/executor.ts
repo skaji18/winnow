@@ -39,8 +39,10 @@ function crossRepoSiblingPending(item: Item): boolean {
       // まだ片付いていない auto/実行中の兄弟だけを対象に。完了/取消済みは外す
       // (古い成功が延々とガードを引かないように)。proposed(auto)同士は互いに
       // マッチし続けるので、同時バーストは両方そろって承認待ちに倒れ対称性が保たれる。
+      // awaiting_handoff は実行成功済み(人間の引き取り待ち)なので「完了側」に数え、下流を塞がない。
       o.executionStatus !== "succeeded" &&
       o.executionStatus !== "cancelled" &&
+      o.executionStatus !== "awaiting_handoff" &&
       (o.disposition === "auto" ||
         o.executionStatus === "running" ||
         o.executionStatus === "queued"),
@@ -72,7 +74,9 @@ function uncertainNodeOrUpstreamPending(item: Item): boolean {
       o.status !== "done" &&
       o.status !== "rejected" &&
       o.executionStatus !== "succeeded" &&
-      o.executionStatus !== "cancelled",
+      o.executionStatus !== "cancelled" &&
+      // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
+      o.executionStatus !== "awaiting_handoff",
   );
 }
 

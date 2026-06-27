@@ -50,12 +50,12 @@ export class HeadlessDriver implements AiDriver {
       const data = req.expectJson ? parseJson(text) : text;
       return { ok: true, data, raw: text, sessionName: null, durationMs: Date.now() - started };
     } catch (e) {
-      // execFile kills the child on timeout (killed=true, signal SIGTERM). Flag
-      // timedOut so the executor treats it the same as a tmux work timeout. Headless
-      // has no session pool, so poolBusy never applies here.
-      const err = e as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
-      const timedOut =
-        err.killed === true || err.code === "ETIMEDOUT" || /timed?\s*out/i.test(err.message ?? "");
+      // 注意: headless は `claude -p` を execFile で1回叩くだけで、tmux のような done sentinel を
+      // 残さない=タイムアウトしても late 回収(sweepLateExecutions/reconcileOnBoot)が成立しない。
+      // ここで timedOut を立てると executor が timed_out に倒し、回収不能のまま timedOutGraceMs
+      // (既定30分)滞留してから failed に落ちるだけ。よって headless のタイムアウトは即「実行失敗」
+      // として返す(timedOut は立てない)。tmux ドライバだけが timed_out 経路を使う。
+      // (旧実装は err.message に "timed out" を含む非タイムアウト失敗まで誤って timed_out に倒していた)
       return {
         ok: false,
         data: null,
@@ -63,7 +63,6 @@ export class HeadlessDriver implements AiDriver {
         sessionName: null,
         error: (e as Error).message,
         durationMs: Date.now() - started,
-        timedOut,
       };
     }
   }

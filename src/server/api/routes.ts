@@ -444,10 +444,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post("/api/import", async (req, reply) => {
     const payload = importSchema.parse(req.body);
-    if (payload.version !== SCHEMA_VERSION) {
+    // 旧版(<=現行)の export は復元可: restoreRows が表に在る列だけを INSERT し、後付け列は
+    // DEFAULT で埋まる(加算的マイグレーション)。理解できない未来版(>現行)だけ弾く。
+    if (payload.version > SCHEMA_VERSION) {
       return reply
         .code(409)
-        .send({ error: `version mismatch: payload v${payload.version} != code v${SCHEMA_VERSION}` });
+        .send({ error: `version mismatch: payload v${payload.version} is newer than code v${SCHEMA_VERSION}` });
     }
     const empty = items.all().length === 0 && projects.all().length === 0;
     if (!empty) return reply.code(409).send({ error: "import requires empty DB" });
