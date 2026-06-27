@@ -152,12 +152,29 @@ function HeaderCounts({ state }: { state: AppState }) {
     state.inFlight?.awaitingHandoff ??
     state.items.filter((i) => i.executionStatus === "awaiting_handoff").length;
   const over = running > state.settings.maxWorkers;
+  // proposal 6: 実行中の最長経過秒を添える。auto 実行はキューに溢れさせない設計なので、ヘッダの
+  // この数字が「動いている」唯一の正直な信号になる(running 中は updatedAt≒着火時刻で固定=近似に使える)。
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (running <= 0) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const longestSec =
+    running > 0
+      ? Math.floor(
+          state.items
+            .filter((i) => i.executionStatus === "running")
+            .reduce((mx, i) => Math.max(mx, Date.now() - i.updatedAt), 0) / 1000,
+        )
+      : 0;
   return (
     <span
       className={`header-counts${over ? " over" : ""}`}
       title={over ? "実行中が worker 上限を超えています(止めはしません)" : "実行中 / 承認待ち / 引き取り待ち"}
     >
-      実行中 {running} / 承認待ち {proposed} / 引き取り待ち {handoff}
+      実行中 {running}
+      {running > 0 ? `（最長 ${longestSec}s）` : ""} / 承認待ち {proposed} / 引き取り待ち {handoff}
     </span>
   );
 }
@@ -293,6 +310,9 @@ function QueueCard({
 
   const proposed = item.executionStatus === "proposed";
   const failed = item.executionStatus === "failed" || item.status === "blocked";
+  // work timeout 超過: 失敗確定ではない(継続中かも)が、待たず再実行/却下できるよう failed と同じ
+  // 復旧アクションを出す。バッジ文言だけ分ける。一行理由(surfaceReason)が状況を説明する。
+  const timedOut = item.executionStatus === "timed_out";
   // 引き取り待ち (§3.5): 実行完了・人間の受領/採用が必要。done に沈めず前面に出す。
   const handoff = item.executionStatus === "awaiting_handoff";
   // 監査サンプルは通常アイテムと見分けがつかない (§4-3): カード枠に特別扱いを残さない。
@@ -379,10 +399,10 @@ function QueueCard({
         <GeneralOutlet item={item} run={run} busy={busy} output={splitOutput || item.executionResult || ""} />
       )}
 
-      {/* 再浮上カード: 実行失敗/保留のワンタップ復旧 (再実行/エスカレ/却下)。 */}
-      {failed && (
+      {/* 再浮上カード: 実行失敗/タイムアウト超過/保留のワンタップ復旧 (再実行/エスカレ/却下)。 */}
+      {(failed || timedOut) && (
         <div className="actions" style={{ marginTop: 10 }}>
-          <span className="badge disp-human">再浮上</span>
+          <span className="badge disp-human">{timedOut ? "タイムアウト超過" : "再浮上"}</span>
           <button
             className="primary"
             disabled={busy}
@@ -433,7 +453,7 @@ function QueueCard({
         </div>
       )}
 
-      {!autoDone && !failed && !handoff && (
+      {!autoDone && !failed && !timedOut && !handoff && (
         <div className="actions" style={{ marginTop: 10 }}>
           {proposed ? (
             // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
@@ -1252,6 +1272,24 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
         </label>
       </div>
 
+      <div className="panel">
+        <h3>タイムアウト（実行が長い時に伸ばす）</h3>
+        <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+          「明らかに時間がかかる実行」を持つ環境で、AI op の締切を伸ばせる。実行(worker)が上限を超えると
+          <b>timed_out</b> に倒れ、worker が後から完了すれば<b>自動で取り込む</b>(待たず再実行も可 §4-4)。
+          ワーカー獲得(acquire)待ちは work timeout とは別軸（プール混雑＝再試行で解ける一時失敗）。
+        </p>
+        <SecField label="実行 worker" valueMs={s.executeTimeoutMs} onSet={(ms) => set({ executeTimeoutMs: ms })} />
+        <SecField label="分解 control" valueMs={s.decomposeTimeoutMs} onSet={(ms) => set({ decomposeTimeoutMs: ms })} />
+        <SecField label="分類 control" valueMs={s.classifyTimeoutMs} onSet={(ms) => set({ classifyTimeoutMs: ms })} />
+        <SecField label="ワーカー獲得待ち acquire" valueMs={s.acquireTimeoutMs} onSet={(ms) => set({ acquireTimeoutMs: ms })} />
+        <SecField
+          label="timed_out 猶予（超えたら failed）"
+          valueMs={s.timedOutGraceMs}
+          onSet={(ms) => set({ timedOutGraceMs: ms })}
+        />
+      </div>
+
       {/* MCP 接続スニペット (コピー可) + 直近の捕獲。サーバ未提供時(undefined)は出さない。 */}
       {(state.mcpEndpoint || state.captureStats) && (
         <div className="panel">
@@ -1268,6 +1306,36 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
         </div>
       )}
     </>
+  );
+}
+
+// タイムアウト設定の 1 行 (ms ↔ 秒の変換を吸収)。onBlur で確定し、キー毎の PATCH を避ける。
+// サーバ側 zod が範囲(秒換算で 5〜3600 等)を最終ゲートするので、ここは min 属性で誘導するだけ。
+function SecField({
+  label,
+  valueMs,
+  onSet,
+}: {
+  label: string;
+  valueMs: number;
+  onSet: (ms: number) => void | Promise<void>;
+}) {
+  return (
+    <label className="field">
+      <span>
+        {label}: {Math.round(valueMs / 1000)} 秒
+      </span>
+      <input
+        type="number"
+        min={5}
+        step={5}
+        defaultValue={Math.round(valueMs / 1000)}
+        onBlur={(e) => {
+          const sec = Number(e.target.value);
+          if (Number.isFinite(sec) && sec > 0) void onSet(Math.round(sec * 1000));
+        }}
+      />
+    </label>
   );
 }
 

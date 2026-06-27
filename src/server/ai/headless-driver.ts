@@ -50,6 +50,12 @@ export class HeadlessDriver implements AiDriver {
       const data = req.expectJson ? parseJson(text) : text;
       return { ok: true, data, raw: text, sessionName: null, durationMs: Date.now() - started };
     } catch (e) {
+      // execFile kills the child on timeout (killed=true, signal SIGTERM). Flag
+      // timedOut so the executor treats it the same as a tmux work timeout. Headless
+      // has no session pool, so poolBusy never applies here.
+      const err = e as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+      const timedOut =
+        err.killed === true || err.code === "ETIMEDOUT" || /timed?\s*out/i.test(err.message ?? "");
       return {
         ok: false,
         data: null,
@@ -57,6 +63,7 @@ export class HeadlessDriver implements AiDriver {
         sessionName: null,
         error: (e as Error).message,
         durationMs: Date.now() - started,
+        timedOut,
       };
     }
   }

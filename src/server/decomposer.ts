@@ -5,7 +5,7 @@ import { classify } from "./classifier.js";
 import { buildContextBlock } from "./context.js";
 import type { Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
-import { items, jobs } from "./repo.js";
+import { items, jobs, settings } from "./repo.js";
 
 // 分解器 (REQUIREMENTS §3.3-1). ノードに効く。子(ノード/リーフ)を提案し、
 // 割り方の選択肢も出す。原則: サイクル長は不確実性に反比例 (§2.3)。
@@ -59,7 +59,7 @@ export async function propose(itemId: string): Promise<DecomposeOption[]> {
     label: `分解: ${item.title.slice(0, 30)}`,
     prompt: decomposePrompt(item, buildContextBlock(item)),
     expectJson: true,
-    timeoutMs: 120_000,
+    timeoutMs: settings.get().decomposeTimeoutMs || 120_000,
   });
 
   jobs.update(job.id, {
