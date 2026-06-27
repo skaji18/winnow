@@ -1403,13 +1403,15 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
           <b>timed_out</b> に倒れ、worker が後から完了すれば<b>自動で取り込む</b>(待たず再実行も可 §4-4)。
           ワーカー獲得(acquire)待ちは work timeout とは別軸（プール混雑＝再試行で解ける一時失敗）。
         </p>
-        <SecField label="実行 worker" valueMs={s.executeTimeoutMs} onSet={(ms) => set({ executeTimeoutMs: ms })} />
-        <SecField label="分解 control" valueMs={s.decomposeTimeoutMs} onSet={(ms) => set({ decomposeTimeoutMs: ms })} />
-        <SecField label="分類 control" valueMs={s.classifyTimeoutMs} onSet={(ms) => set({ classifyTimeoutMs: ms })} />
-        <SecField label="ワーカー獲得待ち acquire" valueMs={s.acquireTimeoutMs} onSet={(ms) => set({ acquireTimeoutMs: ms })} />
+        {/* minMs はサーバ側 zod の下限と一致させる (不一致だと一見有効な値が黙って 400 になる)。 */}
+        <SecField label="実行 worker" valueMs={s.executeTimeoutMs} minMs={30_000} onSet={(ms) => set({ executeTimeoutMs: ms })} />
+        <SecField label="分解 control" valueMs={s.decomposeTimeoutMs} minMs={15_000} onSet={(ms) => set({ decomposeTimeoutMs: ms })} />
+        <SecField label="分類 control" valueMs={s.classifyTimeoutMs} minMs={15_000} onSet={(ms) => set({ classifyTimeoutMs: ms })} />
+        <SecField label="ワーカー獲得待ち acquire" valueMs={s.acquireTimeoutMs} minMs={5_000} onSet={(ms) => set({ acquireTimeoutMs: ms })} />
         <SecField
           label="timed_out 猶予（超えたら failed）"
           valueMs={s.timedOutGraceMs}
+          minMs={60_000}
           onSet={(ms) => set({ timedOutGraceMs: ms })}
         />
       </div>
@@ -1434,16 +1436,20 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
 }
 
 // タイムアウト設定の 1 行 (ms ↔ 秒の変換を吸収)。onBlur で確定し、キー毎の PATCH を避ける。
-// サーバ側 zod が範囲(秒換算で 5〜3600 等)を最終ゲートするので、ここは min 属性で誘導するだけ。
+// サーバ側 zod がフィールド毎の下限(execute=30s/decompose・classify=15s 等)を最終ゲートするので、
+// minMs をその下限に合わせて min 属性で誘導しつつ、下回る入力は PATCH せず弾く(黙って 400 を防ぐ)。
 function SecField({
   label,
   valueMs,
+  minMs,
   onSet,
 }: {
   label: string;
   valueMs: number;
+  minMs: number;
   onSet: (ms: number) => void | Promise<void>;
 }) {
+  const minSec = Math.ceil(minMs / 1000);
   return (
     <label className="field">
       <span>
@@ -1451,12 +1457,12 @@ function SecField({
       </span>
       <input
         type="number"
-        min={5}
+        min={minSec}
         step={5}
         defaultValue={Math.round(valueMs / 1000)}
         onBlur={(e) => {
           const sec = Number(e.target.value);
-          if (Number.isFinite(sec) && sec > 0) void onSet(Math.round(sec * 1000));
+          if (Number.isFinite(sec) && sec * 1000 >= minMs) void onSet(Math.round(sec * 1000));
         }}
       />
     </label>
