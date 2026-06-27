@@ -9,3 +9,7 @@ winnow.db
 winnow.db-*
 scratch/
 *.local
+
+# Demo GIF recording intermediates (only docs/assets/*.webp is committed)
+demo/.home/
+demo/.rec/
