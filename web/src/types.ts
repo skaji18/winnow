@@ -65,6 +65,7 @@ export type LabelAction =
   | "demote"
   | "reclassify"
   | "mute_category"
+  | "escalate_category"
   | "approve"
   | "receive"
   | "reject"
