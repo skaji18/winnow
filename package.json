@@ -11,7 +11,10 @@
     "build": "vite build",
     "start": "cross-env NODE_ENV=production tsx src/server/index.ts",
     "typecheck": "tsc --noEmit",
-    "seed": "tsx scripts-seed.ts"
+    "seed": "tsx scripts-seed.ts",
+    "demo": "node demo/run.mjs",
+    "demo:seed": "tsx scripts-seed-demo.ts",
+    "demo:convert": "node demo/convert.mjs"
   },
   "dependencies": {
     "@fastify/static": "^7.0.4",
@@ -29,6 +32,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
+    "playwright": "^1.61.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tsx": "^4.19.0",
