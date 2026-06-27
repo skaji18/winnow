@@ -164,7 +164,9 @@ export async function applyOption(
     created.push(item);
   }
   // 割り方を採用したら親の分解キャッシュは用済み。none に戻し、古い候補が UI に残らないように。
-  items.update(parentId, { decomposeStatus: "none", decomposeOptions: null });
+  // 不変条件: 子を持つ親は node。leaf を割った場合(send_back 後など)に親が leaf のまま残ると
+  // 親が二重に実行可能扱いされる(executor の kind!=='leaf' 門番をすり抜ける)ため node に昇格させる。
+  items.update(parentId, { kind: "node", decomposeStatus: "none", decomposeOptions: null });
   // 各子を分類(=三値仕分け+kind付け直し)。直列でセッションを溶かさない。
   for (const c of created) {
     const updated = await classify(c.id);

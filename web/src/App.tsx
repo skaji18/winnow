@@ -561,13 +561,25 @@ function QueueCard({
                       : "分解する"}
                 </button>
               ) : (
-                <button
-                  disabled={busy}
-                  title="AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
-                  onClick={() => run(() => api.execute(item.id), "AI に実行を依頼しました")}
-                >
-                  AIに実行させる
-                </button>
+                <>
+                  <button
+                    disabled={busy}
+                    title="AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
+                    onClick={() => run(() => api.execute(item.id), "AI に実行を依頼しました")}
+                  >
+                    AIに実行させる
+                  </button>
+                  {/* これは実行可能タスクではなく『問い』だった、と倒して分解に戻す (§2.1 最頻事故の事後是正)。 */}
+                  <button
+                    disabled={busy}
+                    title="実行可能タスクではなく『問い』だった、と倒して分解に戻す(要件検討へ)。分類器への教師信号になります"
+                    onClick={() =>
+                      run(() => api.action(item.id, "send_back"), "問いに戻しました（分解できます）")
+                    }
+                  >
+                    問いに戻す
+                  </button>
+                </>
               )}
               {item.kind === "node" && !item.projectId && (
                 <button
@@ -659,6 +671,16 @@ function QueueCard({
           >
             実行を取り消す
           </button>
+          {/* やってみたら要件未確定だった: 巻き戻して問いに戻す(cancel を内包してから node へ降格)。 */}
+          <button
+            disabled={busy}
+            title="やってみたら要件検討が必要だった、と倒す。実行を巻き戻して『問い』に戻し、分解し直せるようにします"
+            onClick={() =>
+              run(() => api.action(item.id, "send_back"), "巻き戻して問いに戻しました（分解できます）")
+            }
+          >
+            巻き戻して問いに戻す
+          </button>
           <Reclassify itemId={item.id} current={item.disposition} run={run} />
           <span className="muted" style={{ fontSize: 12 }}>
             痕跡は履歴に残ります。
@@ -695,6 +717,8 @@ function undoLabelText(action: string): string {
       return "着手";
     case "reject":
       return "却下";
+    case "send_back":
+      return "問いに戻す";
     case "reclassify":
     case "override":
       return "分類し直し";

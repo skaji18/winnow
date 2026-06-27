@@ -167,6 +167,7 @@ export interface Sprint {
 export type LabelAction =
   | "do" // やる (= disposition human/escalate を是認して着手)
   | "demote" // 下段へ降ろす
+  | "send_back" // 問いに戻す: leaf→node 降格 (kind軸のリカバリ。reclassify の kind版 §2.1/§3.6-3)
   | "reclassify" // 分類し直す
   | "mute_category" // この種類はもう上げるな (カテゴリを auto 固定)
   | "escalate_category" // この種類は今後すべて要確認 (カテゴリを escalate 固定。mute の対称)

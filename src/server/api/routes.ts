@@ -295,7 +295,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   // --- 処分=ラベル -----------------------------------------------------------
   const actionSchema = z.object({
-    action: z.enum(["do", "demote", "reclassify", "mute_category", "reject"]),
+    action: z.enum(["do", "demote", "send_back", "reclassify", "mute_category", "reject"]),
     to: z.enum(["auto", "escalate", "human"]).optional(),
   });
   app.post("/api/items/:id/action", async (req) => {
@@ -306,6 +306,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return actions.doIt(id);
       case "demote":
         return actions.demote(id);
+      case "send_back":
+        return (await actions.sendBack(id)) ?? { error: "not found" };
       case "reclassify":
         return actions.reclassify(id, to ?? "escalate");
       case "mute_category":

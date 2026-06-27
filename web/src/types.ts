@@ -71,6 +71,7 @@ export interface Item {
 export type LabelAction =
   | "do"
   | "demote"
+  | "send_back"
   | "reclassify"
   | "mute_category"
   | "escalate_category"
@@ -170,6 +171,8 @@ export interface WeeklySummary {
   tightenedCount: number;
   loosenedCount: number;
   auditBad: number;
+  // 問いに戻した件数 (send_back §2.1)。
+  sentBack: number;
   stale: number;
   failed: number;
   // 要棚卸し件数 (server summary.ts と整合)。

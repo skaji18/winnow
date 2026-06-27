@@ -31,6 +31,7 @@ export interface QueueItem extends Item {
 const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
   "do",
   "reject",
+  "send_back",
   "reclassify",
   "override",
   "mute_category",
