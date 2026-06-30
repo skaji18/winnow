@@ -6,6 +6,7 @@ import { executePrompt } from "./ai/prompts.js";
 import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
 import { buildContextBlock } from "./context.js";
+import { extractLearning } from "./learning.js";
 import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
 import { recordOutcome } from "./calibration.js";
@@ -102,6 +103,8 @@ interface ExecuteOut {
   rollbackPlan?: string; // 変更ファイル一覧＋巻き戻す git コマンド
   artifacts?: string[]; // 外部に生じた成果物の自由文/URL (read-only 痕跡)
   reversible?: boolean; // この実行が安く巻き戻せるか (可逆性自己申告)
+  // 任意: 実行中に得た再利用可能な学び (memory AIゾーンへ自動蓄積)。tighten-only。
+  learning?: string;
 }
 
 /**
@@ -263,6 +266,9 @@ function applyExecuteResult(
     artifacts:
       Array.isArray(out.artifacts) && out.artifacts.length ? JSON.stringify(out.artifacts) : null,
   });
+
+  // 学びの自動蓄積 (memory AIゾーン)。tighten-only=item は書き換えない・較正母数に積まない。
+  if (updated) extractLearning(updated, out.learning);
 
   // レビューをパイプラインに戻す (§3.5). 継ぎ目=チェックポイントが実装ポイント。
   if (out.reviewTask && out.reviewTask.trim()) {

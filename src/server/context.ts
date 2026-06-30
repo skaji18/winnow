@@ -1,6 +1,7 @@
 import type { Item } from "./domain.js";
 import { RUNG_LABEL } from "./domain.js";
 import { items, projects, settings } from "./repo.js";
+import { buildAiZone } from "./learning.js";
 
 // 文脈の組み立て (REQUIREMENTS §2.2). 上段の鋭いスペックを下段に渡すための配管。
 // プロダクト全体の前提 + 案件の前提 + 親チェーン(ルート→親) を1つのブロックにする。
@@ -79,10 +80,9 @@ function buildHumanZone(item: Item): string {
   return parts.join("\n\n");
 }
 
-// memory の AIゾーン (自動蓄積された学び) を組む。柱2 で learning.buildAiZone(item) を差し込む。
-// 柱1 では空文字 = 従来挙動に縮退。
-function buildAiZoneText(_item: Item): string {
-  return "";
+// memory の AIゾーン (自動蓄積された学び) を組む。tighten-only・区画別予算で注入される。
+function buildAiZoneText(item: Item): string {
+  return buildAiZone(item);
 }
 
 export function buildContextBlock(item: Item): string {

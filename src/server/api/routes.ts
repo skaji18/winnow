@@ -21,6 +21,7 @@ import {
   sprints,
 } from "../repo.js";
 import { getRuntimeState } from "../runtime-state.js";
+import { decayLearnings } from "../learning.js";
 import { weekly } from "../summary.js";
 import { validateClaudeCmd } from "../security.js";
 import { redactSecrets } from "../context.js";
@@ -91,6 +92,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // failed へ落とす。AI 非起動の read-only/同期処理だが、/api/state 応答を妨げないよう背景発火する。
     background(async () => {
       executor.sweepLateExecutions();
+      // memory AIゾーンの自動減衰: 未使用・未 pin の AI 学びを薄れさせる (read-only sweep に相乗り)。
+      decayLearnings();
     });
     return {
       items: items.all(),
@@ -103,6 +106,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       recentJobs: jobs.recent(30),
       projects: projects.all(),
       sprints: sprints.all(),
+      // memory AIゾーンの学び (俯瞰面で veto/pin するため全件。較正母数とは無関係の read-only)。
+      learnings: learnings.forProject(),
       // 起動時 preflight/reconcile の痕跡と in-flight 集計(実行中N/承認待ちM)。表示は Batch6。
       runtime: getRuntimeState(),
       inFlight: executor.inFlightCount(),
@@ -527,6 +532,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/sprints/:id", async (req) => {
     const { id } = req.params as { id: string };
     sprints.remove(id);
+    return { ok: true };
+  });
+
+  // --- 学び (memory AIゾーン) -------------------------------------------------
+  // veto: 不要な学びを注入対象から外す (削除でなく可逆: 再度 veto=false で戻せる)。
+  // pin: 学びを固定 (減衰しない・フル信頼)。どちらも較正母数には一切触れない。
+  app.patch("/api/learnings/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    const patch = z
+      .object({ vetoed: z.boolean().optional(), pinned: z.boolean().optional() })
+      .strict()
+      .parse(req.body);
+    if (typeof patch.vetoed === "boolean") learnings.setVetoed(id, patch.vetoed);
+    if (typeof patch.pinned === "boolean") learnings.setPinned(id, patch.pinned);
     return { ok: true };
   });
 
