@@ -61,6 +61,8 @@ export interface Item {
   projectDir: string | null;
   projectId: string | null;
   sprintId: string | null;
+  // node 段メモリ (AI に効く前提)。サーバ未提供時 undefined=現状維持。
+  context?: string | null;
   dueDate: number | null;
   priority: Priority;
   createdAt: number;
@@ -122,6 +124,35 @@ export interface Sprint {
   createdAt: number;
 }
 
+// memory AIゾーンの学び (server domain.ts Learning のミラー)。
+export interface Learning {
+  id: string;
+  category: string | null;
+  itemId: string | null;
+  text: string;
+  origin: "human" | "ai";
+  pinned: boolean;
+  vetoed: boolean;
+  lastSeenAt: number;
+  createdAt: number;
+}
+
+// 中長期 horizon (server horizon.ts のミラー)。件数進捗フィールドは持たない。
+export type DueBucket = "over" | "soon" | "week" | "later" | "unknown";
+export interface HorizonEntry {
+  id: string;
+  title: string;
+  rung: Rung;
+  dueDate: number | null;
+  effectiveDue: number | null;
+  sharp: boolean;
+}
+export interface HorizonCell {
+  rung: Rung;
+  dueBucket: DueBucket;
+  entries: HorizonEntry[];
+}
+
 export interface SessionInfo {
   name: string;
   role: "control" | "worker";
@@ -158,6 +189,10 @@ export interface Settings {
   classifyTimeoutMs: number;
   acquireTimeoutMs: number;
   timedOutGraceMs: number;
+  // 学び (memory AIゾーン) のオプトアウト設定 (server domain.ts と整合)。サーバ未提供時 undefined。
+  learningAutoCapture?: boolean;
+  aiZoneMaxChars?: number;
+  learningDecayMs?: number;
 }
 
 export interface WeeklySummary {
@@ -220,6 +255,10 @@ export interface AppState {
   recentJobs: Job[];
   projects: Project[];
   sprints: Sprint[];
+  // memory AIゾーンの学び (俯瞰面で veto/pin)。サーバ未提供時 undefined=非表示。
+  learnings?: Learning[];
+  // 中長期 horizon (rung×due)。サーバ未提供時 undefined=非表示。
+  horizon?: HorizonCell[];
   // 起動時 preflight/reconcile 痕跡 + in-flight 集計 (server /api/state)。
   runtime?: RuntimeState;
   inFlight?: { running: number; proposed: number; awaitingHandoff?: number };

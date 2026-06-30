@@ -22,6 +22,7 @@ import {
 } from "../repo.js";
 import { getRuntimeState } from "../runtime-state.js";
 import { decayLearnings } from "../learning.js";
+import { horizonView } from "../horizon.js";
 import { weekly } from "../summary.js";
 import { validateClaudeCmd } from "../security.js";
 import { redactSecrets } from "../context.js";
@@ -108,6 +109,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       sprints: sprints.all(),
       // memory AIゾーンの学び (俯瞰面で veto/pin するため全件。較正母数とは無関係の read-only)。
       learnings: learnings.forProject(),
+      // 中長期 horizon (rung×due、子→親 due 巻き上げ、上段ぼかし。read-only・件数進捗なし)。
+      horizon: horizonView(),
       // 起動時 preflight/reconcile の痕跡と in-flight 集計(実行中N/承認待ちM)。表示は Batch6。
       runtime: getRuntimeState(),
       inFlight: executor.inFlightCount(),
