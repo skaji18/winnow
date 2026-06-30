@@ -1,6 +1,7 @@
 import type { Item } from "./domain.js";
 import { RUNG_LABEL } from "./domain.js";
 import { items, projects, settings } from "./repo.js";
+import { buildAiZone } from "./learning.js";
 
 // 文脈の組み立て (REQUIREMENTS §2.2). 上段の鋭いスペックを下段に渡すための配管。
 // プロダクト全体の前提 + 案件の前提 + 親チェーン(ルート→親) を1つのブロックにする。
@@ -29,7 +30,18 @@ export function redactSecrets(s: string): string {
     .replace(RE_HIGH_ENTROPY, "[REDACTED-HIGH-ENTROPY]");
 }
 
-export function buildContextBlock(item: Item): string {
+// 切り詰め (前方優先 slice + 番兵)。区画別予算で人間ゾーン/AIゾーンに別々に適用する。
+function clip(text: string, max: number, sentinel: string): string {
+  if (max <= 0) return ""; // 予算ゼロ=ゾーンごと省く(番兵だけ注入しない)。
+  if (text.length <= max) return text;
+  return text.slice(0, max) + sentinel;
+}
+
+/**
+ * memory の人間ゾーンを組む (productContext + 案件前提 + node 段メモリ + 親チェーン)。
+ * いずれも人間が書く/AI 注入される高信頼の前提。AIゾーン (学び) とは予算も信頼度も分ける。
+ */
+function buildHumanZone(item: Item): string {
   const parts: string[] = [];
 
   const product = settings.get().productContext?.trim();
@@ -43,7 +55,11 @@ export function buildContextBlock(item: Item): string {
     if (p && ctx) parts.push(`### 案件「${p.name}」の前提\n${ctx}`);
   }
 
-  // 親チェーン(ルート→直近の親)。循環ガード付き。
+  // この項目自身の node 段メモリ (Item.context)。body 相乗りでなく高信頼の前提として注入。
+  const selfCtx = item.context?.trim();
+  if (selfCtx) parts.push(`### この項目の前提(メモ)\n${selfCtx}`);
+
+  // 親チェーン(ルート→直近の親)。循環ガード付き。各 node の前提(context)も併記する。
   const chain: Item[] = [];
   const seen = new Set<string>([item.id]);
   let cur = item.parentId ? items.get(item.parentId) : null;
@@ -53,21 +69,47 @@ export function buildContextBlock(item: Item): string {
     cur = cur.parentId ? items.get(cur.parentId) : null;
   }
   if (chain.length) {
-    const lines = chain.map(
-      (a, i) =>
-        `${"  ".repeat(i)}- [${RUNG_LABEL[a.rung]}] ${a.title}${a.body ? `\n${"  ".repeat(i)}  ${a.body.replace(/\n/g, " ")}` : ""}`,
-    );
+    const lines = chain.map((a, i) => {
+      const pad = "  ".repeat(i);
+      const body = a.body ? `\n${pad}  ${a.body.replace(/\n/g, " ")}` : "";
+      const ctx = a.context?.trim() ? `\n${pad}  前提: ${a.context.trim().replace(/\n/g, " ")}` : "";
+      return `${pad}- [${RUNG_LABEL[a.rung]}] ${a.title}${body}${ctx}`;
+    });
     parts.push(`### この項目が属する上位の意図(ルート→親)\n${lines.join("\n")}`);
   }
 
-  if (!parts.length) return "";
-  let bodyText = parts.join("\n\n");
-  if (bodyText.length > MAX_CONTEXT_CHARS) {
-    bodyText =
-      bodyText.slice(0, MAX_CONTEXT_CHARS) +
-      "\n\n…(文脈が長すぎるため後半を省略。設定『プロダクトの前提』または案件の前提を整理してください)";
-  }
-  // 注入直前に秘密を伏字化(切り詰めで分断された残骸も対象にするため切り詰めの後に適用)。
+  return parts.join("\n\n");
+}
+
+// memory の AIゾーン (自動蓄積された学び) を組む。tighten-only・区画別予算で注入される。
+function buildAiZoneText(item: Item): string {
+  return buildAiZone(item);
+}
+
+export function buildContextBlock(item: Item): string {
+  // 人間ゾーンを優先予算で残し、AIゾーンを別予算で後段に積む (切り詰め順の逆転バグ回避:
+  // 肥大時に node 段メモリや AI の学びが先頭の productContext を押し出さない)。
+  const humanZone = clip(
+    buildHumanZone(item),
+    MAX_CONTEXT_CHARS,
+    "\n\n…(文脈が長すぎるため後半を省略。設定『プロダクトの前提』または案件の前提を整理してください)",
+  );
+  // AIゾーンの予算は「専用上限」と「総量 MAX_CONTEXT_CHARS の残予算」の小さい方。これで
+  // 人間ゾーン優先を保ちつつ、両ゾーン満杯で注入本文が天井(≒ARG_MAX防御の値)を超えない。
+  const aiBudget = Math.max(
+    0,
+    Math.min(settings.get().aiZoneMaxChars ?? MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS - humanZone.length),
+  );
+  const aiZone = clip(
+    buildAiZoneText(item),
+    aiBudget,
+    "\n…(学びが多いため一部を省略。不要な学びは veto してください)",
+  );
+
+  if (!humanZone && !aiZone) return "";
+  // 人間ゾーンを先頭・AIゾーンを後段に連結。
+  let bodyText = [humanZone, aiZone].filter((z) => z.length > 0).join("\n\n");
+  // 注入直前に秘密を伏字化(両ゾーン結合後に1回だけ=最終ゲートの漏れ口を増やさない)。
   bodyText = redactSecrets(bodyText);
   return `\n## 文脈（必ずこれに沿って判断・分解・実行する）\n${bodyText}\n`;
 }

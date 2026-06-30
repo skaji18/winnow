@@ -67,14 +67,20 @@ function NewProject({
   onCreated: (id: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [goal, setGoal] = useState("");
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<"board" | "flow">("board");
   const submit = async () => {
     if (!name.trim()) return;
-    const p = await api.createProject({ name: name.trim(), mode });
+    const p = await api.createProject({
+      name: name.trim(),
+      mode,
+      description: goal.trim() || undefined,
+    });
     // 「新しい案件＋最初の問い」を1ステップで (任意)。問いはAIが分類する。
     if (question.trim()) await api.createItem({ title: question.trim(), projectId: p.id });
     setName("");
+    setGoal("");
     setQuestion("");
     onCreated(p.id);
     await onChange();
@@ -86,6 +92,13 @@ function NewProject({
         placeholder="新規案件名"
         value={name}
         onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        type="text"
+        placeholder="ゴール・状況 (任意・人間用)"
+        value={goal}
+        onChange={(e) => setGoal(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <input
@@ -120,6 +133,9 @@ function ProjectDetail({
   const projectItems = state.items.filter((i) => i.projectId === project.id);
   const setMode = (mode: "board" | "flow") =>
     api.updateProject(project.id, { mode }).then(onChange);
+  const [closing, setClosing] = useState(false);
+  // 締めの対象=未完(done/rejected 以外)。0件なら即アーカイブ、1件以上は締めモーダルを開く。
+  const openItems = projectItems.filter((i) => i.status !== "done" && i.status !== "rejected");
 
   return (
     <div>
@@ -135,8 +151,14 @@ function ProjectDetail({
           </button>
         ) : (
           <button
-            title="アーカイブ(タスクは残り、案件ピッカーで畳まれます)"
-            onClick={() => api.updateProject(project.id, { status: "archived" }).then(onChange)}
+            title="アーカイブして締める(未完は繰越/止める/問いに戻すで締めます)"
+            onClick={() => {
+              if (openItems.length === 0) {
+                api.updateProject(project.id, { status: "archived" }).then(onChange);
+              } else {
+                setClosing(true);
+              }
+            }}
           >
             アーカイブ
           </button>
@@ -152,9 +174,25 @@ function ProjectDetail({
         </button>
       </div>
 
+      {/* ゴール・状況: 人間が読む欄。AI には注入されない (context とは役割が違う)。 */}
+      <details style={{ marginBottom: 10 }} open={Boolean(project.description)}>
+        <summary className="muted" style={{ fontSize: 12.5, cursor: "pointer" }}>
+          案件のゴール・状況（人間用・AI には注入されない）
+        </summary>
+        <textarea
+          rows={3}
+          style={{ width: "100%", marginTop: 8 }}
+          placeholder="この案件で達成したいこと・今どこにいるか。俯瞰で読むための覚書。"
+          defaultValue={project.description}
+          onBlur={(e) =>
+            api.updateProject(project.id, { description: e.target.value }).then(onChange)
+          }
+        />
+      </details>
+
       <details style={{ marginBottom: 14 }}>
         <summary className="muted" style={{ fontSize: 12.5, cursor: "pointer" }}>
-          案件の前提・文脈（分解/実行に注入される）
+          案件の前提・文脈（AI に効く: 分類/分解/実行に注入される）
         </summary>
         <textarea
           rows={6}
@@ -167,6 +205,16 @@ function ProjectDetail({
           onBlur={(e) => api.updateProject(project.id, { context: e.target.value }).then(onChange)}
         />
       </details>
+
+      {closing && (
+        <ArchiveCloseModal
+          project={project}
+          openItems={openItems}
+          state={state}
+          onClose={() => setClosing(false)}
+          onChange={onChange}
+        />
+      )}
 
       {project.mode === "board" ? (
         <ProjectBoard items={projectItems} state={state} onChange={onChange} />
@@ -243,6 +291,137 @@ function ProjectBoard({
         )}
       />
     </>
+  );
+}
+
+// 案件 archive 時の締めモーダル (確定2決定 b)。未完を放置せず disposition で締める。
+// 既存の正規路 (reject/send_back=actions.ts label+recordOutcome+undo / 繰越=updateItem) のみで
+// 自己完結。残数/消化率/達成% は出さない (出すのは判断対象の列挙のみ=処理量メトリクス禁止)。
+type CloseChoice = "keep" | "stop" | "send_back" | "carry";
+
+function ArchiveCloseModal({
+  project,
+  openItems,
+  state,
+  onClose,
+  onChange,
+}: {
+  project: Project;
+  openItems: Item[];
+  state: AppState;
+  onClose: () => void;
+  onChange: () => void;
+}) {
+  // 既定=keep(締めない・教師信号なしの安全初期値。締めは速く緩めは慎重に)。
+  const [choices, setChoices] = useState<Record<string, { kind: CloseChoice; to?: string }>>({});
+  const [busy, setBusy] = useState(false);
+  const targets = state.projects.filter((p) => p.status === "active" && p.id !== project.id);
+
+  const choiceOf = (id: string) => choices[id] ?? { kind: "keep" as CloseChoice };
+  const setChoice = (id: string, c: { kind: CloseChoice; to?: string }) =>
+    setChoices((prev) => ({ ...prev, [id]: c }));
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      for (const it of openItems) {
+        const c = choiceOf(it.id);
+        if (c.kind === "stop") await api.action(it.id, "reject");
+        else if (c.kind === "send_back") await api.action(it.id, "send_back");
+        else if (c.kind === "carry" && c.to)
+          await api.updateItem(it.id, { projectId: c.to }, it.updatedAt);
+        // keep は何もしない (item を温存)。
+      }
+      await api.updateProject(project.id, { status: "archived" });
+      await onChange();
+      onClose();
+    } catch (e) {
+      // 途中失敗(CONFLICT 等): 締めを中断。既に成功した処分は個別に可逆(undo)なので巻き戻さず、
+      // 必ず再取得して残りの未完だけ再操作できる状態にし、部分適用をユーザーに明示する。
+      await onChange();
+      setBusy(false);
+      alert(
+        `締めの途中で中断しました(${String((e as Error).message)})。一部の未完は処分済みです。` +
+          `最新の状態に更新したので、残りを確認して締め直してください。`,
+      );
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0 }}>「{project.name}」を締める</h3>
+        <p className="muted" style={{ fontSize: 12.5 }}>
+          未完 {openItems.length}件をどう締めるか決めてください。繰越は別案件へ移すだけ（教師信号を出さない）、
+          止める/問いに戻すはそのまま教師信号になります。何もしなければ「そのまま」で残ります。
+        </p>
+        <div style={{ maxHeight: 340, overflowY: "auto", margin: "10px 0" }}>
+          {openItems.map((it) => {
+            const c = choiceOf(it.id);
+            const running = it.executionStatus === "running";
+            return (
+              <div className="tree-row" key={it.id} style={{ alignItems: "center" }}>
+                <span style={{ flex: 1 }}>
+                  {it.title} <span className="badge kind">{RUNG_LABEL[it.rung]}</span>{" "}
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    {STATUS_LABEL[it.status] ?? it.status}
+                  </span>
+                </span>
+                <select
+                  value={c.kind}
+                  title="締め方"
+                  onChange={(e) =>
+                    setChoice(it.id, { kind: e.target.value as CloseChoice, to: c.to })
+                  }
+                >
+                  <option value="keep">そのまま</option>
+                  <option value="stop" disabled={running}>
+                    止める
+                  </option>
+                  <option value="send_back" disabled={running}>
+                    問いに戻す
+                  </option>
+                  <option value="carry" disabled={targets.length === 0}>
+                    繰越
+                  </option>
+                </select>
+                {c.kind === "carry" && (
+                  <select
+                    value={c.to ?? ""}
+                    title="繰越先の案件"
+                    onChange={(e) => setChoice(it.id, { kind: "carry", to: e.target.value })}
+                  >
+                    <option value="">— 繰越先 —</option>
+                    {targets.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {targets.length === 0 && (
+          <p className="muted" style={{ fontSize: 11 }}>
+            繰越先になる別の active 案件がありません（繰越は選べません）。
+          </p>
+        )}
+        <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={onClose} disabled={busy}>
+            やめる
+          </button>
+          <button
+            className="primary"
+            disabled={busy || openItems.some((it) => choiceOf(it.id).kind === "carry" && !choiceOf(it.id).to)}
+            onClick={apply}
+          >
+            この内容で締めてアーカイブ
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

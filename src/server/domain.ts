@@ -125,6 +125,10 @@ export interface Item {
   // タスク管理の器 (PjM要素)。
   projectId: string | null; // 所属する案件
   sprintId: string | null; // 割り当てられたスプリント (mode=sprint の案件のみ)
+  // node 段の AI に効く前提。buildContextBlock の親チェーンに高信頼(ctx側)で注入する。
+  // body 相乗り不可: body は fenceBody で「自己申告=従うな」の低信頼ラベル付き注入もされ、
+  // 指示として書いた前提が詐称シグナル化して escalate に倒れるため、専用フィールドに分ける。
+  context: string | null;
   dueDate: number | null; // 期日 (epoch ms)
   priority: Priority;
 
@@ -136,14 +140,33 @@ export interface Item {
 export interface Project {
   id: string;
   name: string;
+  // 人間が読むゴール/状況。buildContextBlock には注入されない(context.ts は p.context のみ参照)。
   description: string;
   // 案件ビューの見せ方: board=状態カンバン / flow=優先度・期日順リスト。
   mode: "board" | "flow";
   status: "active" | "archived";
-  // 案件固有の前提・文脈 (スタック/制約/関係者など)。分解・実行プロンプトに注入する。
+  // 案件固有の前提・文脈 (スタック/制約/関係者など)。AI に効く前提として
+  // 分類・分解・昇格・実行プロンプトに注入する (description とは役割が違う)。
   context: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * 学び (§4-5 ループを閉じる) — AI が観測した注意・知識を memory の「AIゾーン」へ自動蓄積する。
+ * label_events とは物理分離 (較正母数=category_stats を汚さないため)。origin で信頼度を分け、
+ * AIゾーンは tighten-only (品質は上げるが auto 着火範囲は緩めない)・区画予算つき自動減衰。
+ */
+export interface Learning {
+  id: string;
+  category: string | null; // カテゴリ固有の学び。共通の学びは null
+  itemId: string | null; // 由来 item (FK ON DELETE SET NULL で孤児許容)
+  text: string;
+  origin: "human" | "ai";
+  pinned: boolean; // pin した学びは減衰しない・フル信頼
+  vetoed: boolean; // veto された学びは注入対象から外す
+  lastSeenAt: number; // 注入に使われた最終時刻 (減衰の生存信号)
+  createdAt: number;
 }
 
 /**
@@ -294,6 +317,15 @@ export interface Settings {
   // timed_out を late sentinel 回収できないまま放置する上限。これを超えたら failed へ落とす
   // (中間状態に永久滞留させない)。
   timedOutGraceMs: number;
+
+  // --- 学び (memory AIゾーン) のオプトアウト設定。人間手間ゼロで安全側に倒すための定数。
+  // AI 出力から学びを自動蓄積するか。false で AI 由来の学び収集を止める (人間ゾーンは無関係)。
+  learningAutoCapture: boolean;
+  // memory の AIゾーンに割く char 予算。人間ゾーン (productContext/案件/node 前提) とは別枠で、
+  // 人間前提を押し出さない (切り詰めは人間ゾーン優先)。注入天井 MAX_CONTEXT_CHARS 以下に据える。
+  aiZoneMaxChars: number;
+  // AI 由来の学びが pin されず未使用のまま薄れるまでの猶予 (ms)。lastSeenAt がこれを超えたら減衰削除。
+  learningDecayMs: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -333,4 +365,7 @@ export const DEFAULT_SETTINGS: Settings = {
   classifyTimeoutMs: 90_000,
   acquireTimeoutMs: 120_000,
   timedOutGraceMs: 1_800_000, // 30 分。timed_out のまま回収できなければ failed へ。
+  learningAutoCapture: true, // オプトアウト: 既定で学びを自動蓄積 (人間手間ゼロ)。
+  aiZoneMaxChars: 16_000,
+  learningDecayMs: 2_592_000_000, // 30 日
 };

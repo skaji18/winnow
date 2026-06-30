@@ -7,6 +7,7 @@ import {
   type Item,
   type LabelAction,
   type LabelEvent,
+  type Learning,
   type Project,
   type Rule,
   type Settings,
@@ -67,6 +68,7 @@ function mapItem(r: Row): Item {
     projectDir: (r.projectDir as string) ?? null,
     projectId: (r.projectId as string) ?? null,
     sprintId: (r.sprintId as string) ?? null,
+    context: (r.context as string) ?? null,
     dueDate: r.dueDate === null || r.dueDate === undefined ? null : (r.dueDate as number),
     priority: (r.priority as Item["priority"]) ?? "normal",
     createdAt: r.createdAt as number,
@@ -163,14 +165,15 @@ export const items = {
       projectDir: input.projectDir ?? null,
       projectId: input.projectId ?? null,
       sprintId: input.sprintId ?? null,
+      context: input.context ?? null,
       dueDate: input.dueDate ?? null,
       priority: input.priority ?? "normal",
       createdAt: ts,
       updatedAt: ts,
     };
     db.prepare(
-      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,dueDate,priority,createdAt,updatedAt)
-       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@dueDate,@priority,@createdAt,@updatedAt)`,
+      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,context,dueDate,priority,createdAt,updatedAt)
+       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@context,@dueDate,@priority,@createdAt,@updatedAt)`,
     ).run({
       ...item,
       envEscalated: item.envEscalated ? 1 : 0,
@@ -189,7 +192,7 @@ export const items = {
     if (!current) return null;
     const merged = { ...current, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,context=@context,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
     ).run({
       ...merged,
       envEscalated: merged.envEscalated ? 1 : 0,
@@ -282,6 +285,113 @@ export const labels = {
         )
         .get(category, ...actions, since) as { c: number }
     ).c;
+  },
+};
+
+// 学び (memory AIゾーン)。label_events / category_stats とは物理分離し、calibration を import しない
+// = recordOutcome を構造的に呼べない (較正母数を汚さない不変条件をコンパイル時に担保)。
+function mapLearning(r: Row): Learning {
+  return {
+    id: r.id as string,
+    category: (r.category as string) ?? null,
+    itemId: (r.itemId as string) ?? null,
+    text: r.text as string,
+    origin: r.origin as Learning["origin"],
+    pinned: boolize(r.pinned),
+    vetoed: boolize(r.vetoed),
+    lastSeenAt: r.lastSeenAt as number,
+    createdAt: r.createdAt as number,
+  };
+}
+
+export const learnings = {
+  record(input: {
+    text: string;
+    category?: string | null;
+    itemId?: string | null;
+    origin?: Learning["origin"];
+    pinned?: boolean;
+  }): Learning {
+    const ts = now();
+    const l: Learning = {
+      id: randomUUID(),
+      category: input.category ?? null,
+      itemId: input.itemId ?? null,
+      text: input.text,
+      origin: input.origin ?? "ai",
+      pinned: input.pinned ?? false,
+      vetoed: false,
+      lastSeenAt: ts,
+      createdAt: ts,
+    };
+    db.prepare(
+      `INSERT INTO learnings (id,category,itemId,text,origin,pinned,vetoed,lastSeenAt,createdAt)
+       VALUES (@id,@category,@itemId,@text,@origin,@pinned,@vetoed,@lastSeenAt,@createdAt)`,
+    ).run({ ...l, pinned: l.pinned ? 1 : 0, vetoed: l.vetoed ? 1 : 0 });
+    return l;
+  },
+  /** カテゴリ一致 + 共通(category IS NULL) の、veto されていない学び。注入候補。 */
+  forCategory(category: string | null): Learning[] {
+    const rows =
+      category == null
+        ? db.prepare("SELECT * FROM learnings WHERE category IS NULL AND vetoed = 0").all()
+        : db
+            .prepare(
+              "SELECT * FROM learnings WHERE (category = ? OR category IS NULL) AND vetoed = 0",
+            )
+            .all(category);
+    return (rows as Row[]).map(mapLearning);
+  },
+  forProject(): Learning[] {
+    return (db.prepare("SELECT * FROM learnings ORDER BY createdAt DESC").all() as Row[]).map(
+      mapLearning,
+    );
+  },
+  forItem(itemId: string): Learning[] {
+    return (
+      db
+        .prepare("SELECT * FROM learnings WHERE itemId = ? ORDER BY createdAt DESC")
+        .all(itemId) as Row[]
+    ).map(mapLearning);
+  },
+  /** 既存の同一テキスト学び (素朴な重複判定: 同 category + 同 text)。 */
+  findDuplicate(category: string | null, text: string): Learning | null {
+    const r = (
+      category == null
+        ? db
+            .prepare("SELECT * FROM learnings WHERE category IS NULL AND text = ? LIMIT 1")
+            .get(text)
+        : db
+            .prepare("SELECT * FROM learnings WHERE category = ? AND text = ? LIMIT 1")
+            .get(category, text)
+    ) as Row | undefined;
+    return r ? mapLearning(r) : null;
+  },
+  /** 注入に使われた学びの生存信号を更新 (減衰の起点をリセット)。 */
+  touch(ids: string[]): void {
+    if (ids.length === 0) return;
+    const ph = ids.map(() => "?").join(",");
+    db.prepare(`UPDATE learnings SET lastSeenAt = ? WHERE id IN (${ph})`).run(now(), ...ids);
+  },
+  setPinned(id: string, pinned: boolean): void {
+    db.prepare("UPDATE learnings SET pinned = ? WHERE id = ?").run(pinned ? 1 : 0, id);
+  },
+  setVetoed(id: string, vetoed: boolean): void {
+    db.prepare("UPDATE learnings SET vetoed = ? WHERE id = ?").run(vetoed ? 1 : 0, id);
+  },
+  /** AI 由来・未 pin・未使用 (lastSeenAt < cutoff) を物理削除し件数を返す (自動減衰)。 */
+  pruneDecayed(cutoff: number): number {
+    const info = db
+      .prepare(
+        "DELETE FROM learnings WHERE origin = 'ai' AND pinned = 0 AND lastSeenAt < ?",
+      )
+      .run(cutoff);
+    return info.changes;
+  },
+  all(): Learning[] {
+    return (db.prepare("SELECT * FROM learnings ORDER BY createdAt ASC").all() as Row[]).map(
+      mapLearning,
+    );
   },
 };
 
@@ -656,6 +766,7 @@ export interface ImportPayload {
   categoryStats?: Array<Record<string, unknown>>;
   projects?: Array<Record<string, unknown>>;
   sprints?: Array<Record<string, unknown>>;
+  learnings?: Array<Record<string, unknown>>;
   jobs?: Array<Record<string, unknown>>;
   settings?: Record<string, unknown>;
 }
@@ -672,6 +783,7 @@ export function importData(payload: ImportPayload): {
   labels: number;
   rules: number;
   categoryStats: number;
+  learnings: number;
   jobs: number;
 } {
   // settings はシード行を上書き(import の設定で復元)。
@@ -702,6 +814,7 @@ export function importData(payload: ImportPayload): {
       labels: restoreRows("label_events", payload.labels ?? []),
       rules: restoreRows("rules", payload.rules ?? []),
       categoryStats: restoreRows("category_stats", payload.categoryStats ?? []),
+      learnings: restoreRows("learnings", payload.learnings ?? []),
       jobs: restoreRows("jobs", payload.jobs ?? []),
     };
     const fkViolations = db.pragma("foreign_key_check") as unknown[];

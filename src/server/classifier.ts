@@ -3,6 +3,7 @@ import { ensureDriver } from "./ai/index.js";
 import { classifyPrompt } from "./ai/prompts.js";
 import { applyRulesAndCalibration, calibrateRequiredConf } from "./calibration.js";
 import { buildContextBlock } from "./context.js";
+import { extractLearning } from "./learning.js";
 import type { Disposition, Item, Process, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
@@ -62,6 +63,8 @@ interface ClassifyOut {
   uncertaintyResolved: boolean;
   executableReady: boolean;
   category: string;
+  // 任意: AI が分類中に気づいた再利用可能な学び (memory AIゾーンへ自動蓄積)。tighten-only。
+  learning?: string;
 }
 
 const clamp01 = (n: unknown): number =>
@@ -231,6 +234,9 @@ async function classifyInner(itemId: string, item: Item): Promise<Item | null> {
     envEscalated: false,
   });
 
+  // 学びの自動蓄積 (memory AIゾーン)。tighten-only=item は書き換えない・較正母数に積まない。
+  if (updated) extractLearning(updated, out.learning);
+
   // 即時着火 (§0「回し」, routes.ts のキューopen掃き出しに次ぐ副次トリガ).
   // 新たに分類された auto leaf を /api/state ポーリングを待たず発火させる。
   // 掃き出しとの二重着火は requestExecution 冒頭の executionStatus ガードが吸収するため調整不要。
@@ -265,5 +271,6 @@ function normalize(d: Partial<ClassifyOut>): ClassifyOut {
     // 一本化されているので、下流(rules/category_stats)のキーは常に正規化済みになる。
     category:
       (typeof d.category === "string" ? normalizeCategory(d.category) : "") || "uncategorized",
+    learning: typeof d.learning === "string" ? d.learning : undefined,
   };
 }

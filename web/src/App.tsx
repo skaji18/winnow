@@ -13,7 +13,15 @@ import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { SprintsView } from "./components/Sprints.js";
 import { TerminalPane } from "./components/TerminalPane.js";
-import type { AppState, Disposition, Item, Priority, QueueItem } from "./types.js";
+import type {
+  AppState,
+  Disposition,
+  DueBucket,
+  HorizonCell,
+  Item,
+  Priority,
+  QueueItem,
+} from "./types.js";
 import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "./types.js";
 
 type Tab = "queue" | "sprints" | "projects" | "backlog" | "sessions" | "settings";
@@ -182,6 +190,106 @@ function HeaderCounts({ state }: { state: AppState }) {
 // ---------------------------------------------------------------------------
 // キュー: 火の海ではなくエスカレーションだけの短いキュー (§4)
 // ---------------------------------------------------------------------------
+// 案件レーン: キュー(エスカレ)を案件でまとめる。未所属は Inbox レーン。見出しには件数進捗でなく
+// 「滞留」(escalate の本数と最長 ageDays)だけを添える (背骨: 処理量メトリクスを出さない)。
+function ProjectLanes({
+  cards,
+  state,
+  renderCard,
+}: {
+  cards: QueueItem[];
+  state: AppState;
+  renderCard: (q: QueueItem) => JSX.Element;
+}) {
+  const groups = new Map<string, QueueItem[]>();
+  for (const q of cards) {
+    const key = q.projectId ?? "__inbox__";
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(q);
+  }
+  const nameOf = (key: string): string =>
+    key === "__inbox__"
+      ? "未所属（Inbox）"
+      : (state.projects.find((p) => p.id === key)?.name ?? "（不明な案件）");
+  // Inbox を末尾、それ以外は案件名順。各レーン内はサーバ score 順(cards 配列順)を保つ。
+  const keys = [...groups.keys()].sort((a, b) => {
+    if (a === "__inbox__") return 1;
+    if (b === "__inbox__") return -1;
+    return nameOf(a).localeCompare(nameOf(b), "ja");
+  });
+  return (
+    <>
+      {keys.map((key) => {
+        const lane = groups.get(key)!;
+        const escal = lane.filter((q) => q.disposition === "escalate");
+        const maxAge = escal.reduce((m, q) => Math.max(m, q.ageDays ?? 0), 0);
+        const stagnation =
+          escal.length > 0
+            ? `エスカレ ${escal.length}件${maxAge > 0 ? `・最長 ${Math.round(maxAge)}日 滞留` : ""}`
+            : "";
+        return (
+          <details className="lane-section" key={key} open>
+            <summary className="lane-head">
+              <b>{nameOf(key)}</b>
+              {stagnation && <span className="muted"> （{stagnation}）</span>}
+            </summary>
+            {lane.map(renderCard)}
+          </details>
+        );
+      })}
+    </>
+  );
+}
+
+// horizon レンズ: rung × due の中長期見通し(読み取り専用)。上段はぼかし、下段 leaf のみ鋭い due。
+// 完了線/残数/消化率は出さない。state.horizon 未提供時は非表示(現状維持)。
+const DUE_BUCKET_LABEL: Record<DueBucket, string> = {
+  over: "期限超過",
+  soon: "間近",
+  week: "今週",
+  later: "それ以降",
+  unknown: "期日なし",
+};
+function HorizonLens({ cells }: { cells?: HorizonCell[] }) {
+  if (!cells || cells.length === 0) {
+    return <div className="empty">見通しに出せる項目がありません（期日や上位の意図を足すと現れます）。</div>;
+  }
+  // rung ごとに行をまとめ、その中で due バケット順に並べる(cells は既にサーバ側で決定論ソート済み)。
+  const byRung = new Map<string, HorizonCell[]>();
+  for (const c of cells) (byRung.get(c.rung) ?? byRung.set(c.rung, []).get(c.rung)!).push(c);
+  return (
+    <div className="horizon">
+      <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+        中長期の見通し。上段は時間帯のみ（確定日付にしない）、実行タスクだけ鋭い期日を出します。
+      </p>
+      {[...byRung.entries()].map(([rung, rungCells]) => (
+        <div className="horizon-row" key={rung}>
+          <div className="horizon-rung">{RUNG_LABEL[rung as Item["rung"]] ?? rung}</div>
+          <div className="horizon-cells">
+            {rungCells.map((c) => (
+              <div className="horizon-cell" key={c.dueBucket}>
+                <div className="horizon-bucket muted">{DUE_BUCKET_LABEL[c.dueBucket]}</div>
+                {c.entries.map((e) => (
+                  <div className="horizon-entry" key={e.id}>
+                    <span className="horizon-title">{e.title}</span>
+                    {e.sharp && e.dueDate != null && (
+                      <span className="horizon-due muted">
+                        {new Date(e.dueDate).toLocaleDateString("ja-JP", {
+                          month: "numeric",
+                          day: "numeric",
+                        })}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function QueueView({ state, onChange }: { state: AppState; onChange: () => void }) {
   // id だけ保持し、表示直前に live state から引き直す。これでポーリングで decomposeStatus が
   // running→ready と動いてもモーダルが古いスナップショットに固定されない。
@@ -191,6 +299,9 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
     : null;
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
   const [filterOpen, setFilterOpen] = useState(false);
+  // 俯瞰レンズ: 既存キューの groupBy トグル (別画面を作らない)。flat=現行挙動を完全温存。
+  // project=案件レーン(+未所属Inbox) / horizon=rung×due の中長期見通し。
+  const [groupBy, setGroupBy] = useState<"flat" | "project" | "horizon">("flat");
 
   // 『/』で控えめな検索バーをトグル(input/textarea 非フォーカス時のみ)。
   useEffect(() => {
@@ -225,6 +336,24 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         />
       )}
 
+      {/* 俯瞰レンズの切替 (FilterBar とは別軸の純フロント状態)。処理量メトリクスは出さない。 */}
+      <div className="lens-toggle" role="group" aria-label="俯瞰レンズ">
+        {([
+          ["flat", "まとめない"],
+          ["project", "案件"],
+          ["horizon", "見通し"],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            className={groupBy === key ? "active" : ""}
+            aria-pressed={groupBy === key}
+            onClick={() => setGroupBy(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* 実績ゼロ初日の第一級メッセージ (§4 末 Jカーブ・期待値管理)。 */}
       {coldDay && (
         <div className="cold-banner" role="note">
@@ -241,7 +370,11 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         </div>
       )}
 
-      {visible.length === 0 ? (
+      {/* horizon レンズはキュー(エスカレ)とは別母集団(全 open 項目)の見通しなので、
+          キュー空判定に関係なく専用描画する。 */}
+      {groupBy === "horizon" ? (
+        <HorizonLens cells={state.horizon} />
+      ) : visible.length === 0 ? (
         <div className="empty">
           {filterIsEmpty(filter)
             ? "キューは空です。新しいアイテムを登録すると分類されます。"
@@ -249,10 +382,10 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         </div>
       ) : (
         <>
-          {/* さばく場(キュー)。仕分けと処分を行う面。 */}
-          {visible
-            .filter((q) => q.lane !== "in_progress")
-            .map((q) => (
+          {/* さばく場(キュー)。仕分けと処分を行う面。flat=現行 / project=案件レーン。 */}
+          {(() => {
+            const queueCards = visible.filter((q) => q.lane !== "in_progress");
+            const renderCard = (q: QueueItem) => (
               <QueueCard
                 key={q.id}
                 item={q}
@@ -261,7 +394,12 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
                 onChange={onChange}
                 onDecompose={() => setDecomposeForId(q.id)}
               />
-            ))}
+            );
+            if (groupBy === "project") {
+              return <ProjectLanes cards={queueCards} state={state} renderCard={renderCard} />;
+            }
+            return queueCards.map(renderCard);
+          })()}
           {/* 着手中レーン: 自分で引き取ったタスク。ここから直接「完了/手放す」で閉じられる
               (案件/スプリントのボードに乗っていなくても完了できる継ぎ目)。件数つきで折り畳み可
               (native details=キーボード/SR対応)。溜まっても短いキューを圧迫しすぎないよう畳める。 */}

@@ -229,6 +229,30 @@ nav.tabs button[aria-selected="true"]::before { content: "▸ "; }
 .lane-head { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 summary.lane-head { cursor: pointer; }
 .lane-head b { color: var(--text); }
+
+/* 俯瞰レンズの切替トグル (キューの groupBy)。FilterBar とは別軸。 */
+.lens-toggle { display: flex; gap: 4px; margin: 0 0 10px; }
+.lens-toggle button {
+  font-size: 12px; padding: 3px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer;
+}
+.lens-toggle button.active { background: var(--accent); color: #08111f; border-color: var(--accent); }
+
+/* horizon レンズ: rung 行 × due バケット。読み取り専用の見通し。 */
+.horizon-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+.horizon-rung {
+  flex: 0 0 96px; font-size: 12px; font-weight: 600; color: var(--text);
+  padding-top: 2px;
+}
+.horizon-cells { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }
+.horizon-cell {
+  flex: 1 1 140px; min-width: 120px; border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 8px;
+}
+.horizon-bucket { font-size: 11px; margin-bottom: 4px; }
+.horizon-entry { display: flex; justify-content: space-between; gap: 6px; font-size: 12.5px; padding: 1px 0; }
+.horizon-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.horizon-due { flex: 0 0 auto; font-size: 11px; }
 /* カテゴリ単位(スコープが広い)操作の視覚分離。
    scope-group は role=group の意味付けだけ担い、レイアウトは display:contents で
    親 .actions の flex にそのまま流す(視覚は据え置き)。 */

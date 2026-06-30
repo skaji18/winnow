@@ -44,14 +44,17 @@ const ORDER_COEF = 0.02;
 const STALE_DAYS = 3;
 // 引き取り待ちを最優先固定する日数。これを超えると handoffC を逓減させ前面固定を解く (§3.5/§4)。
 const HANDOFF_FRESH_DAYS = 3;
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
+// 期日バケットの境界 (日数)。horizon.ts と単一の真実源にし、両者のドリフトを防ぐ。
+export const DUE_SOON_DAYS = 2; // これ未満=間近
+export const DUE_WEEK_DAYS = 7; // これ未満=今週
 
 function dueBoost(x: Item): number {
   if (x.dueDate == null) return 0;
   const days = (x.dueDate - Date.now()) / DAY_MS;
   if (days < 0) return 1.2; // 期限超過
-  if (days < 2) return 0.6; // 間近
-  if (days < 7) return 0.2;
+  if (days < DUE_SOON_DAYS) return 0.6; // 間近
+  if (days < DUE_WEEK_DAYS) return 0.2;
   return 0;
 }
 
