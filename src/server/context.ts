@@ -32,6 +32,7 @@ export function redactSecrets(s: string): string {
 
 // 切り詰め (前方優先 slice + 番兵)。区画別予算で人間ゾーン/AIゾーンに別々に適用する。
 function clip(text: string, max: number, sentinel: string): string {
+  if (max <= 0) return ""; // 予算ゼロ=ゾーンごと省く(番兵だけ注入しない)。
   if (text.length <= max) return text;
   return text.slice(0, max) + sentinel;
 }
@@ -93,9 +94,15 @@ export function buildContextBlock(item: Item): string {
     MAX_CONTEXT_CHARS,
     "\n\n…(文脈が長すぎるため後半を省略。設定『プロダクトの前提』または案件の前提を整理してください)",
   );
+  // AIゾーンの予算は「専用上限」と「総量 MAX_CONTEXT_CHARS の残予算」の小さい方。これで
+  // 人間ゾーン優先を保ちつつ、両ゾーン満杯で注入本文が天井(≒ARG_MAX防御の値)を超えない。
+  const aiBudget = Math.max(
+    0,
+    Math.min(settings.get().aiZoneMaxChars ?? MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS - humanZone.length),
+  );
   const aiZone = clip(
     buildAiZoneText(item),
-    settings.get().aiZoneMaxChars ?? MAX_CONTEXT_CHARS,
+    aiBudget,
     "\n…(学びが多いため一部を省略。不要な学びは veto してください)",
   );
 

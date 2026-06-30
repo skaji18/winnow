@@ -70,6 +70,9 @@ export function horizonView(): HorizonCell[] {
   const childrenOf = new Map<string, Item[]>();
   const ownDue = new Map<string, number | null>();
   for (const it of all) {
+    // 巻き上げ母数も open のみ: 完了(done)/棄却(rejected)の子の過去 due を親に巻き上げて
+    // 「期限超過」に誤表示しない (終わった仕事に判断アテンションを引かせない)。
+    if (!isOpen(it)) continue;
     ownDue.set(it.id, it.dueDate ?? null);
     if (it.parentId) {
       const arr = childrenOf.get(it.parentId) ?? [];

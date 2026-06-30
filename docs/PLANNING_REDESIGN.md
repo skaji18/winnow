@@ -82,3 +82,14 @@ AI が学びを検知 → memory の「AIゾーン」へ自動追記（人間作
 - **AIゾーン学びの重複/品質**: `extractLearning` の重複判定は「同 category + 同 text」の素朴一致。意味的重複（言い換え）は溜まりうる。減衰（30日）と区画予算（16000）で自然に薄れる設計だが、pin 過多時の予算圧迫は将来の veto/減衰チューニング課題。
 - **スプリント完全撤去のタイミング**: 本リデザインは格下げ（列温存・UI 儀式撤去）に留める。focus タグへの完全移行と Sprints.tsx の最終撤去は、案件/horizon が定着し可逆性が不要と判断できてから別途。
 - **learning スキーマのモデル依存**: `prompts.ts` の任意 `learning?` 出力は、モデルが「緩める指示」を書かない前提を文言で縛るが、構造ゲート（executor 181-218）+ learnings の recordOutcome 非呼出の二重担保に依存。モデル更新時に出力傾向を smoke で再確認すること。
+
+### レビュー由来の follow-up（実装済み差分の敵対的レビューで検出。push 前に修正した分を除く）
+
+push 前に修正済み: ① horizon 巻き上げ母数の closed 除外（done/rejected の子を「期限超過」に誤表示しない）。② 注入ゾーン合算の総量上限（人間ゾーン優先で残予算を AIゾーンに配分し ~16k に収める）。③ 締めモーダルの中断時に再取得＋ユーザー明示。
+
+follow-up（可逆・低リスク。次の機会に）:
+- **締めモーダルの楽観ロック**: `stop`(reject) は描画時スナップショットで撃つため、開いている間に背景実行が item を done に進めると誤った reject を撃ちうる（較正母数は汚さない＝recordOutcome 非呼出）。apply 直前に live state から未完を引き直す。
+- **締めの原子性**: 未完を逐次 await で処分し途中失敗で部分適用が残る。サーバ側に締めを1トランザクションで受ける既存 API 拡張を検討（新画面は作らない）。
+- **decayLearnings のスロットル**: `/api/state` ポーリング毎の DELETE は大半 no-op。前回実行時刻でN分間隔に間引く。
+- **migration smoke の commit**: v2→v3 昇格（context 列 / learnings / foreign_key_check）を assert する tsx smoke を1本コミットして将来の版上げに備える。
+- **tighten-only の構造ゲート**: AI 由来 learning を classify 文脈に注入すると自己申告 confidence を上振れさせ auto を緩めうる構造穴（閾値は category_stats 由来で learnings 非依存＝完全には破れない）。AIゾーンを execute 文脈のみに限定する案を検討。

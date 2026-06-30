@@ -336,9 +336,14 @@ function ArchiveCloseModal({
       await onChange();
       onClose();
     } catch (e) {
-      // CONFLICT 等は締めを中断し再取得 (ProjectBoard と同じ流儀)。
-      if (String((e as Error).message).startsWith("CONFLICT")) await onChange();
+      // 途中失敗(CONFLICT 等): 締めを中断。既に成功した処分は個別に可逆(undo)なので巻き戻さず、
+      // 必ず再取得して残りの未完だけ再操作できる状態にし、部分適用をユーザーに明示する。
+      await onChange();
       setBusy(false);
+      alert(
+        `締めの途中で中断しました(${String((e as Error).message)})。一部の未完は処分済みです。` +
+          `最新の状態に更新したので、残りを確認して締め直してください。`,
+      );
     }
   };
 
