@@ -14,6 +14,7 @@ import {
   items,
   jobs,
   labels,
+  learnings,
   projects,
   rules,
   settings,
@@ -412,6 +413,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const redactedItems = items.all().map((it) => ({
       ...it,
       body: typeof it.body === "string" ? redactSecrets(it.body) : it.body,
+      // node 段メモリも body 同様に export 経路で伏字化 (注入時の最終ゲートと対称)。
+      context: typeof it.context === "string" ? redactSecrets(it.context) : it.context,
+    }));
+    const redactedLearnings = learnings.all().map((l) => ({
+      ...l,
+      text: typeof l.text === "string" ? redactSecrets(l.text) : l.text,
     }));
     return {
       version: SCHEMA_VERSION,
@@ -423,6 +430,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         categoryStats: categoryStats.all(),
         projects: projects.all(),
         sprints: sprints.all(),
+        learnings: redactedLearnings,
         jobs: jobs.recent(1_000_000),
         settings: redactedSettings,
       },
@@ -440,6 +448,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       categoryStats: z.array(z.record(z.unknown())).optional(),
       projects: z.array(z.record(z.unknown())).optional(),
       sprints: z.array(z.record(z.unknown())).optional(),
+      learnings: z.array(z.record(z.unknown())).optional(),
       jobs: z.array(z.record(z.unknown())).optional(),
       settings: z.record(z.unknown()).optional(),
     }),

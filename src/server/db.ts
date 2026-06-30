@@ -13,7 +13,7 @@ db.pragma("foreign_keys = ON");
 // CODE_SCHEMA_VERSION = コードが期待する版。DB の user_version がこれより小さければ
 // 版数順に MIGRATIONS の up を適用、大きければ (ダウングレード) 起動停止。
 // ---------------------------------------------------------------------------
-const CODE_SCHEMA_VERSION = 2;
+const CODE_SCHEMA_VERSION = 3;
 /** export/import ペイロードのメタに使う版数 (DDLには使わない)。 */
 export const SCHEMA_VERSION = CODE_SCHEMA_VERSION;
 
@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS items (
   projectDir TEXT,
   projectId TEXT,
   sprintId TEXT,
+  context TEXT,
   dueDate INTEGER,
   priority TEXT NOT NULL DEFAULT 'normal',
   decomposeStatus TEXT NOT NULL DEFAULT 'none',
@@ -125,6 +126,21 @@ CREATE TABLE IF NOT EXISTS label_events (
 );
 CREATE INDEX IF NOT EXISTS idx_labels_item ON label_events(itemId);
 CREATE INDEX IF NOT EXISTS idx_labels_created ON label_events(createdAt);
+
+CREATE TABLE IF NOT EXISTS learnings (
+  id TEXT PRIMARY KEY,
+  category TEXT,
+  itemId TEXT,
+  text TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'ai',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  vetoed INTEGER NOT NULL DEFAULT 0,
+  lastSeenAt INTEGER NOT NULL,
+  createdAt INTEGER NOT NULL,
+  FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category);
+CREATE INDEX IF NOT EXISTS idx_learnings_item ON learnings(itemId);
 
 CREATE TABLE IF NOT EXISTS rules (
   id TEXT PRIMARY KEY,
@@ -359,9 +375,42 @@ function migrateV1toV2(d: Database.Database): void {
   ensureColumn("items", "decomposeOptions", "decomposeOptions TEXT");
 }
 
+/**
+ * 版2→版3 の up (計画リデザイン)。
+ * items に node 段メモリ列 context を追加 (nullable)、memory AIゾーンを格納する learnings
+ * テーブルを冪等に新設。新規DB(版0→1で CREATE TABLE 済み)では ensureColumn/CREATE は no-op。
+ * 列追加 + テーブル新設のみで FK/PK 再構築は無い。
+ */
+function migrateV2toV3(d: Database.Database): void {
+  function ensureColumn(table: string, column: string, ddl: string): void {
+    const has = (
+      d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    ).some((c) => c.name === column);
+    if (!has) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+  ensureColumn("items", "context", "context TEXT");
+  d.exec(`
+CREATE TABLE IF NOT EXISTS learnings (
+  id TEXT PRIMARY KEY,
+  category TEXT,
+  itemId TEXT,
+  text TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'ai',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  vetoed INTEGER NOT NULL DEFAULT 0,
+  lastSeenAt INTEGER NOT NULL,
+  createdAt INTEGER NOT NULL,
+  FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category);
+CREATE INDEX IF NOT EXISTS idx_learnings_item ON learnings(itemId);
+`);
+}
+
 const MIGRATIONS: { v: number; up: (d: Database.Database) => void }[] = [
   { v: 1, up: migrateV0toV1 },
   { v: 2, up: migrateV1toV2 },
+  { v: 3, up: migrateV2toV3 },
 ];
 
 // 版数順に適用。foreign_keys=OFF を要する table-rebuild を含むため db.transaction を使わず
