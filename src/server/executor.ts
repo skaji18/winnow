@@ -436,9 +436,11 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
  *   - sentinel が現れていれば applyExecuteResult で succeeded/awaiting_handoff/done へ昇格 (recovered)。
  *   - 現れないまま timedOutGraceMs を超過したら failed へ落として再浮上させる (agedOut。中間状態に
  *     永久滞留させない)。
- * /api/state の sweep から背景発火する(AI 非起動の read-only 処理)。手動で再実行/却下された item は
- * executionStatus が timed_out でなくなり自然に対象外=回収と競合しない(新しい実行の ipcId が別なので
+ * /api/state の sweep から背景発火する(AI 非起動の read-only 処理)。手動で再実行された item は
+ * executionStatus が timed_out でなくなり自然に対象外(新しい実行の ipcId が別なので
  * 古い sentinel を誤って当てることもない: latestExecuteForItem が常に最新ジョブを返す)。
+ * 却下(reject)は status='rejected' のみで executionStatus は timed_out のまま残るため、
+ * ここで明示に skip する=人間の処分を sweep が黙って上書きしない(queue 側も rejected を畳む)。
  */
 export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   let recovered = 0;
@@ -446,6 +448,10 @@ export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   const graceMs = settings.get().timedOutGraceMs || 1_800_000;
   for (const it of items.all()) {
     if (it.executionStatus !== "timed_out") continue;
+    // 人間が却下済み: 回収も期限切れ倒しもしない(人間の処分が勝つ)。job は runExecution が
+    // 既に failed で閉じている。late sentinel が残っても取り込まない(undo で classified に
+    // 戻れば timed_out として再び対象になり、そこで回収される=成果は失われない)。
+    if (it.status === "rejected") continue;
     const job = jobs.latestExecuteForItem(it.id);
     if (job && tryTakeInSentinel(job)) {
       recovered++;
@@ -485,8 +491,9 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   const stranded = jobs.runningExecuteJobs();
   for (const job of stranded) {
     const item = items.get(job.itemId);
-    // item が無い / 既に running 以外で決着済みなら job だけ決着させて skip。
-    if (!item || item.executionStatus !== "running") {
+    // item が無い / 既に running 以外で決着済み / 人間が却下済み なら job だけ決着させて skip
+    // (rejected の上書き禁止は sweepLateExecutions と対称)。
+    if (!item || item.executionStatus !== "running" || item.status === "rejected") {
       jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
       continue;
     }
@@ -564,6 +571,25 @@ export async function cancelExecution(itemId: string): Promise<Item | null> {
   if (!item) return null;
   // 冪等: 既に cancelled なら再発火しない (多重 POST /cancel で audit_bad を二重計上しない)。
   if (item.executionStatus === "cancelled") return item;
+
+  // 未実行 proposed の「提案を取り消す」= 実行の取り消しではなく提案の却下。cancelled
+  // (実行済みの取り消し専用・undo 不能の終端)に倒さず、reject の正規路(label あり=
+  // 『さばきを戻す』で復元可能)へ流す (§4-4 誤タップから安く戻れる)。autoExecuted=true の
+  // proposed(needs_human 往復後)も worker は副作用ゼロの契約なので同じ扱いでよい。
+  if (item.executionStatus === "proposed") {
+    labels.record({
+      itemId,
+      action: "reject",
+      fromDisposition: item.disposition,
+      category: item.category,
+      note: "提案の取り消し",
+    });
+    return items.update(itemId, {
+      executionStatus: "none",
+      status: "rejected",
+      executionResult: "実行提案を取り消しました(実行はされていません)。",
+    });
+  }
 
   // (1) 巻き戻し手順の提示 (自動実行しない=人間ワンタップ)。
   const note = item.rollbackPlan

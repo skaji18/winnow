@@ -150,6 +150,10 @@ export function queue(): QueueItem[] {
     // 1) cancelled は常に再浮上させない(cancelExecution は status='rejected' にもするが
     //    executionStatus でも二重に保険)。
     if (it.executionStatus === "cancelled") return false;
+    // 1.2) 人間の処分(却下)が勝つ: rejected は failed/timed_out の再浮上・autoDone の
+    //      取消ハンドルより先に畳む。旧実装は 3) が先に発火し「却下してもカードが消えない」
+    //      デッドエンドだった。undo(さばきを戻す→classified)すれば従来どおり再浮上する。
+    if (it.status === "rejected") return false;
     // 1.5) 【最優先】引き取り待ち(実行完了・人間の受領/採用が必要)は必ず前面に出す (§3.5)。
     //      status='review' なので下の classified/done フィルタには拾われない。明示で出す。
     if (it.executionStatus === "awaiting_handoff") return true;
@@ -164,8 +168,8 @@ export function queue(): QueueItem[] {
     if (it.executionStatus === "failed") return true;
     if (it.executionStatus === "timed_out") return true;
     if (it.status === "blocked") return true;
-    // 4) done/rejected を畳む(3) の後なので失敗/blocked が優先)。
-    if (it.status === "done" || it.status === "rejected") return false;
+    // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
+    if (it.status === "done") return false;
     // 5) 提案待ち(不可逆実行のワンタップ承認)は必ず出す。
     if (it.executionStatus === "proposed") return true;
     // 6) 【寄生表示】人手で着手中(doIt)はキュー内『着手中』レーンに薄く出す。判別子は
