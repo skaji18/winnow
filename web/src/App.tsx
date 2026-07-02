@@ -680,6 +680,21 @@ function QueueCard({
             // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3)。
             <>
               {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
+              {/* レビュー leaf: 問題なし=レビューとレビュー対象を束で畳む(1タップ2畳み)。
+                  問題ありのときは対象カード側の『実行を取り消す/巻き戻して問いに戻す』で
+                  締め方向の教師信号を出す(レビュー専用の信号は作らない)。 */}
+              {item.reviewOfId && (
+                <button
+                  className="primary"
+                  disabled={busy}
+                  title="レビューして問題なかった。このレビューとレビュー対象の実行結果をまとめて畳む。問題があれば、対象カード側で『実行を取り消す』か『巻き戻して問いに戻す』を"
+                  onClick={() =>
+                    run(() => api.accept(item.id), "問題なし: レビューと対象を畳みました")
+                  }
+                >
+                  問題なし（束で畳む）
+                </button>
+              )}
               <button
                 className="primary"
                 disabled={busy}

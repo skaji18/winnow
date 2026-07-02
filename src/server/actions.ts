@@ -213,6 +213,29 @@ export async function approve(itemId: string): Promise<Item | null> {
 export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
+  // レビュー leaf の「問題なし(束で畳む)」: レビューを受領で閉じ、元アイテムも束で受領する
+  // (1タップ2畳み — 受領とレビュー処分の二重操作を要求しない)。どちらも recordOutcome 非呼出。
+  // 「問題あり」の側はここを通らず、元カードの cancel/send_back(既存の締め方向の教師信号)へ
+  // 流す=レビュー専用カウンタを作らない (§1-4 浅くて頑健)。
+  if (item.reviewOfId) {
+    labels.record({
+      itemId,
+      action: "receive",
+      category: item.category,
+      note: "レビュー完了(問題なし)",
+    });
+    const updated = items.update(itemId, { status: "done", receivedAt: Date.now() });
+    const src = items.get(item.reviewOfId);
+    if (
+      src &&
+      (src.executionStatus === "awaiting_handoff" ||
+        (src.autoExecuted && src.executionStatus === "succeeded" && src.receivedAt == null))
+    ) {
+      // 元アイテム側の受領も通常の receive として記録する(束の undo は item ごと=直近1手ずつ)。
+      await acceptHandoff(src.id);
+    }
+    return updated;
+  }
   labels.record({
     itemId,
     action: "receive",
@@ -379,6 +402,10 @@ export function undoLastLabel(itemId: string): Item | null {
       if (ev.note === "受領(引き取り)") {
         patch.executionStatus = "awaiting_handoff";
         patch.status = "review";
+      } else if (ev.note === "レビュー完了(問題なし)") {
+        // レビュー leaf の畳みを戻す(さばき待ちへ)。束で畳んだ元アイテム側の receive は
+        // 元アイテム自身の直近ラベルとして別途 undo する(undo は item ごと=直近1手ずつ)。
+        patch.status = "classified";
       }
       break;
     }

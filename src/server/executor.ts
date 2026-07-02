@@ -5,7 +5,7 @@ import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
 import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
-import { buildContextBlock } from "./context.js";
+import { buildContextBlock, redactSecrets } from "./context.js";
 import { extractLearning } from "./learning.js";
 import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
@@ -68,16 +68,26 @@ function uncertainNodeOrUpstreamPending(item: Item): boolean {
   if (parent.uncertaintyResolved === false) return true;
   if (parent.status === "blocked") return true;
   // (c) 同一親×上流(orderIndex 小)に未完の兄弟がいる。
-  return items.children(item.parentId).some(
-    (o) =>
-      o.id !== item.id &&
-      o.orderIndex < item.orderIndex &&
-      o.status !== "done" &&
-      o.status !== "rejected" &&
-      o.executionStatus !== "succeeded" &&
-      o.executionStatus !== "cancelled" &&
-      // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
-      o.executionStatus !== "awaiting_handoff",
+  return items.children(item.parentId).some((o) => isPendingUpstreamSibling(item, o));
+}
+
+/**
+ * 「未完の上流兄弟」判定 (uncertainNodeOrUpstreamPending (c) と uncertainGateReason の
+ * 単一の真実源=両者のドリフト防止)。レビュー leaf (reviewOfId 非null) は観察タスクであって
+ * 下流の前提物ではないので「上流」と数えない — 未処分のレビューが後続兄弟の自動着火を
+ * 黙って塞ぐ穴を閉じる (§3.5 レビューは継ぎ目に乗るがパイプラインを堰き止めない)。
+ */
+function isPendingUpstreamSibling(item: Item, o: Item): boolean {
+  return (
+    o.id !== item.id &&
+    o.reviewOfId == null &&
+    o.orderIndex < item.orderIndex &&
+    o.status !== "done" &&
+    o.status !== "rejected" &&
+    o.executionStatus !== "succeeded" &&
+    o.executionStatus !== "cancelled" &&
+    // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
+    o.executionStatus !== "awaiting_handoff"
   );
 }
 
@@ -271,7 +281,21 @@ function applyExecuteResult(
   if (updated) extractLearning(updated, out.learning);
 
   // レビューをパイプラインに戻す (§3.5). 継ぎ目=チェックポイントが実装ポイント。
-  if (out.reviewTask && out.reviewTask.trim()) {
+  // 構造リンク(reviewOfId)+案件継承つきで生成し、決定論ガード3つで暴走を塞ぐ:
+  //  (1) 成功時のみ: needs_human は proposed=人間が見る / failed は再浮上する
+  //      =レビューすべき成果物が無い(旧実装は失敗時も生成する穴があった)。
+  //  (2) 深さ1固定: レビュー leaf 自身の実行からは新レビューを作らない
+  //      (「レビュー: レビュー: …」の再帰連鎖の構造的停止)。
+  //  (3) 同一対象の未決レビューが居れば新設しない(reExecute 反復での増殖防止)。
+  if (
+    succeeded &&
+    out.reviewTask &&
+    out.reviewTask.trim() &&
+    item.reviewOfId == null &&
+    !items
+      .all()
+      .some((o) => o.reviewOfId === item.id && o.status !== "done" && o.status !== "rejected")
+  ) {
     items.create({
       title: `レビュー: ${out.reviewTask.trim()}`,
       body: `自動実行「${item.title}」の結果レビュー。`,
@@ -280,6 +304,11 @@ function applyExecuteResult(
       parentId: item.parentId,
       domain: item.domain,
       projectDir: item.projectDir,
+      // 案件/スプリントもサブツリーに継承する (decomposer.applyOption と対称)。
+      // 継承しないとレビューだけ案件レーンの「未所属(Inbox)」に迷子になる。
+      projectId: item.projectId,
+      sprintId: item.sprintId,
+      reviewOfId: item.id,
     });
   }
   return updated;
@@ -312,6 +341,29 @@ export async function runExecution(
     }
   }
 
+  // レビュー leaf: レビュー対象(reviewOfId 先)の実行結果を材料として組む (§3.5)。
+  // 旧実装は材料ゼロ(タイトル文字列のみ)で、general の worker は見るものが無かった。
+  // worker 自己申告由来のテキストなので信頼境界は fenceBody(観察対象データ)側に置き
+  // (executePrompt がそう注入する)、redactSecrets の最終ゲートもここで通す。
+  let reviewMaterial = "";
+  if (item.reviewOfId) {
+    const src = items.get(item.reviewOfId);
+    if (src) {
+      const art = (src.artifacts ?? "").trim();
+      reviewMaterial = redactSecrets(
+        [
+          `レビュー対象タスク: ${src.title}`,
+          src.executionSummary ? `実行サマリ: ${src.executionSummary}` : "",
+          src.executionOutput ? `実行成果物:\n${src.executionOutput}` : "",
+          art && art !== "[]" ? `外部成果物(artifacts): ${art}` : "",
+          src.rollbackPlan ? `巻き戻し手順(worker申告):\n${src.rollbackPlan}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      );
+    }
+  }
+
   items.update(itemId, { executionStatus: "running", status: "in_progress" });
   const driver = await ensureDriver();
   // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
@@ -334,7 +386,13 @@ export async function runExecution(
     id: ipcId,
     role: "worker",
     label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item), instruction, opts.externalApproved === true),
+    prompt: executePrompt(
+      item,
+      buildContextBlock(item),
+      instruction,
+      opts.externalApproved === true,
+      reviewMaterial,
+    ),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
     timeoutMs: settings.get().executeTimeoutMs || 600_000,
