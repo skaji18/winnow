@@ -45,6 +45,10 @@ export interface Item {
   auditSampled: boolean;
   executionStatus: ExecutionStatus;
   executionResult: string | null;
+  // 人間が成功実行を確認して畳んだ時刻 (receive の一般化)。null=未受領。サーバ未提供時 undefined。
+  receivedAt?: number | null;
+  // レビュー leaf → レビュー対象(元アイテム)の構造リンク。null=通常アイテム。サーバ未提供時 undefined。
+  reviewOfId?: string | null;
   // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。サーバ未提供時 undefined="none" 扱い。
   decomposeStatus?: DecomposeStatus;
   decomposeOptions?: string | null; // ready 時の DecomposeOption[] を JSON 文字列で保持。

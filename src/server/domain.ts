@@ -101,6 +101,15 @@ export interface Item {
   executionStatus: ExecutionStatus;
   executionResult: string | null;
 
+  // 人間が成功実行を確認して畳んだ時刻 (receive の一般化、§3.5/§4-4)。null=未受領。
+  // autoExecuted && succeeded の取消ハンドルは receivedAt が立つまでキューに残り、
+  // 受領で畳まれる(取消はバックログ/ツリーから引き続き可能=可視の場所が変わるだけ)。
+  // recordOutcome には積まない(受領は分類正誤の信号ではない=較正母数を汚さない)。
+  receivedAt: number | null;
+  // レビュー leaf → レビュー対象(元アイテム)の構造リンク (§3.5)。null=通常アイテム。
+  // 深さ1固定: reviewOfId を持つ item の実行からは新しいレビュー leaf を作らない。
+  reviewOfId: string | null;
+
   // 分解(decompose)の背景ジョブ状態と結果キャッシュ (§3.3)。割り方の候補を JSON 文字列で
   // 持ち、オーバーレイを閉じても捨てない／再オープンで AI を呼び直さず即表示する。
   decomposeStatus: DecomposeStatus;
@@ -252,6 +261,9 @@ export interface ExecutionJob {
   // dispatch時の req.id (IPC相関ID)。起動時 reconcile が running ジョブの done
   // sentinel を決定論で特定するため。null = レガシー (reconcile は sentinel 探索 skip)。
   ipcId: string | null;
+  // 承認時の外部送信ゴーサイン (§3.4)。dispatch 時に永続化し、timed_out 後の late sentinel
+  // 回収(tryTakeInSentinel)でも handoffRequired の安全弁 (d) を発火させる。null=レガシー/非承認。
+  externalApproved: boolean | null;
   createdAt: number;
 }
 

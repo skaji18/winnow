@@ -51,6 +51,8 @@ function mapItem(r: Row): Item {
     auditSampled: boolize(r.auditSampled),
     executionStatus: r.executionStatus as Item["executionStatus"],
     executionResult: (r.executionResult as string) ?? null,
+    receivedAt: r.receivedAt === null || r.receivedAt === undefined ? null : (r.receivedAt as number),
+    reviewOfId: (r.reviewOfId as string) ?? null,
     decomposeStatus: (r.decomposeStatus as Item["decomposeStatus"]) ?? "none",
     decomposeOptions: (r.decomposeOptions as string) ?? null,
     executionSummary: (r.executionSummary as string) ?? null,
@@ -152,6 +154,8 @@ export const items = {
       auditSampled: input.auditSampled ?? false,
       executionStatus: input.executionStatus ?? "none",
       executionResult: input.executionResult ?? null,
+      receivedAt: input.receivedAt ?? null,
+      reviewOfId: input.reviewOfId ?? null,
       decomposeStatus: input.decomposeStatus ?? "none",
       decomposeOptions: input.decomposeOptions ?? null,
       executionSummary: input.executionSummary ?? null,
@@ -172,8 +176,8 @@ export const items = {
       updatedAt: ts,
     };
     db.prepare(
-      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,context,dueDate,priority,createdAt,updatedAt)
-       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@context,@dueDate,@priority,@createdAt,@updatedAt)`,
+      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,receivedAt,reviewOfId,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,context,dueDate,priority,createdAt,updatedAt)
+       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@receivedAt,@reviewOfId,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@context,@dueDate,@priority,@createdAt,@updatedAt)`,
     ).run({
       ...item,
       envEscalated: item.envEscalated ? 1 : 0,
@@ -192,7 +196,7 @@ export const items = {
     if (!current) return null;
     const merged = { ...current, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,context=@context,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,receivedAt=@receivedAt,reviewOfId=@reviewOfId,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,context=@context,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
     ).run({
       ...merged,
       envEscalated: merged.envEscalated ? 1 : 0,
@@ -543,17 +547,41 @@ export const categoryStats = {
   },
 };
 
+// externalApproved は DB では 0/1/null、型では boolean|null (declaredReversible と同じ三値変換)。
+function mapJob(r: Row): ExecutionJob {
+  return {
+    ...(r as unknown as ExecutionJob),
+    externalApproved:
+      r.externalApproved === null || r.externalApproved === undefined
+        ? null
+        : boolize(r.externalApproved),
+  };
+}
+
 export const jobs = {
-  create(input: Omit<ExecutionJob, "id" | "createdAt">): ExecutionJob {
-    const job: ExecutionJob = { ...input, id: randomUUID(), createdAt: now() };
+  // externalApproved は execute ジョブのみ意味を持つため省略可 (省略=null=非承認/レガシー)。
+  create(
+    input: Omit<ExecutionJob, "id" | "createdAt" | "externalApproved"> & {
+      externalApproved?: boolean | null;
+    },
+  ): ExecutionJob {
+    const job: ExecutionJob = {
+      ...input,
+      externalApproved: input.externalApproved ?? null,
+      id: randomUUID(),
+      createdAt: now(),
+    };
     db.prepare(
-      `INSERT INTO jobs (id,itemId,role,kindOfWork,sessionName,status,startedAt,finishedAt,output,error,ipcId,createdAt)
-       VALUES (@id,@itemId,@role,@kindOfWork,@sessionName,@status,@startedAt,@finishedAt,@output,@error,@ipcId,@createdAt)`,
-    ).run(job);
+      `INSERT INTO jobs (id,itemId,role,kindOfWork,sessionName,status,startedAt,finishedAt,output,error,ipcId,externalApproved,createdAt)
+       VALUES (@id,@itemId,@role,@kindOfWork,@sessionName,@status,@startedAt,@finishedAt,@output,@error,@ipcId,@externalApproved,@createdAt)`,
+    ).run({
+      ...job,
+      externalApproved: job.externalApproved === null ? null : job.externalApproved ? 1 : 0,
+    });
     return job;
   },
   update(id: string, patch: Partial<ExecutionJob>): void {
-    const cur = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as ExecutionJob | undefined;
+    const cur = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const merged = { ...cur, ...patch };
     db.prepare(
@@ -561,17 +589,19 @@ export const jobs = {
     ).run(merged);
   },
   recent(limit = 50): ExecutionJob[] {
-    return db
-      .prepare("SELECT * FROM jobs ORDER BY createdAt DESC LIMIT ?")
-      .all(limit) as ExecutionJob[];
+    return (
+      db.prepare("SELECT * FROM jobs ORDER BY createdAt DESC LIMIT ?").all(limit) as Row[]
+    ).map(mapJob);
   },
   /** 前回プロセスで running のまま中断した execute ジョブ (起動時 reconcile が決着させる)。 */
   runningExecuteJobs(): ExecutionJob[] {
-    return db
-      .prepare(
-        "SELECT * FROM jobs WHERE role='worker' AND kindOfWork='execute' AND status='running' ORDER BY createdAt ASC",
-      )
-      .all() as ExecutionJob[];
+    return (
+      db
+        .prepare(
+          "SELECT * FROM jobs WHERE role='worker' AND kindOfWork='execute' AND status='running' ORDER BY createdAt ASC",
+        )
+        .all() as Row[]
+    ).map(mapJob);
   },
   /**
    * ある item の最新の execute ジョブ (timed_out の late sentinel 回収で ipcId を引くため)。
@@ -582,8 +612,8 @@ export const jobs = {
       .prepare(
         "SELECT * FROM jobs WHERE itemId=? AND role='worker' AND kindOfWork='execute' ORDER BY createdAt DESC LIMIT 1",
       )
-      .get(itemId) as ExecutionJob | undefined;
-    return r ?? null;
+      .get(itemId) as Row | undefined;
+    return r ? mapJob(r) : null;
   },
   /** classify/execute の失敗ジョブ数 (summary の failed 集計)。finishedAt 基準。 */
   failedSince(ts: number): number {
