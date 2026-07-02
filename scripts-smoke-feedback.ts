@@ -1,4 +1,4 @@
-// 実行フィードバック・リデザインの smoke (docs/EXECUTION_FEEDBACK_REDESIGN.md)。
+// 実行フィードバック・リデザインの smoke (docs/DECISIONS.md「実行フィードバックの終端と構造」)。
 // migration v4 / receive 終端 / reject 終端 / レビュー束の受領 / undo の逆適用 を
 // AI 非起動(repo/queue/actions/executor の決定論部分のみ)で検証する。
 // 実行: WINNOW_HOME=$(mktemp -d) npx tsx scripts-smoke-feedback.ts

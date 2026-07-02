@@ -410,10 +410,10 @@ CREATE INDEX IF NOT EXISTS idx_learnings_item ON learnings(itemId);
 /**
  * 版3→版4 の up (実行フィードバック・リデザイン)。
  * - items.receivedAt: 人間が成功実行を確認して畳んだ時刻 (nullable)。receive の一般化
- *   (docs/EXECUTION_FEEDBACK_REDESIGN.md 決定1)。null=未受領=キューに取消ハンドルとして残る。
- * - items.reviewOfId: レビュー leaf → 元アイテムの構造リンク (決定3)。ON DELETE SET NULL で
+ *   (DECISIONS.md「実行フィードバックの終端と構造」)。null=未受領=キューに取消ハンドルとして残る。
+ * - items.reviewOfId: レビュー leaf → 元アイテムの構造リンク。ON DELETE SET NULL で
  *   元アイテム削除時はリンクだけ外れる(レビュー leaf は消さない)。
- * - jobs.externalApproved: 承認時の外部送信ゴーサインを永続化 (決定5)。timed_out 後の
+ * - jobs.externalApproved: 承認時の外部送信ゴーサインを永続化。timed_out 後の
  *   late sentinel 回収でも handoffRequired の安全弁 (d) が発火できるようにする。
  * 列追加のみで FK/PK 再構築は無い。新規DBも版0→4 を順に踏むためここで冪等に足りる。
  */

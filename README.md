@@ -84,7 +84,7 @@ npm start          # http://127.0.0.1:8787 で起動
 | 統合する（MCP / REST） | [`docs/MCP.md`](./docs/MCP.md) |
 | 困ったら | [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md) |
 | 用語を引く | [`docs/GLOSSARY.md`](./docs/GLOSSARY.md) |
-| 設計を読む | [`REQUIREMENTS.md`](./REQUIREMENTS.md) ＆ [`docs/DECISIONS.md`](./docs/DECISIONS.md) |
+| 設計を読む | [`REQUIREMENTS.md`](./REQUIREMENTS.md)（背骨）＆ [`docs/DECISIONS.md`](./docs/DECISIONS.md)（決定の履歴）＆ [`docs/INVARIANTS.md`](./docs/INVARIANTS.md)（不変条件の現在形） |
 
 > 非目標・限界（この最適化は収束しない／狙うバーは「正しさ」ではない 等）は
 > [`REQUIREMENTS.md`](./REQUIREMENTS.md) §5 を参照。
