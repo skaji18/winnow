@@ -91,7 +91,11 @@ function isPendingUpstreamSibling(item: Item, o: Item): boolean {
   );
 }
 
-/** 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。 */
+/**
+ * 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。
+ * 上流完了待ちは「どの兄弟が塞いでいるか」を実名で出す (§4-2 理由はグランス可能に —
+ * 旧文言は原因タスクを特定できず、承認待ちの理由が glance 不能だった)。
+ */
 function uncertainGateReason(item: Item): string {
   if (item.parentId) {
     const parent = items.get(item.parentId);
@@ -100,6 +104,11 @@ function uncertainGateReason(item: Item): string {
         return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
       if (parent.status === "blocked") return "親が保留(blocked)中です。＝親解除待ち";
     }
+    const blocker = items
+      .children(item.parentId)
+      .find((o) => isPendingUpstreamSibling(item, o));
+    if (blocker)
+      return `上流「${blocker.title.slice(0, 40)}」が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)`;
   }
   return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
 }

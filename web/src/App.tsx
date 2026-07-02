@@ -199,7 +199,8 @@ function ProjectLanes({
 }: {
   cards: QueueItem[];
   state: AppState;
-  renderCard: (q: QueueItem) => JSX.Element;
+  // null = 束ね描画で対象カード側に吸収済み(スキップ)。
+  renderCard: (q: QueueItem) => JSX.Element | null;
 }) {
   const groups = new Map<string, QueueItem[]>();
   for (const q of cards) {
@@ -385,16 +386,62 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
           {/* さばく場(キュー)。仕分けと処分を行う面。flat=現行 / project=案件レーン。 */}
           {(() => {
             const queueCards = visible.filter((q) => q.lane !== "in_progress");
-            const renderCard = (q: QueueItem) => (
-              <QueueCard
-                key={q.id}
-                item={q}
-                state={state}
-                learning={learning}
-                onChange={onChange}
-                onDecompose={() => setDecomposeForId(q.id)}
-              />
+            // 束ね描画: レビュー leaf(reviewOfId)が対象カードと同時にキューに見えるとき、
+            // 対象カードの直下にネスト描画する。並びはサーバ score 順の配列が唯一の真実のまま
+            // (束の位置=対象カードの位置。client は隣接描画のみで並べ替えない)。対象が
+            // キューに居ない(畳み済み等)レビューは従来どおり単独カードで出る。
+            const visibleIds = new Set(queueCards.map((q) => q.id));
+            const reviewsOf = new Map<string, QueueItem[]>();
+            for (const q of queueCards) {
+              if (q.reviewOfId && visibleIds.has(q.reviewOfId)) {
+                const arr = reviewsOf.get(q.reviewOfId) ?? [];
+                arr.push(q);
+                reviewsOf.set(q.reviewOfId, arr);
+              }
+            }
+            const bundledIds = new Set(
+              [...reviewsOf.values()].flat().map((q) => q.id),
             );
+            const renderCard = (q: QueueItem) => {
+              if (bundledIds.has(q.id)) return null; // 対象カード側の束で描画済み
+              const card = (
+                <QueueCard
+                  item={q}
+                  state={state}
+                  learning={learning}
+                  onChange={onChange}
+                  onDecompose={() => setDecomposeForId(q.id)}
+                />
+              );
+              const reviews = reviewsOf.get(q.id) ?? [];
+              if (reviews.length === 0) return <div key={q.id}>{card}</div>;
+              return (
+                <div key={q.id}>
+                  {card}
+                  <div
+                    style={{
+                      marginLeft: 18,
+                      paddingLeft: 10,
+                      borderLeft: "2px solid rgba(128,128,128,0.35)",
+                    }}
+                  >
+                    <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
+                      └ この実行結果のレビュー
+                    </div>
+                    {reviews.map((r) => (
+                      <QueueCard
+                        key={r.id}
+                        item={r}
+                        state={state}
+                        learning={learning}
+                        onChange={onChange}
+                        onDecompose={() => setDecomposeForId(r.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            };
             if (groupBy === "project") {
               return <ProjectLanes cards={queueCards} state={state} renderCard={renderCard} />;
             }
@@ -503,7 +550,8 @@ function QueueCard({
   })();
 
   return (
-    <div className={cls}>
+    // id はカード間ジャンプ(レビュー対象チップ)のアンカー。
+    <div className={cls} id={`qc-${item.id}`}>
       <div className="card-head">
         <span className="card-title">{item.title}</span>
         <ScoreBadges item={item} learning={learning} />
@@ -517,6 +565,25 @@ function QueueCard({
         />
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
+        {/* つながりチップ: このカードがレビュー leaf なら、レビュー対象の実体を一語で示す。
+            対象カードがキューに見えていればクリックでジャンプ(ハイライトはスクロールで代替)。 */}
+        {item.reviewOfId &&
+          (() => {
+            const src = state.items.find((i) => i.id === item.reviewOfId);
+            return (
+              <button
+                className="badge"
+                style={{ cursor: "pointer" }}
+                title="レビュー対象のカード/実行結果へ移動"
+                onClick={() => {
+                  const el = document.getElementById(`qc-${item.reviewOfId}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+              >
+                レビュー対象: {src ? src.title.slice(0, 24) : "(削除済み)"} →
+              </button>
+            );
+          })()}
         {/* 分解の背景ジョブ進捗を静かに前面化する引っぱりナッジ (§3.3, §4)。 */}
         {item.decomposeStatus === "running" && <span className="badge">分解中…</span>}
         {item.decomposeStatus === "ready" && (
