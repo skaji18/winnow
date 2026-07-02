@@ -159,11 +159,15 @@ export async function requestExecution(
   // 項目) と、work timeout で timed_out に倒した項目の「待たず再実行」はここを通って再着火する
   // (timed_out からの再実行は新しい ipcId のジョブを立て、旧 sentinel は latestExecuteForItem が
   //  最新を返すので誤って当たらない)。
-  // 例外: succeeded かつ instruction 非空の「この方向で直す」(reExecute) は再走を許す。
-  //   reExecute は GeneralOutlet の auto-done(succeeded) 項目からしか来ないため、succeeded を
-  //   通すための専用緩和。可逆/承認ゲートは後段でそのまま効く。再走前に executionStatus を
+  // 例外: instruction 非空の「この方向で直す」(reExecute) は succeeded / awaiting_handoff の
+  //   再走を許す。succeeded は GeneralOutlet(auto-done)、awaiting_handoff は引き取り待ちカード
+  //   (PR にレビュー指摘が付いた→直させて再提示、の最頻ループ)から来る。
+  //   succeeded 経由は可逆/承認ゲートが後段でそのまま効く。再走前に executionStatus を
   //   none 相当へ戻して runExecution に進めるようにする。
-  const isReExecute = item.executionStatus === "succeeded" && instruction.trim() !== "";
+  const wantsRedo = instruction.trim() !== "";
+  const redoFromHandoff = wantsRedo && item.executionStatus === "awaiting_handoff";
+  const isReExecute =
+    wantsRedo && (item.executionStatus === "succeeded" || redoFromHandoff);
   if (
     item.executionStatus &&
     item.executionStatus !== "none" &&
@@ -174,6 +178,16 @@ export async function requestExecution(
     return item;
   if (isReExecute) {
     items.update(itemId, { executionStatus: "none" });
+    if (redoFromHandoff) {
+      // 引き取り待ちへの指示つき再走は人間の明示一手=承認と同格 (§3.4 人間が明示で押した
+      // ものは流す)。handoff 項目は不可逆/高ステークス由来が多く、ゲートを再通過させると
+      // 必ず proposed に落ちて指示が失われる(承認しても指示は渡らない)ため、approveExecution
+      // と同型に runExecution を直呼びする。外部送信の解禁も承認と同じ意味論:
+      // allowExternalSend オプトイン時のみ(手直し→再 push を再拒否ループにしない)。
+      return runExecution(itemId, instruction, {
+        externalApproved: settings.get().allowExternalSend === true,
+      });
+    }
   }
   // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution の自動着火経路
   // (キュー掃き出し・classify末尾の即時着火・在庫再適用)は manual 無しで呼ばれ、ここで
@@ -380,6 +394,10 @@ export async function runExecution(
     output: null,
     error: null,
     ipcId,
+    // 外部送信ゴーサインを job に永続化する。timed_out 後の late sentinel 回収
+    // (tryTakeInSentinel)でも handoffRequired の安全弁 (d) を発火させるため
+    // (旧実装はここで失われ、承認済み外部送信が引き取り待ちを素通りして done に沈み得た)。
+    externalApproved: opts.externalApproved === true,
   });
 
   const res = await driver.dispatch({
@@ -476,7 +494,8 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
   try {
     const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
     const out = parseJson(raw) as Partial<ExecuteOut>;
-    applyExecuteResult(job.itemId, out);
+    // job に永続化した外部送信ゴーサインを復元して渡す(handoffRequired 安全弁 (d) の発火)。
+    applyExecuteResult(job.itemId, out, { externalApproved: job.externalApproved === true });
     jobs.update(job.id, {
       status: out.status === "failed" ? "failed" : "succeeded",
       finishedAt: Date.now(),

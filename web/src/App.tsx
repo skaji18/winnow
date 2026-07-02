@@ -630,6 +630,17 @@ function QueueCard({
           {busy && <span className="spinner">実行中…</span>}
         </div>
       )}
+      {/* handoff の手直しループ: PR のレビュー指摘等を一行指示で直させ、再提示させる。
+          人間の明示一手=承認と同格でゲートを通す(外部送信の解禁は設定オプトイン時のみ)。 */}
+      {handoff && (
+        <GeneralOutlet
+          item={item}
+          run={run}
+          busy={busy}
+          output={splitOutput || item.executionResult || ""}
+          placeholder="直す方向を一行で指示(例: レビュー指摘の◯◯を修正して再push)"
+        />
+      )}
 
       {/* 着手中: 自分で引き取って作業中。完了/手放すで閉じる(ボード不要の完了導線)。 */}
       {inProgress && (
@@ -898,16 +909,20 @@ function undoLabelText(action: string): string {
 }
 
 // general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
+// handoff(引き取り待ち)カードにも流用する: PR にレビュー指摘が付いた→指示を添えて直させる、の
+// 最頻ループ (placeholder だけ差し替え)。
 function GeneralOutlet({
   item,
   run,
   busy,
   output,
+  placeholder,
 }: {
   item: QueueItem;
   run: (fn: () => Promise<unknown>, doneMsg?: string) => Promise<void>;
   busy: boolean;
   output: string;
+  placeholder?: string;
 }) {
   const live = useLive();
   const [instruction, setInstruction] = useState("");
@@ -924,7 +939,7 @@ function GeneralOutlet({
       </button>
       <input
         type="text"
-        placeholder="直す方向を一行で指示(例: もっと簡潔に / 表形式で)"
+        placeholder={placeholder ?? "直す方向を一行で指示(例: もっと簡潔に / 表形式で)"}
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         style={{ flex: 1, minWidth: 180 }}
