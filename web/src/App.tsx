@@ -679,6 +679,27 @@ function QueueCard({
           ) : (
             // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3)。
             <>
+              {/* 環境不全で自動分類に失敗した escalate (envEscalated): AI にもう一度分類させる
+                  ワンタップ復旧。成功すれば classifier が envEscalated を下ろしバッジごと消える。
+                  再失敗は成功と紛れないようエラー文言で返す(黙って成功を装わない)。 */}
+              {item.envEscalated && (
+                <>
+                  <span className="badge disp-human">分類失敗</span>
+                  <button
+                    disabled={busy}
+                    title="環境不全で自動分類に失敗しています。環境が直っていれば、AIにもう一度分類させます"
+                    onClick={() =>
+                      run(async () => {
+                        const updated = await api.classify(item.id);
+                        if (updated.envEscalated)
+                          throw new Error("分類が再び失敗しました。環境を確認してください");
+                      }, "AIが分類し直しました")
+                    }
+                  >
+                    AIに分類し直させる
+                  </button>
+                </>
+              )}
               {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
               <button
                 className="primary"
