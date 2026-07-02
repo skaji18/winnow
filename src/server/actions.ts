@@ -3,6 +3,7 @@ import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
+import { UNDOABLE } from "./queue.js";
 import { categoryStats, items, labels, rules } from "./repo.js";
 import { confBinOf } from "./text.js";
 
@@ -349,6 +350,11 @@ export function undoLastLabel(itemId: string): Item | null {
   if (!item) return null;
   const ev = labels.lastForItem(itemId);
   if (!ev) return item;
+  // 逆適用が定義された UNDOABLE(queue.ts と単一の真実源)だけ扱う。非対象(approve/audit_*/
+  // demote/escalate_category 等)は label を消さず no-op で返す。旧実装は switch の外の
+  // deleteById が無条件に走り、「no-op のはず」の直近ラベル(人間判断の痕跡=受領・承認・
+  // 監査結果)を巻き戻し無しで削除して較正・週次集計を歪めていた。
+  if (!UNDOABLE.has(ev.action)) return item;
 
   const confBin = confBinOf(item.rawConfidence ?? item.confidence);
   const rawDisp = item.rawDisposition ?? ev.fromDisposition ?? item.disposition;
@@ -377,11 +383,22 @@ export function undoLastLabel(itemId: string): Item | null {
     }
     case "send_back": {
       // send_back: kind=leaf→node, disposition=from→escalate に倒し(auto のとき overturned を積んだ)。
-      // 逆適用は降格部分だけ戻す: kind→leaf, disposition→from, status→classified。実行後 send_back で
+      // 逆適用は降格部分だけ戻す: kind→leaf, disposition→from。実行後 send_back で
       // 合成された cancel(巻き戻し提示)は戻さない(winnow は巻き戻しを能動実行しない §4-4)。
+      //
+      // 復元先は note の決定論マーカー(着手前/後)で分ける。着手後(実行成功済みだった)を
+      // classified+none に戻すと掃き出しループが成功済みタスクを黙って自動再実行する
+      // (二重実行・二重副作用)。succeeded/done+autoExecuted に復元して autoDone カード
+      // (取消ハンドル)へ戻す。awaiting_handoff まで戻さない=採用系の面は改めて人間が判断する。
       patch.kind = "leaf";
       if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
-      patch.status = "classified";
+      if (ev.note === "送り返し(着手後)") {
+        patch.status = "done";
+        patch.executionStatus = "succeeded";
+        patch.autoExecuted = true;
+      } else {
+        patch.status = "classified";
+      }
       patch.humanOverrode = false;
       // 母数の unbump は「この send_back が積んだ分」だけ。ev 以外に send_back が残っていれば
       // この ev は2回目以降=母数に積んでいないので unbump しない(record 側のループ防止と対称)。

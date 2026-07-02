@@ -596,6 +596,33 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   return { recovered, failedOver };
 }
 
+/**
+ * pauseAuto 解除時の再投入 (routes の設定 PATCH が true→false 遷移で呼ぶ)。
+ * pause 中に proposed へ倒れた自動項目(disposition=auto・未実行 leaf)を requestExecution へ
+ * 流し直す。全ゲート(pauseAuto/可逆/高ステークス/上流/横断)を通り直すので、元々不可逆ゲートで
+ * proposed だった項目は再び proposed に落ちるだけ=安全側・冪等。旧実装は文言が「再開するか、
+ * そのままワンタップで実行」と再開での復帰を示唆しながら復帰処理が無く、pause 中に流入した
+ * 件数ぶん人間が N 回のワンタップを強いられた。一括承認は作らない(承認は1件ずつの判断=
+ * アテンション配給の本体。ここで再投入するのは人間がまだ判断していない自動着火の続きだけ)。
+ */
+export function resumePausedAuto(): number {
+  let resumed = 0;
+  for (const it of items.all()) {
+    if (
+      it.executionStatus === "proposed" &&
+      !it.autoExecuted &&
+      it.kind === "leaf" &&
+      it.disposition === "auto" &&
+      it.status !== "rejected"
+    ) {
+      items.update(it.id, { executionStatus: "none" });
+      void requestExecution(it.id).catch(() => {});
+      resumed++;
+    }
+  }
+  return resumed;
+}
+
 export async function approveExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
