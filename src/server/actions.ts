@@ -203,15 +203,22 @@ export async function approve(itemId: string): Promise<Item | null> {
 }
 
 /**
- * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用して完了へ進める。
- * 人間が成果物に責任を引き取った痕跡を label_event に残す(receive)。採用(マージ/送信)自体は
- * winnow がやらない=人間が外で行う。較正母数(recordOutcome)には積まない: 引き取りは
- * 「分類が正しかったか」の信号ではなく「成果物を受領したか」の儀式/レビューだから(過剰計上を避ける)。
+ * 受領 (receive) — 成功の終端 (§3.5 継ぎ目 / §4-4)。handoff の受領と autoDone の
+ * 「確認して畳む」を同じ一手にする。人間が成果物に責任を引き取った/確認した痕跡を
+ * label_event に残す(receive)。採用(マージ/送信)自体は winnow がやらない=人間が外で行う。
+ * 較正母数(recordOutcome)には積まない: 受領は「分類が正しかったか」の信号ではなく
+ * 「成果物を受領したか」の儀式/レビューだから(過剰計上を避ける)。緩め信号も作らない(§3.6-3)。
+ * note は Undo の逆適用先の判別に使う(send_back の着手前/後と同じ決定論マーカー方式)。
  */
 export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
-  labels.record({ itemId, action: "receive", category: item.category });
+  labels.record({
+    itemId,
+    action: "receive",
+    category: item.category,
+    note: item.executionStatus === "awaiting_handoff" ? "受領(引き取り)" : "確認して畳む",
+  });
   return executor.acceptHandoff(itemId);
 }
 
@@ -230,6 +237,12 @@ function recordAudit(item: Item, ok: boolean, to: Disposition = "escalate"): Par
   if (ok) {
     labels.record({ itemId: item.id, action: "audit_ok", fromDisposition: "auto", category: item.category });
     recordOutcome(item.category, "auto", "auto", { confBin });
+    // 一手二役: 実行済み監査サンプルの「妥当だった」は監査簿記 + 受領(畳み)を同時に出す。
+    // 別々に2タップさせない(§4-1 追加労力ゼロ)。未実行の監査サンプル(classified 段の確認)は
+    // 受領の対象ではないので receivedAt を立てない。
+    if (item.executionStatus === "succeeded") {
+      return { auditSampled: false, receivedAt: Date.now() };
+    }
     return { auditSampled: false };
   }
   labels.record({
@@ -354,6 +367,18 @@ export function undoLastLabel(itemId: string): Item | null {
         .some((e) => e.id !== ev.id && e.action === "send_back");
       if (!otherSendBack && ev.fromDisposition === "auto" && ev.category && rawDisp === "auto") {
         categoryStats.unbump(ev.category, "auto", "overturned", confBin);
+      }
+      break;
+    }
+    case "receive": {
+      // receive: receivedAt を立てて畳んだ(較正簿記なし=巻き戻す bump もない)。
+      // note の決定論マーカーで逆適用先を分ける (send_back の着手前/後と同じ方式):
+      //  - 受領(引き取り): awaiting_handoff → succeeded/done に進めた → 引き取り待ちへ戻す。
+      //  - 確認して畳む: receivedAt のみ → 下ろすだけで autoDone カードが再可視化される。
+      patch.receivedAt = null;
+      if (ev.note === "受領(引き取り)") {
+        patch.executionStatus = "awaiting_handoff";
+        patch.status = "review";
       }
       break;
     }

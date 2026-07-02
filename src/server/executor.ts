@@ -524,18 +524,31 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
 }
 
 /**
- * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用し、完了へ進める。
+ * 受領 (receive) の一般化 (§3.5 継ぎ目 / §4-4)。「成功の終端遷移」を一手に担う:
+ *  (a) awaiting_handoff: 成果物を人間が確認/採用 → succeeded/done + receivedAt。
+ *  (b) autoDone (autoExecuted && succeeded && 未受領): 「確認して畳む」→ receivedAt のみ。
+ *      queue の取消ハンドル可視条件 (queue.ts) が receivedAt で畳む。取消(cancel)は
+ *      バックログ/ツリーから引き続き可能=可視の場所が変わるだけで手は残る。
  * winnow は採用(マージ/送信)自体は実行しない=人間が外で採用したことの記録＝状態遷移のみ
  * (DECISIONS: winnow は外部副作用を能動的にやらない。PR作成=可逆な提示、マージ=不可逆な採用の非対称)。
- * awaiting_handoff 以外は no-op(冪等)。
+ * recordOutcome は呼ばない(受領は分類正誤の信号ではない=較正母数を汚さない)。
+ * 該当しない状態は no-op(冪等)。executionResult への文字列追記はしない
+ * (summary\n\noutput の後方互換連結を汚さない=表示連結の純度を保つ)。
  */
 export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
-  if (item.executionStatus !== "awaiting_handoff") return item;
-  // 受領済みは状態(executionStatus/status)と label_event 'receive' で表現する。executionResult への
-  // 文字列追記はしない(summary\n\noutput の後方互換連結を汚さない=表示連結の純度を保つ)。
-  return items.update(itemId, { executionStatus: "succeeded", status: "done" });
+  if (item.executionStatus === "awaiting_handoff") {
+    return items.update(itemId, {
+      executionStatus: "succeeded",
+      status: "done",
+      receivedAt: Date.now(),
+    });
+  }
+  if (item.autoExecuted && item.executionStatus === "succeeded" && item.receivedAt == null) {
+    return items.update(itemId, { receivedAt: Date.now() });
+  }
+  return item;
 }
 
 /**

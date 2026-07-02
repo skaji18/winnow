@@ -212,6 +212,8 @@ export interface WeeklySummary {
   auditBad: number;
   // 問いに戻した件数 (send_back §2.1)。
   sentBack: number;
+  // 受領件数 (receive)。サーバ未提供時 undefined。
+  received?: number;
   stale: number;
   failed: number;
   // 要棚卸し件数 (server summary.ts と整合)。

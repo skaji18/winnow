@@ -794,11 +794,24 @@ function QueueCard({
           {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
           {item.isAudit && (
             <button
+              className="primary"
               disabled={busy}
-              title="この自動処理は妥当だった、と確認する(分類器への正のフィードバック)"
-              onClick={() => run(() => api.audit(item.id, true), "妥当だったと確認しました")}
+              title="この自動処理は妥当だった、と確認する(分類器への正のフィードバック)。確認した実行はキューから畳まれます"
+              onClick={() => run(() => api.audit(item.id, true), "妥当だったと確認し、畳みました")}
             >
               妥当だった（確認OK）
+            </button>
+          )}
+          {/* 成功の終端: 確認して畳む(receive)。監査サンプルは上の『妥当だった』が一手二役で
+              畳むので二重に出さない。取消はバックログ/ツリーから引き続き可能。 */}
+          {!item.isAudit && (
+            <button
+              className="primary"
+              disabled={busy}
+              title="実行結果を確認した。問題ないので畳む(取り消しはバックログ/ツリーからいつでも可能)"
+              onClick={() => run(() => api.accept(item.id), "確認して畳みました")}
+            >
+              確認して畳む
             </button>
           )}
           <button
@@ -862,6 +875,8 @@ function undoLabelText(action: string): string {
       return "分類し直し";
     case "mute_category":
       return "この種類を自動化";
+    case "receive":
+      return "受領・畳み";
     default:
       return action;
   }

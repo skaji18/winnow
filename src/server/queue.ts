@@ -28,13 +28,16 @@ export interface QueueItem extends Item {
 }
 
 // Undo で戻せる(逆適用が定義されている)アクションだけを undoableLabel として出す。
-const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
+// actions.ts undoLastLabel と単一の真実源 (非対象 action は label を消さず no-op)。
+export const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
   "do",
   "reject",
   "send_back",
   "reclassify",
   "override",
   "mute_category",
+  // receive(受領/確認して畳む)の逆適用 = receivedAt を下ろして再可視化 (§4-4)。
+  "receive",
 ]);
 
 const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -0.4 };
@@ -151,7 +154,10 @@ export function queue(): QueueItem[] {
     //      status='review' なので下の classified/done フィルタには拾われない。明示で出す。
     if (it.executionStatus === "awaiting_handoff") return true;
     // 2) 自動実行が成功した分は §4-4「安く取り消せる」取消ハンドルとしてキューに残す。
-    if (it.autoExecuted && it.executionStatus === "succeeded") return true;
+    //    ただし人間が受領(確認して畳む/監査OK/handoff受領)したら畳む=成功の終端遷移。
+    //    取消ハンドル自体はバックログ/ツリーから引き続き届く(可視の場所が変わるだけ)。
+    if (it.autoExecuted && it.executionStatus === "succeeded" && it.receivedAt == null)
+      return true;
     // 3) 【最優先】止まった項目の再浮上: 実行失敗・タイムアウト超過・人手保留は必ず出す
     //    (cancelled は 1) で除外済み)。timed_out は失敗確定ではないが、人間が待たず再実行/却下
     //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
