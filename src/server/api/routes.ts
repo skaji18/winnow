@@ -178,6 +178,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (v.escalate) return reply.code(400).send({ error: v.reason ?? "invalid projectDir" });
       patch.projectDir = v.dir;
     }
+    // 引き取り待ちへの「完了」指定(Kanban DnD / 一覧の status セレクト)は受領(receive)の意味。
+    // 生 PATCH で status=done だけ書くと status=done × executionStatus=awaiting_handoff という
+    // 修復不能な不整合(キュー/引き取り待ちKに残り続ける)を作るため、acceptHandoff に
+    // ルーティングして receive ラベルも正規に残す。他フィールドの更新は先に適用する。
+    if (patch.status === "done" && cur.executionStatus === "awaiting_handoff") {
+      const { status: _status, ...rest } = patch;
+      if (Object.keys(rest).length) items.update(id, rest);
+      return actions.acceptHandoff(id);
+    }
     return items.update(id, patch);
   });
 
@@ -400,8 +409,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: `disallowed command tokens in ${key}` });
       }
     }
+    // pauseAuto の true→false 遷移で、pause 中に proposed へ倒れた自動項目を再投入する
+    // (全ゲート再通過=安全側。文言「再開するか」と実装の食い違いを解消)。遷移時のみ発火し、
+    // false→false の再送でゲート待ち項目の executionResult/updatedAt を無駄に洗い替えない。
+    const wasPaused = settings.get().pauseAuto;
     const updated = settings.update(patch);
     if (patch.useHeadless !== undefined) resetDriver(); // ドライバ選択をやり直す
+    if (wasPaused && patch.pauseAuto === false) {
+      background(async () => {
+        executor.resumePausedAuto();
+      });
+    }
     return updated;
   });
 

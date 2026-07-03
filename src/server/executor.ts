@@ -5,7 +5,7 @@ import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
 import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
-import { buildContextBlock } from "./context.js";
+import { buildContextBlock, redactSecrets } from "./context.js";
 import { extractLearning } from "./learning.js";
 import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
@@ -68,20 +68,34 @@ function uncertainNodeOrUpstreamPending(item: Item): boolean {
   if (parent.uncertaintyResolved === false) return true;
   if (parent.status === "blocked") return true;
   // (c) 同一親×上流(orderIndex 小)に未完の兄弟がいる。
-  return items.children(item.parentId).some(
-    (o) =>
-      o.id !== item.id &&
-      o.orderIndex < item.orderIndex &&
-      o.status !== "done" &&
-      o.status !== "rejected" &&
-      o.executionStatus !== "succeeded" &&
-      o.executionStatus !== "cancelled" &&
-      // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
-      o.executionStatus !== "awaiting_handoff",
+  return items.children(item.parentId).some((o) => isPendingUpstreamSibling(item, o));
+}
+
+/**
+ * 「未完の上流兄弟」判定 (uncertainNodeOrUpstreamPending (c) と uncertainGateReason の
+ * 単一の真実源=両者のドリフト防止)。レビュー leaf (reviewOfId 非null) は観察タスクであって
+ * 下流の前提物ではないので「上流」と数えない — 未処分のレビューが後続兄弟の自動着火を
+ * 黙って塞ぐ穴を閉じる (§3.5 レビューは継ぎ目に乗るがパイプラインを堰き止めない)。
+ */
+function isPendingUpstreamSibling(item: Item, o: Item): boolean {
+  return (
+    o.id !== item.id &&
+    o.reviewOfId == null &&
+    o.orderIndex < item.orderIndex &&
+    o.status !== "done" &&
+    o.status !== "rejected" &&
+    o.executionStatus !== "succeeded" &&
+    o.executionStatus !== "cancelled" &&
+    // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
+    o.executionStatus !== "awaiting_handoff"
   );
 }
 
-/** 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。 */
+/**
+ * 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。
+ * 上流完了待ちは「どの兄弟が塞いでいるか」を実名で出す (§4-2 理由はグランス可能に —
+ * 旧文言は原因タスクを特定できず、承認待ちの理由が glance 不能だった)。
+ */
 function uncertainGateReason(item: Item): string {
   if (item.parentId) {
     const parent = items.get(item.parentId);
@@ -90,6 +104,11 @@ function uncertainGateReason(item: Item): string {
         return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
       if (parent.status === "blocked") return "親が保留(blocked)中です。＝親解除待ち";
     }
+    const blocker = items
+      .children(item.parentId)
+      .find((o) => isPendingUpstreamSibling(item, o));
+    if (blocker)
+      return `上流「${blocker.title.slice(0, 40)}」が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)`;
   }
   return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
 }
@@ -149,11 +168,15 @@ export async function requestExecution(
   // 項目) と、work timeout で timed_out に倒した項目の「待たず再実行」はここを通って再着火する
   // (timed_out からの再実行は新しい ipcId のジョブを立て、旧 sentinel は latestExecuteForItem が
   //  最新を返すので誤って当たらない)。
-  // 例外: succeeded かつ instruction 非空の「この方向で直す」(reExecute) は再走を許す。
-  //   reExecute は GeneralOutlet の auto-done(succeeded) 項目からしか来ないため、succeeded を
-  //   通すための専用緩和。可逆/承認ゲートは後段でそのまま効く。再走前に executionStatus を
+  // 例外: instruction 非空の「この方向で直す」(reExecute) は succeeded / awaiting_handoff の
+  //   再走を許す。succeeded は GeneralOutlet(auto-done)、awaiting_handoff は引き取り待ちカード
+  //   (PR にレビュー指摘が付いた→直させて再提示、の最頻ループ)から来る。
+  //   succeeded 経由は可逆/承認ゲートが後段でそのまま効く。再走前に executionStatus を
   //   none 相当へ戻して runExecution に進めるようにする。
-  const isReExecute = item.executionStatus === "succeeded" && instruction.trim() !== "";
+  const wantsRedo = instruction.trim() !== "";
+  const redoFromHandoff = wantsRedo && item.executionStatus === "awaiting_handoff";
+  const isReExecute =
+    wantsRedo && (item.executionStatus === "succeeded" || redoFromHandoff);
   if (
     item.executionStatus &&
     item.executionStatus !== "none" &&
@@ -164,6 +187,16 @@ export async function requestExecution(
     return item;
   if (isReExecute) {
     items.update(itemId, { executionStatus: "none" });
+    if (redoFromHandoff) {
+      // 引き取り待ちへの指示つき再走は人間の明示一手=承認と同格 (§3.4 人間が明示で押した
+      // ものは流す)。handoff 項目は不可逆/高ステークス由来が多く、ゲートを再通過させると
+      // 必ず proposed に落ちて指示が失われる(承認しても指示は渡らない)ため、approveExecution
+      // と同型に runExecution を直呼びする。外部送信の解禁も承認と同じ意味論:
+      // allowExternalSend オプトイン時のみ(手直し→再 push を再拒否ループにしない)。
+      return runExecution(itemId, instruction, {
+        externalApproved: settings.get().allowExternalSend === true,
+      });
+    }
   }
   // pauseAuto: 自動経路のみ抑止 (§3.6-3 の手動版)。requestExecution の自動着火経路
   // (キュー掃き出し・classify末尾の即時着火・在庫再適用)は manual 無しで呼ばれ、ここで
@@ -271,7 +304,21 @@ function applyExecuteResult(
   if (updated) extractLearning(updated, out.learning);
 
   // レビューをパイプラインに戻す (§3.5). 継ぎ目=チェックポイントが実装ポイント。
-  if (out.reviewTask && out.reviewTask.trim()) {
+  // 構造リンク(reviewOfId)+案件継承つきで生成し、決定論ガード3つで暴走を塞ぐ:
+  //  (1) 成功時のみ: needs_human は proposed=人間が見る / failed は再浮上する
+  //      =レビューすべき成果物が無い(旧実装は失敗時も生成する穴があった)。
+  //  (2) 深さ1固定: レビュー leaf 自身の実行からは新レビューを作らない
+  //      (「レビュー: レビュー: …」の再帰連鎖の構造的停止)。
+  //  (3) 同一対象の未決レビューが居れば新設しない(reExecute 反復での増殖防止)。
+  if (
+    succeeded &&
+    out.reviewTask &&
+    out.reviewTask.trim() &&
+    item.reviewOfId == null &&
+    !items
+      .all()
+      .some((o) => o.reviewOfId === item.id && o.status !== "done" && o.status !== "rejected")
+  ) {
     items.create({
       title: `レビュー: ${out.reviewTask.trim()}`,
       body: `自動実行「${item.title}」の結果レビュー。`,
@@ -280,6 +327,11 @@ function applyExecuteResult(
       parentId: item.parentId,
       domain: item.domain,
       projectDir: item.projectDir,
+      // 案件/スプリントもサブツリーに継承する (decomposer.applyOption と対称)。
+      // 継承しないとレビューだけ案件レーンの「未所属(Inbox)」に迷子になる。
+      projectId: item.projectId,
+      sprintId: item.sprintId,
+      reviewOfId: item.id,
     });
   }
   return updated;
@@ -312,6 +364,29 @@ export async function runExecution(
     }
   }
 
+  // レビュー leaf: レビュー対象(reviewOfId 先)の実行結果を材料として組む (§3.5)。
+  // 旧実装は材料ゼロ(タイトル文字列のみ)で、general の worker は見るものが無かった。
+  // worker 自己申告由来のテキストなので信頼境界は fenceBody(観察対象データ)側に置き
+  // (executePrompt がそう注入する)、redactSecrets の最終ゲートもここで通す。
+  let reviewMaterial = "";
+  if (item.reviewOfId) {
+    const src = items.get(item.reviewOfId);
+    if (src) {
+      const art = (src.artifacts ?? "").trim();
+      reviewMaterial = redactSecrets(
+        [
+          `レビュー対象タスク: ${src.title}`,
+          src.executionSummary ? `実行サマリ: ${src.executionSummary}` : "",
+          src.executionOutput ? `実行成果物:\n${src.executionOutput}` : "",
+          art && art !== "[]" ? `外部成果物(artifacts): ${art}` : "",
+          src.rollbackPlan ? `巻き戻し手順(worker申告):\n${src.rollbackPlan}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      );
+    }
+  }
+
   items.update(itemId, { executionStatus: "running", status: "in_progress" });
   const driver = await ensureDriver();
   // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
@@ -328,13 +403,23 @@ export async function runExecution(
     output: null,
     error: null,
     ipcId,
+    // 外部送信ゴーサインを job に永続化する。timed_out 後の late sentinel 回収
+    // (tryTakeInSentinel)でも handoffRequired の安全弁 (d) を発火させるため
+    // (旧実装はここで失われ、承認済み外部送信が引き取り待ちを素通りして done に沈み得た)。
+    externalApproved: opts.externalApproved === true,
   });
 
   const res = await driver.dispatch({
     id: ipcId,
     role: "worker",
     label: `実行: ${item.title.slice(0, 30)}`,
-    prompt: executePrompt(item, buildContextBlock(item), instruction, opts.externalApproved === true),
+    prompt: executePrompt(
+      item,
+      buildContextBlock(item),
+      instruction,
+      opts.externalApproved === true,
+      reviewMaterial,
+    ),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
     timeoutMs: settings.get().executeTimeoutMs || 600_000,
@@ -418,7 +503,8 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
   try {
     const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
     const out = parseJson(raw) as Partial<ExecuteOut>;
-    applyExecuteResult(job.itemId, out);
+    // job に永続化した外部送信ゴーサインを復元して渡す(handoffRequired 安全弁 (d) の発火)。
+    applyExecuteResult(job.itemId, out, { externalApproved: job.externalApproved === true });
     jobs.update(job.id, {
       status: out.status === "failed" ? "failed" : "succeeded",
       finishedAt: Date.now(),
@@ -436,9 +522,11 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
  *   - sentinel が現れていれば applyExecuteResult で succeeded/awaiting_handoff/done へ昇格 (recovered)。
  *   - 現れないまま timedOutGraceMs を超過したら failed へ落として再浮上させる (agedOut。中間状態に
  *     永久滞留させない)。
- * /api/state の sweep から背景発火する(AI 非起動の read-only 処理)。手動で再実行/却下された item は
- * executionStatus が timed_out でなくなり自然に対象外=回収と競合しない(新しい実行の ipcId が別なので
+ * /api/state の sweep から背景発火する(AI 非起動の read-only 処理)。手動で再実行された item は
+ * executionStatus が timed_out でなくなり自然に対象外(新しい実行の ipcId が別なので
  * 古い sentinel を誤って当てることもない: latestExecuteForItem が常に最新ジョブを返す)。
+ * 却下(reject)は status='rejected' のみで executionStatus は timed_out のまま残るため、
+ * ここで明示に skip する=人間の処分を sweep が黙って上書きしない(queue 側も rejected を畳む)。
  */
 export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   let recovered = 0;
@@ -446,6 +534,10 @@ export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   const graceMs = settings.get().timedOutGraceMs || 1_800_000;
   for (const it of items.all()) {
     if (it.executionStatus !== "timed_out") continue;
+    // 人間が却下済み: 回収も期限切れ倒しもしない(人間の処分が勝つ)。job は runExecution が
+    // 既に failed で閉じている。late sentinel が残っても取り込まない(undo で classified に
+    // 戻れば timed_out として再び対象になり、そこで回収される=成果は失われない)。
+    if (it.status === "rejected") continue;
     const job = jobs.latestExecuteForItem(it.id);
     if (job && tryTakeInSentinel(job)) {
       recovered++;
@@ -485,8 +577,9 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   const stranded = jobs.runningExecuteJobs();
   for (const job of stranded) {
     const item = items.get(job.itemId);
-    // item が無い / 既に running 以外で決着済みなら job だけ決着させて skip。
-    if (!item || item.executionStatus !== "running") {
+    // item が無い / 既に running 以外で決着済み / 人間が却下済み なら job だけ決着させて skip
+    // (rejected の上書き禁止は sweepLateExecutions と対称)。
+    if (!item || item.executionStatus !== "running" || item.status === "rejected") {
       jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
       continue;
     }
@@ -512,6 +605,33 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   return { recovered, failedOver };
 }
 
+/**
+ * pauseAuto 解除時の再投入 (routes の設定 PATCH が true→false 遷移で呼ぶ)。
+ * pause 中に proposed へ倒れた自動項目(disposition=auto・未実行 leaf)を requestExecution へ
+ * 流し直す。全ゲート(pauseAuto/可逆/高ステークス/上流/横断)を通り直すので、元々不可逆ゲートで
+ * proposed だった項目は再び proposed に落ちるだけ=安全側・冪等。旧実装は文言が「再開するか、
+ * そのままワンタップで実行」と再開での復帰を示唆しながら復帰処理が無く、pause 中に流入した
+ * 件数ぶん人間が N 回のワンタップを強いられた。一括承認は作らない(承認は1件ずつの判断=
+ * アテンション配給の本体。ここで再投入するのは人間がまだ判断していない自動着火の続きだけ)。
+ */
+export function resumePausedAuto(): number {
+  let resumed = 0;
+  for (const it of items.all()) {
+    if (
+      it.executionStatus === "proposed" &&
+      !it.autoExecuted &&
+      it.kind === "leaf" &&
+      it.disposition === "auto" &&
+      it.status !== "rejected"
+    ) {
+      items.update(it.id, { executionStatus: "none" });
+      void requestExecution(it.id).catch(() => {});
+      resumed++;
+    }
+  }
+  return resumed;
+}
+
 export async function approveExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
@@ -524,18 +644,31 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
 }
 
 /**
- * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用し、完了へ進める。
+ * 受領 (receive) の一般化 (§3.5 継ぎ目 / §4-4)。「成功の終端遷移」を一手に担う:
+ *  (a) awaiting_handoff: 成果物を人間が確認/採用 → succeeded/done + receivedAt。
+ *  (b) autoDone (autoExecuted && succeeded && 未受領): 「確認して畳む」→ receivedAt のみ。
+ *      queue の取消ハンドル可視条件 (queue.ts) が receivedAt で畳む。取消(cancel)は
+ *      バックログ/ツリーから引き続き可能=可視の場所が変わるだけで手は残る。
  * winnow は採用(マージ/送信)自体は実行しない=人間が外で採用したことの記録＝状態遷移のみ
  * (DECISIONS: winnow は外部副作用を能動的にやらない。PR作成=可逆な提示、マージ=不可逆な採用の非対称)。
- * awaiting_handoff 以外は no-op(冪等)。
+ * recordOutcome は呼ばない(受領は分類正誤の信号ではない=較正母数を汚さない)。
+ * 該当しない状態は no-op(冪等)。executionResult への文字列追記はしない
+ * (summary\n\noutput の後方互換連結を汚さない=表示連結の純度を保つ)。
  */
 export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
-  if (item.executionStatus !== "awaiting_handoff") return item;
-  // 受領済みは状態(executionStatus/status)と label_event 'receive' で表現する。executionResult への
-  // 文字列追記はしない(summary\n\noutput の後方互換連結を汚さない=表示連結の純度を保つ)。
-  return items.update(itemId, { executionStatus: "succeeded", status: "done" });
+  if (item.executionStatus === "awaiting_handoff") {
+    return items.update(itemId, {
+      executionStatus: "succeeded",
+      status: "done",
+      receivedAt: Date.now(),
+    });
+  }
+  if (item.autoExecuted && item.executionStatus === "succeeded" && item.receivedAt == null) {
+    return items.update(itemId, { receivedAt: Date.now() });
+  }
+  return item;
 }
 
 /**
@@ -551,6 +684,25 @@ export async function cancelExecution(itemId: string): Promise<Item | null> {
   if (!item) return null;
   // 冪等: 既に cancelled なら再発火しない (多重 POST /cancel で audit_bad を二重計上しない)。
   if (item.executionStatus === "cancelled") return item;
+
+  // 未実行 proposed の「提案を取り消す」= 実行の取り消しではなく提案の却下。cancelled
+  // (実行済みの取り消し専用・undo 不能の終端)に倒さず、reject の正規路(label あり=
+  // 『さばきを戻す』で復元可能)へ流す (§4-4 誤タップから安く戻れる)。autoExecuted=true の
+  // proposed(needs_human 往復後)も worker は副作用ゼロの契約なので同じ扱いでよい。
+  if (item.executionStatus === "proposed") {
+    labels.record({
+      itemId,
+      action: "reject",
+      fromDisposition: item.disposition,
+      category: item.category,
+      note: "提案の取り消し",
+    });
+    return items.update(itemId, {
+      executionStatus: "none",
+      status: "rejected",
+      executionResult: "実行提案を取り消しました(実行はされていません)。",
+    });
+  }
 
   // (1) 巻き戻し手順の提示 (自動実行しない=人間ワンタップ)。
   const note = item.rollbackPlan

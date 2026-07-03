@@ -199,7 +199,8 @@ function ProjectLanes({
 }: {
   cards: QueueItem[];
   state: AppState;
-  renderCard: (q: QueueItem) => JSX.Element;
+  // null = 束ね描画で対象カード側に吸収済み(スキップ)。
+  renderCard: (q: QueueItem) => JSX.Element | null;
 }) {
   const groups = new Map<string, QueueItem[]>();
   for (const q of cards) {
@@ -385,16 +386,62 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
           {/* さばく場(キュー)。仕分けと処分を行う面。flat=現行 / project=案件レーン。 */}
           {(() => {
             const queueCards = visible.filter((q) => q.lane !== "in_progress");
-            const renderCard = (q: QueueItem) => (
-              <QueueCard
-                key={q.id}
-                item={q}
-                state={state}
-                learning={learning}
-                onChange={onChange}
-                onDecompose={() => setDecomposeForId(q.id)}
-              />
+            // 束ね描画: レビュー leaf(reviewOfId)が対象カードと同時にキューに見えるとき、
+            // 対象カードの直下にネスト描画する。並びはサーバ score 順の配列が唯一の真実のまま
+            // (束の位置=対象カードの位置。client は隣接描画のみで並べ替えない)。対象が
+            // キューに居ない(畳み済み等)レビューは従来どおり単独カードで出る。
+            const visibleIds = new Set(queueCards.map((q) => q.id));
+            const reviewsOf = new Map<string, QueueItem[]>();
+            for (const q of queueCards) {
+              if (q.reviewOfId && visibleIds.has(q.reviewOfId)) {
+                const arr = reviewsOf.get(q.reviewOfId) ?? [];
+                arr.push(q);
+                reviewsOf.set(q.reviewOfId, arr);
+              }
+            }
+            const bundledIds = new Set(
+              [...reviewsOf.values()].flat().map((q) => q.id),
             );
+            const renderCard = (q: QueueItem) => {
+              if (bundledIds.has(q.id)) return null; // 対象カード側の束で描画済み
+              const card = (
+                <QueueCard
+                  item={q}
+                  state={state}
+                  learning={learning}
+                  onChange={onChange}
+                  onDecompose={() => setDecomposeForId(q.id)}
+                />
+              );
+              const reviews = reviewsOf.get(q.id) ?? [];
+              if (reviews.length === 0) return <div key={q.id}>{card}</div>;
+              return (
+                <div key={q.id}>
+                  {card}
+                  <div
+                    style={{
+                      marginLeft: 18,
+                      paddingLeft: 10,
+                      borderLeft: "2px solid rgba(128,128,128,0.35)",
+                    }}
+                  >
+                    <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
+                      └ この実行結果のレビュー
+                    </div>
+                    {reviews.map((r) => (
+                      <QueueCard
+                        key={r.id}
+                        item={r}
+                        state={state}
+                        learning={learning}
+                        onChange={onChange}
+                        onDecompose={() => setDecomposeForId(r.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            };
             if (groupBy === "project") {
               return <ProjectLanes cards={queueCards} state={state} renderCard={renderCard} />;
             }
@@ -503,7 +550,8 @@ function QueueCard({
   })();
 
   return (
-    <div className={cls}>
+    // id はカード間ジャンプ(レビュー対象チップ)のアンカー。
+    <div className={cls} id={`qc-${item.id}`}>
       <div className="card-head">
         <span className="card-title">{item.title}</span>
         <ScoreBadges item={item} learning={learning} />
@@ -517,6 +565,25 @@ function QueueCard({
         />
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
+        {/* つながりチップ: このカードがレビュー leaf なら、レビュー対象の実体を一語で示す。
+            対象カードがキューに見えていればクリックでジャンプ(ハイライトはスクロールで代替)。 */}
+        {item.reviewOfId &&
+          (() => {
+            const src = state.items.find((i) => i.id === item.reviewOfId);
+            return (
+              <button
+                className="badge"
+                style={{ cursor: "pointer" }}
+                title="レビュー対象のカード/実行結果へ移動"
+                onClick={() => {
+                  const el = document.getElementById(`qc-${item.reviewOfId}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+              >
+                レビュー対象: {src ? src.title.slice(0, 24) : "(削除済み)"} →
+              </button>
+            );
+          })()}
         {/* 分解の背景ジョブ進捗を静かに前面化する引っぱりナッジ (§3.3, §4)。 */}
         {item.decomposeStatus === "running" && <span className="badge">分解中…</span>}
         {item.decomposeStatus === "ready" && (
@@ -630,6 +697,17 @@ function QueueCard({
           {busy && <span className="spinner">実行中…</span>}
         </div>
       )}
+      {/* handoff の手直しループ: PR のレビュー指摘等を一行指示で直させ、再提示させる。
+          人間の明示一手=承認と同格でゲートを通す(外部送信の解禁は設定オプトイン時のみ)。 */}
+      {handoff && (
+        <GeneralOutlet
+          item={item}
+          run={run}
+          busy={busy}
+          output={splitOutput || item.executionResult || ""}
+          placeholder="直す方向を一行で指示(例: レビュー指摘の◯◯を修正して再push)"
+        />
+      )}
 
       {/* 着手中: 自分で引き取って作業中。完了/手放すで閉じる(ボード不要の完了導線)。 */}
       {inProgress && (
@@ -701,6 +779,21 @@ function QueueCard({
                 </>
               )}
               {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
+              {/* レビュー leaf: 問題なし=レビューとレビュー対象を束で畳む(1タップ2畳み)。
+                  問題ありのときは対象カード側の『実行を取り消す/巻き戻して問いに戻す』で
+                  締め方向の教師信号を出す(レビュー専用の信号は作らない)。 */}
+              {item.reviewOfId && (
+                <button
+                  className="primary"
+                  disabled={busy}
+                  title="レビューして問題なかった。このレビューとレビュー対象の実行結果をまとめて畳む。問題があれば、対象カード側で『実行を取り消す』か『巻き戻して問いに戻す』を"
+                  onClick={() =>
+                    run(() => api.accept(item.id), "問題なし: レビューと対象を畳みました")
+                  }
+                >
+                  問題なし（束で畳む）
+                </button>
+              )}
               <button
                 className="primary"
                 disabled={busy}
@@ -815,11 +908,24 @@ function QueueCard({
           {item.isAudit && <span className="chip-audit muted">確認(自動処理)</span>}
           {item.isAudit && (
             <button
+              className="primary"
               disabled={busy}
-              title="この自動処理は妥当だった、と確認する(分類器への正のフィードバック)"
-              onClick={() => run(() => api.audit(item.id, true), "妥当だったと確認しました")}
+              title="この自動処理は妥当だった、と確認する(分類器への正のフィードバック)。確認した実行はキューから畳まれます"
+              onClick={() => run(() => api.audit(item.id, true), "妥当だったと確認し、畳みました")}
             >
               妥当だった（確認OK）
+            </button>
+          )}
+          {/* 成功の終端: 確認して畳む(receive)。監査サンプルは上の『妥当だった』が一手二役で
+              畳むので二重に出さない。取消はバックログ/ツリーから引き続き可能。 */}
+          {!item.isAudit && (
+            <button
+              className="primary"
+              disabled={busy}
+              title="実行結果を確認した。問題ないので畳む(取り消しはバックログ/ツリーからいつでも可能)"
+              onClick={() => run(() => api.accept(item.id), "確認して畳みました")}
+            >
+              確認して畳む
             </button>
           )}
           <button
@@ -883,22 +989,28 @@ function undoLabelText(action: string): string {
       return "分類し直し";
     case "mute_category":
       return "この種類を自動化";
+    case "receive":
+      return "受領・畳み";
     default:
       return action;
   }
 }
 
 // general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
+// handoff(引き取り待ち)カードにも流用する: PR にレビュー指摘が付いた→指示を添えて直させる、の
+// 最頻ループ (placeholder だけ差し替え)。
 function GeneralOutlet({
   item,
   run,
   busy,
   output,
+  placeholder,
 }: {
   item: QueueItem;
   run: (fn: () => Promise<unknown>, doneMsg?: string) => Promise<void>;
   busy: boolean;
   output: string;
+  placeholder?: string;
 }) {
   const live = useLive();
   const [instruction, setInstruction] = useState("");
@@ -915,7 +1027,7 @@ function GeneralOutlet({
       </button>
       <input
         type="text"
-        placeholder="直す方向を一行で指示(例: もっと簡潔に / 表形式で)"
+        placeholder={placeholder ?? "直す方向を一行で指示(例: もっと簡潔に / 表形式で)"}
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         style={{ flex: 1, minWidth: 180 }}

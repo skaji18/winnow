@@ -3,6 +3,7 @@ import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
+import { UNDOABLE } from "./queue.js";
 import { categoryStats, items, labels, rules } from "./repo.js";
 import { confBinOf } from "./text.js";
 
@@ -203,15 +204,45 @@ export async function approve(itemId: string): Promise<Item | null> {
 }
 
 /**
- * 引き取り(handoff)の受領 (§3.5 継ぎ目)。awaiting_handoff の成果物を人間が確認/採用して完了へ進める。
- * 人間が成果物に責任を引き取った痕跡を label_event に残す(receive)。採用(マージ/送信)自体は
- * winnow がやらない=人間が外で行う。較正母数(recordOutcome)には積まない: 引き取りは
- * 「分類が正しかったか」の信号ではなく「成果物を受領したか」の儀式/レビューだから(過剰計上を避ける)。
+ * 受領 (receive) — 成功の終端 (§3.5 継ぎ目 / §4-4)。handoff の受領と autoDone の
+ * 「確認して畳む」を同じ一手にする。人間が成果物に責任を引き取った/確認した痕跡を
+ * label_event に残す(receive)。採用(マージ/送信)自体は winnow がやらない=人間が外で行う。
+ * 較正母数(recordOutcome)には積まない: 受領は「分類が正しかったか」の信号ではなく
+ * 「成果物を受領したか」の儀式/レビューだから(過剰計上を避ける)。緩め信号も作らない(§3.6-3)。
+ * note は Undo の逆適用先の判別に使う(send_back の着手前/後と同じ決定論マーカー方式)。
  */
 export async function acceptHandoff(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
-  labels.record({ itemId, action: "receive", category: item.category });
+  // レビュー leaf の「問題なし(束で畳む)」: レビューを受領で閉じ、元アイテムも束で受領する
+  // (1タップ2畳み — 受領とレビュー処分の二重操作を要求しない)。どちらも recordOutcome 非呼出。
+  // 「問題あり」の側はここを通らず、元カードの cancel/send_back(既存の締め方向の教師信号)へ
+  // 流す=レビュー専用カウンタを作らない (§1-4 浅くて頑健)。
+  if (item.reviewOfId) {
+    labels.record({
+      itemId,
+      action: "receive",
+      category: item.category,
+      note: "レビュー完了(問題なし)",
+    });
+    const updated = items.update(itemId, { status: "done", receivedAt: Date.now() });
+    const src = items.get(item.reviewOfId);
+    if (
+      src &&
+      (src.executionStatus === "awaiting_handoff" ||
+        (src.autoExecuted && src.executionStatus === "succeeded" && src.receivedAt == null))
+    ) {
+      // 元アイテム側の受領も通常の receive として記録する(束の undo は item ごと=直近1手ずつ)。
+      await acceptHandoff(src.id);
+    }
+    return updated;
+  }
+  labels.record({
+    itemId,
+    action: "receive",
+    category: item.category,
+    note: item.executionStatus === "awaiting_handoff" ? "受領(引き取り)" : "確認して畳む",
+  });
   return executor.acceptHandoff(itemId);
 }
 
@@ -230,6 +261,12 @@ function recordAudit(item: Item, ok: boolean, to: Disposition = "escalate"): Par
   if (ok) {
     labels.record({ itemId: item.id, action: "audit_ok", fromDisposition: "auto", category: item.category });
     recordOutcome(item.category, "auto", "auto", { confBin });
+    // 一手二役: 実行済み監査サンプルの「妥当だった」は監査簿記 + 受領(畳み)を同時に出す。
+    // 別々に2タップさせない(§4-1 追加労力ゼロ)。未実行の監査サンプル(classified 段の確認)は
+    // 受領の対象ではないので receivedAt を立てない。
+    if (item.executionStatus === "succeeded") {
+      return { auditSampled: false, receivedAt: Date.now() };
+    }
     return { auditSampled: false };
   }
   labels.record({
@@ -313,6 +350,11 @@ export function undoLastLabel(itemId: string): Item | null {
   if (!item) return null;
   const ev = labels.lastForItem(itemId);
   if (!ev) return item;
+  // 逆適用が定義された UNDOABLE(queue.ts と単一の真実源)だけ扱う。非対象(approve/audit_*/
+  // demote/escalate_category 等)は label を消さず no-op で返す。旧実装は switch の外の
+  // deleteById が無条件に走り、「no-op のはず」の直近ラベル(人間判断の痕跡=受領・承認・
+  // 監査結果)を巻き戻し無しで削除して較正・週次集計を歪めていた。
+  if (!UNDOABLE.has(ev.action)) return item;
 
   const confBin = confBinOf(item.rawConfidence ?? item.confidence);
   const rawDisp = item.rawDisposition ?? ev.fromDisposition ?? item.disposition;
@@ -341,11 +383,22 @@ export function undoLastLabel(itemId: string): Item | null {
     }
     case "send_back": {
       // send_back: kind=leaf→node, disposition=from→escalate に倒し(auto のとき overturned を積んだ)。
-      // 逆適用は降格部分だけ戻す: kind→leaf, disposition→from, status→classified。実行後 send_back で
+      // 逆適用は降格部分だけ戻す: kind→leaf, disposition→from。実行後 send_back で
       // 合成された cancel(巻き戻し提示)は戻さない(winnow は巻き戻しを能動実行しない §4-4)。
+      //
+      // 復元先は note の決定論マーカー(着手前/後)で分ける。着手後(実行成功済みだった)を
+      // classified+none に戻すと掃き出しループが成功済みタスクを黙って自動再実行する
+      // (二重実行・二重副作用)。succeeded/done+autoExecuted に復元して autoDone カード
+      // (取消ハンドル)へ戻す。awaiting_handoff まで戻さない=採用系の面は改めて人間が判断する。
       patch.kind = "leaf";
       if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
-      patch.status = "classified";
+      if (ev.note === "送り返し(着手後)") {
+        patch.status = "done";
+        patch.executionStatus = "succeeded";
+        patch.autoExecuted = true;
+      } else {
+        patch.status = "classified";
+      }
       patch.humanOverrode = false;
       // 母数の unbump は「この send_back が積んだ分」だけ。ev 以外に send_back が残っていれば
       // この ev は2回目以降=母数に積んでいないので unbump しない(record 側のループ防止と対称)。
@@ -354,6 +407,22 @@ export function undoLastLabel(itemId: string): Item | null {
         .some((e) => e.id !== ev.id && e.action === "send_back");
       if (!otherSendBack && ev.fromDisposition === "auto" && ev.category && rawDisp === "auto") {
         categoryStats.unbump(ev.category, "auto", "overturned", confBin);
+      }
+      break;
+    }
+    case "receive": {
+      // receive: receivedAt を立てて畳んだ(較正簿記なし=巻き戻す bump もない)。
+      // note の決定論マーカーで逆適用先を分ける (send_back の着手前/後と同じ方式):
+      //  - 受領(引き取り): awaiting_handoff → succeeded/done に進めた → 引き取り待ちへ戻す。
+      //  - 確認して畳む: receivedAt のみ → 下ろすだけで autoDone カードが再可視化される。
+      patch.receivedAt = null;
+      if (ev.note === "受領(引き取り)") {
+        patch.executionStatus = "awaiting_handoff";
+        patch.status = "review";
+      } else if (ev.note === "レビュー完了(問題なし)") {
+        // レビュー leaf の畳みを戻す(さばき待ちへ)。束で畳んだ元アイテム側の receive は
+        // 元アイテム自身の直近ラベルとして別途 undo する(undo は item ごと=直近1手ずつ)。
+        patch.status = "classified";
       }
       break;
     }

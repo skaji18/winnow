@@ -13,7 +13,7 @@ db.pragma("foreign_keys = ON");
 // CODE_SCHEMA_VERSION = コードが期待する版。DB の user_version がこれより小さければ
 // 版数順に MIGRATIONS の up を適用、大きければ (ダウングレード) 起動停止。
 // ---------------------------------------------------------------------------
-const CODE_SCHEMA_VERSION = 3;
+const CODE_SCHEMA_VERSION = 4;
 /** export/import ペイロードのメタに使う版数 (DDLには使わない)。 */
 export const SCHEMA_VERSION = CODE_SCHEMA_VERSION;
 
@@ -407,10 +407,38 @@ CREATE INDEX IF NOT EXISTS idx_learnings_item ON learnings(itemId);
 `);
 }
 
+/**
+ * 版3→版4 の up (実行フィードバック・リデザイン)。
+ * - items.receivedAt: 人間が成功実行を確認して畳んだ時刻 (nullable)。receive の一般化
+ *   (DECISIONS.md「実行フィードバックの終端と構造」)。null=未受領=キューに取消ハンドルとして残る。
+ * - items.reviewOfId: レビュー leaf → 元アイテムの構造リンク。ON DELETE SET NULL で
+ *   元アイテム削除時はリンクだけ外れる(レビュー leaf は消さない)。
+ * - jobs.externalApproved: 承認時の外部送信ゴーサインを永続化。timed_out 後の
+ *   late sentinel 回収でも handoffRequired の安全弁 (d) が発火できるようにする。
+ * 列追加のみで FK/PK 再構築は無い。新規DBも版0→4 を順に踏むためここで冪等に足りる。
+ */
+function migrateV3toV4(d: Database.Database): void {
+  function ensureColumn(table: string, column: string, ddl: string): void {
+    const has = (
+      d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    ).some((c) => c.name === column);
+    if (!has) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+  ensureColumn("items", "receivedAt", "receivedAt INTEGER");
+  ensureColumn(
+    "items",
+    "reviewOfId",
+    "reviewOfId TEXT REFERENCES items(id) ON DELETE SET NULL",
+  );
+  ensureColumn("jobs", "externalApproved", "externalApproved INTEGER");
+  d.exec("CREATE INDEX IF NOT EXISTS idx_items_reviewof ON items(reviewOfId)");
+}
+
 const MIGRATIONS: { v: number; up: (d: Database.Database) => void }[] = [
   { v: 1, up: migrateV0toV1 },
   { v: 2, up: migrateV1toV2 },
   { v: 3, up: migrateV2toV3 },
+  { v: 4, up: migrateV3toV4 },
 ];
 
 // 版数順に適用。foreign_keys=OFF を要する table-rebuild を含むため db.transaction を使わず

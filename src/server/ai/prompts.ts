@@ -176,6 +176,7 @@ export function executePrompt(
   ctx = "",
   instruction = "",
   externalApproved = false,
+  reviewMaterial = "",
 ): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
@@ -201,12 +202,20 @@ export function executePrompt(
   const redirectNote = instruction.trim()
     ? `\n\n## 追加の方向修正(人間の一行指示)\n前回の成果物を踏まえ、次の方向で直してください: ${instruction.trim()}`
     : "";
+  // レビュー leaf: レビュー対象の実行結果を観察対象データとして渡す (§3.5)。
+  // worker 自己申告由来のテキストなので fenceBody の低信頼側に置く(高信頼の【文脈】に相乗りさせない)。
+  const reviewNote = reviewMaterial.trim()
+    ? `\n\n## レビュー対象の実行結果
+このタスクは過去の自動実行の結果レビューです。以下の成果物を対象に、title/body の観点で
+レビューし、問題点があれば具体的に output に列挙してください(問題が無ければ「問題なし」と明記)。
+${fenceBody("レビュー対象", reviewMaterial.trim())}`
+    : "";
   return `${SPINE}
 ${ctx}
 # タスク: 実行(Executor)
 以下は「リーフ(実行可能タスク)」です。上の【文脈】(プロダクト前提・案件前提・上位の意図)に
 沿って実行してください。bodyの受け入れ基準を満たすことをゴールにすること。
-${softwareNote}${redirectNote}
+${softwareNote}${redirectNote}${reviewNote}
 
 ## アイテム
 ${fenceBody("title", item.title)}

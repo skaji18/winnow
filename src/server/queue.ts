@@ -28,13 +28,16 @@ export interface QueueItem extends Item {
 }
 
 // Undo で戻せる(逆適用が定義されている)アクションだけを undoableLabel として出す。
-const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
+// actions.ts undoLastLabel と単一の真実源 (非対象 action は label を消さず no-op)。
+export const UNDOABLE: ReadonlySet<LabelAction> = new Set<LabelAction>([
   "do",
   "reject",
   "send_back",
   "reclassify",
   "override",
   "mute_category",
+  // receive(受領/確認して畳む)の逆適用 = receivedAt を下ろして再可視化 (§4-4)。
+  "receive",
 ]);
 
 const PRIO: Record<string, number> = { urgent: 1.5, high: 0.9, normal: 0, low: -0.4 };
@@ -147,19 +150,26 @@ export function queue(): QueueItem[] {
     // 1) cancelled は常に再浮上させない(cancelExecution は status='rejected' にもするが
     //    executionStatus でも二重に保険)。
     if (it.executionStatus === "cancelled") return false;
+    // 1.2) 人間の処分(却下)が勝つ: rejected は failed/timed_out の再浮上・autoDone の
+    //      取消ハンドルより先に畳む。旧実装は 3) が先に発火し「却下してもカードが消えない」
+    //      デッドエンドだった。undo(さばきを戻す→classified)すれば従来どおり再浮上する。
+    if (it.status === "rejected") return false;
     // 1.5) 【最優先】引き取り待ち(実行完了・人間の受領/採用が必要)は必ず前面に出す (§3.5)。
     //      status='review' なので下の classified/done フィルタには拾われない。明示で出す。
     if (it.executionStatus === "awaiting_handoff") return true;
     // 2) 自動実行が成功した分は §4-4「安く取り消せる」取消ハンドルとしてキューに残す。
-    if (it.autoExecuted && it.executionStatus === "succeeded") return true;
+    //    ただし人間が受領(確認して畳む/監査OK/handoff受領)したら畳む=成功の終端遷移。
+    //    取消ハンドル自体はバックログ/ツリーから引き続き届く(可視の場所が変わるだけ)。
+    if (it.autoExecuted && it.executionStatus === "succeeded" && it.receivedAt == null)
+      return true;
     // 3) 【最優先】止まった項目の再浮上: 実行失敗・タイムアウト超過・人手保留は必ず出す
     //    (cancelled は 1) で除外済み)。timed_out は失敗確定ではないが、人間が待たず再実行/却下
     //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
     if (it.executionStatus === "failed") return true;
     if (it.executionStatus === "timed_out") return true;
     if (it.status === "blocked") return true;
-    // 4) done/rejected を畳む(3) の後なので失敗/blocked が優先)。
-    if (it.status === "done" || it.status === "rejected") return false;
+    // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
+    if (it.status === "done") return false;
     // 5) 提案待ち(不可逆実行のワンタップ承認)は必ず出す。
     if (it.executionStatus === "proposed") return true;
     // 6) 【寄生表示】人手で着手中(doIt)はキュー内『着手中』レーンに薄く出す。判別子は
