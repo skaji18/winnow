@@ -9,6 +9,7 @@ import {
   provisionalTitle,
 } from "./components/Bits.js";
 import { applyFilter, emptyFilter, FilterBar, filterIsEmpty, type FilterState } from "./components/FilterBar.js";
+import { Markdown } from "./components/Markdown.js";
 import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { SprintsView } from "./components/Sprints.js";
@@ -616,10 +617,12 @@ function QueueCard({
           {item.domain === "general" && splitOutput ? (
             <>
               {splitSummary && <pre className="exec-summary">{splitSummary}</pre>}
-              <pre className="exec-output">{splitOutput}</pre>
+              {/* output は execute プロンプトで「markdown可」: レンダラーで見やすく。
+                  プレーンでも remark-breaks で改行が保たれ <pre> 相当に落ちる。 */}
+              <Markdown className="exec-output" text={splitOutput} />
             </>
           ) : (
-            <pre>{item.executionResult}</pre>
+            <Markdown text={item.executionResult ?? ""} />
           )}
           {/* 取消時の巻き戻し手順 (自動実行しない=人間ワンタップ)。 */}
           {item.rollbackPlan && (

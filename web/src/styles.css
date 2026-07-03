@@ -184,6 +184,34 @@ details.exec pre { white-space: pre-wrap; background: var(--bg); padding: 10px; 
 .exec-summary { border-left: 3px solid var(--accent); }
 .exec-output { color: var(--text); }
 
+/* AI実行結果の markdown レンダリング (.md)。details.exec pre と同じ箱の見た目に揃える。 */
+.md {
+  background: var(--bg); padding: 10px; border-radius: 7px; font-size: 12px;
+  max-height: 240px; overflow: auto; line-height: 1.55;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 13px; margin: 10px 0 4px; }
+.md h1 { font-size: 14px; }
+.md p, .md ul, .md ol, .md blockquote, .md table { margin: 6px 0; }
+.md ul, .md ol { padding-left: 20px; }
+.md li { margin: 2px 0; }
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  background: var(--panel-2); padding: 1px 4px; border-radius: 4px;
+}
+/* details.exec pre (箱スタイル) より優先させ、md 内の code block は内側の見た目にする。 */
+.md pre, details.exec .md pre {
+  background: var(--panel-2); padding: 8px; border-radius: 6px; overflow-x: auto;
+  margin: 6px 0; max-height: none;
+}
+.md pre code { background: none; padding: 0; }
+.md blockquote { border-left: 3px solid var(--border); padding-left: 8px; color: var(--muted); }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--border); padding: 3px 8px; }
+.md a { color: var(--accent); }
+.md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+
 /* --- a11y 共通 --------------------------------------------------------------- */
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
