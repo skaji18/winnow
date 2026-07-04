@@ -35,7 +35,7 @@ jobs:
       - name: Install
         run: npm ci --include=dev --no-audit --no-fund
 
-      # ビルドゲート (CLAUDE.md と単一真実源の npm run gate: tsc / vite build / smoke)。
+      # ビルドゲート (npm run gate が単一真実源。内訳は package.json / CLAUDE.md を参照)。
       # 壊れたタグから Release を作らない=適用側 (updater.ts) が壊れた版を掴まない最初の防波堤。
       - name: Build gate
         run: npm run gate

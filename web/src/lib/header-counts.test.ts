@@ -16,7 +16,9 @@ test("inFlight があればサーバ集計を優先する(items は数えない)
     items: [mkItem("running", 5_000)],
     settings: { maxWorkers: 4 },
   };
-  const r = deriveHeaderCounts(state, 10_000);
+  // now に 1000 で割り切れない端数を含める: 経過 5500ms → 5 秒 (切り捨て方向を固定。
+  // round/ceil なら 6 になりこのテストが割れる)。
+  const r = deriveHeaderCounts(state, 10_500);
   assert.equal(r.running, 2);
   assert.equal(r.proposed, 3);
   assert.equal(r.handoff, 1);

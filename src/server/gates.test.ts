@@ -96,6 +96,14 @@ function mustGate(g: GateDerivation | null): GateDerivation {
 
 // 実在ディレクトリ (validateProjectDir が realpath を見るため実体を用意する)。
 const realDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "winnow-gates-")));
+// 後始末: プロセス終了時に消す (tmp-home.ts と同じ exit フックの流儀。テスト失敗時も走る)。
+process.on("exit", () => {
+  try {
+    fs.rmSync(realDir, { recursive: true, force: true });
+  } catch {
+    /* /tmp の掃除は OS のフォールバックに任せる */
+  }
+});
 
 // --- isIrreversibleOrHighStakes: 閾値境界 (§3.4) ----------------------------
 

@@ -158,7 +158,10 @@ async function main(): Promise<void> {
 
     // --- サーバ起動 (フェイクAI・本番配信・使い捨てホーム) ------------------------------
     console.log(`• サーバ起動(フェイクAI, port=${PORT})`);
-    server = spawn("npx", ["tsx", "src/server/index.ts"], {
+    // npx ラッパー経由にしない: npx は SIGTERM を子へ転送せず自分だけ死ぬため、
+    // stopServer がラッパーしか殺せず実サーバがオーファン化する (stdout を握り続け
+    // パイプ実行もハングする)。ローカルの tsx bin は SIGTERM を子 node へ転送する。
+    server = spawn(path.join(ROOT, "node_modules", ".bin", "tsx"), ["src/server/index.ts"], {
       cwd: ROOT,
       env: {
         ...process.env,
@@ -170,8 +173,18 @@ async function main(): Promise<void> {
       stdio: "inherit",
     });
     let serverDied: Error | null = null;
-    server.on("exit", (code) => {
-      if (code) serverDied = new Error(`server exited early with code ${String(code)}`);
+    // exit は (code, signal) 両対応にする: シグナル死は code=null で来る。
+    // spawn 自体の失敗 (ENOENT 等) は exit ではなく error で来る上、リスナーが無いと
+    // unhandled 'error' で finally (ブラウザ/一時ディレクトリの後始末) ごと即死する。
+    server.on("exit", (code, signal) => {
+      if (code || signal) {
+        serverDied = new Error(
+          `server exited early (code=${String(code)}, signal=${String(signal)})`,
+        );
+      }
+    });
+    server.on("error", (e) => {
+      serverDied = new Error(`server spawn failed: ${String(e)}`);
     });
     await waitForHealth(BASE, () => serverDied);
 

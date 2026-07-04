@@ -18,3 +18,13 @@ process.env.WINNOW_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "winnow-test-"))
 
 /** このテストプロセスが使う使い捨て WINNOW_HOME (デバッグ・後始末用)。 */
 export const TEST_WINNOW_HOME: string = process.env.WINNOW_HOME;
+
+// 後始末: プロセス終了時に使い捨てディレクトリを消す (テスト失敗時も走る)。
+// import 副作用モジュールの規約と揃え、node:test の after ではなく exit フックで行う。
+process.on("exit", () => {
+  try {
+    fs.rmSync(TEST_WINNOW_HOME, { recursive: true, force: true });
+  } catch {
+    /* /tmp の掃除は OS のフォールバックに任せる */
+  }
+});
