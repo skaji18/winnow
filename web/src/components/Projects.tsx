@@ -239,7 +239,7 @@ function ProjectBoard({
   return (
     <>
       <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
-        カードをドラッグして列(状態)を移動できます。
+        カードをドラッグ、または各カードのステータス選択で列(状態)を移動できます。
       </p>
       <Kanban
         items={items}

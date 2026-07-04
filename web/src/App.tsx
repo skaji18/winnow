@@ -5,6 +5,7 @@ import {
   DueBadge,
   PriorityBadge,
   ProjectChip,
+  copyText,
   parseDate,
   provisionalTitle,
 } from "./components/Bits.js";
@@ -338,22 +339,40 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         />
       )}
 
-      {/* 俯瞰レンズの切替 (FilterBar とは別軸の純フロント状態)。処理量メトリクスは出さない。 */}
-      <div className="lens-toggle" role="group" aria-label="俯瞰レンズ">
-        {([
-          ["flat", "まとめない"],
-          ["project", "案件"],
-          ["horizon", "見通し"],
-        ] as const).map(([key, label]) => (
-          <button
-            key={key}
-            className={groupBy === key ? "active" : ""}
-            aria-pressed={groupBy === key}
-            onClick={() => setGroupBy(key)}
-          >
-            {label}
-          </button>
-        ))}
+      {/* 俯瞰レンズの切替 (FilterBar とは別軸の純フロント状態)。処理量メトリクスは出さない。
+          検索トグルはタッチ到達性のため常設 ('/' はキーボード専用でモバイルから到達不能だった)。 */}
+      <div className="queue-toolbar">
+        <div className="lens-toggle" role="group" aria-label="俯瞰レンズ">
+          {([
+            ["flat", "まとめない"],
+            ["project", "案件"],
+            ["horizon", "見通し"],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              className={groupBy === key ? "active" : ""}
+              aria-pressed={groupBy === key}
+              onClick={() => setGroupBy(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          className="filter-toggle"
+          aria-pressed={filterOpen}
+          onClick={() => {
+            if (filterOpen) {
+              // 閉じるときは FilterBar の onClose と同じ扱い (絞り込みも解除)。
+              setFilterOpen(false);
+              setFilter(emptyFilter());
+            } else {
+              setFilterOpen(true);
+            }
+          }}
+        >
+          検索 / 絞り込み
+        </button>
       </div>
 
       {/* 実績ゼロ初日の第一級メッセージ (§4 末 Jカーブ・期待値管理)。 */}
@@ -1043,9 +1062,13 @@ function GeneralOutlet({
     <div className="actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
       <button
         disabled={!output}
-        onClick={() => {
-          navigator.clipboard?.writeText(output);
-          live("成果物をコピーしました");
+        onClick={async () => {
+          // 偽の成功通知を出さない: http 越しのモバイル等では clipboard API が使えない。
+          live(
+            (await copyText(output))
+              ? "成果物をコピーしました"
+              : "コピーできませんでした。成果物のテキストを長押しで選択してください",
+          );
         }}
       >
         コピー
@@ -1169,7 +1192,7 @@ function AddItem({ state, onChange }: { state: AppState; onChange: () => void })
       <div className="add-form">
         {/* 本文(会話ログ/メモ)を主役に。雑に貼るだけで登録できる(新規儀式ゼロ §3.1)。 */}
         <textarea
-          placeholder="会話・メモ・タスクを雑に貼る（タイトルは空でOK。Ctrl/⌘+Enterで登録）"
+          placeholder="会話・メモ・タスクを雑に貼る（タイトルは空でOK）"
           value={body}
           rows={3}
           onChange={(e) => setBody(e.target.value)}
@@ -1333,8 +1356,19 @@ function DecomposeModal({
     api.decompose(item.id).catch(() => {});
   };
 
+  // タッチでモーダル内をスクロール中、指が縁の backdrop に触れただけで閉じる事故を防ぐ:
+  // mousedown/up (タップの開始と終了) が共に backdrop 上のときだけ閉じる。
+  const downOnBackdrop = useRef(false);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && downOnBackdrop.current) onClose();
+      }}
+    >
       <div
         className="modal"
         role="dialog"
@@ -1510,6 +1544,9 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
         <button
           className="danger"
           onClick={async () => {
+            // 折り返しの多い狭幅レイアウトでの誤タップが即削除にならないよう確認を挟む
+            // (削除は UNDOABLE 外の不可逆操作)。
+            if (!window.confirm(`「${item.title}」を削除しますか？`)) return;
             await api.deleteItem(item.id);
             await onChange();
           }}
@@ -1806,9 +1843,12 @@ function McpSnippet({ endpoint }: { endpoint: string }) {
         </pre>
         <button
           aria-label="MCP 接続コマンドをコピー"
-          onClick={() => {
-            navigator.clipboard?.writeText(snippet);
-            live("MCP 接続コマンドをコピーしました");
+          onClick={async () => {
+            live(
+              (await copyText(snippet))
+                ? "MCP 接続コマンドをコピーしました"
+                : "コピーできませんでした。左のコマンドを長押しで選択してください",
+            );
           }}
         >
           コピー

@@ -13,14 +13,33 @@ async function j<T>(url: string, opts?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts?.body != null) headers["Content-Type"] = "application/json";
   if (LOCAL_SECRET) headers["x-winnow-secret"] = LOCAL_SECRET;
-  const res = await fetch(url, {
-    ...opts,
-    headers: { ...headers, ...(opts?.headers as Record<string, string> | undefined) },
-  });
+  // モバイル回線の電波断・切替でリクエストが無期限ハングすると busy なボタンが固まったままになる。
+  // タイムアウトは通常エラーとして投げ、呼び出し側の catch → aria-live 表示に乗せる。
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), 20_000);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...opts,
+      signal: opts?.signal ?? timeout.signal,
+      headers: { ...headers, ...(opts?.headers as Record<string, string> | undefined) },
+    });
+  } catch (e) {
+    if ((e as { name?: string }).name === "AbortError") {
+      throw new Error("サーバの応答がありません（タイムアウト）。接続を確認して再試行してください");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     // 楽観ロック競合(409)は専用接頭辞で投げ、UI が『他所で更新された→再取得』へ分岐できるように。
     const text = await res.text();
     if (res.status === 409) throw new Error(`CONFLICT ${text}`);
+    // サーバ再起動でローカルシークレットが再生成された場合の 403。原因が分かりにくいので案内する。
+    if (res.status === 403 && text.includes("missing local secret")) {
+      throw new Error("サーバが再起動されたため操作を送れませんでした。ページを再読込してください");
+    }
     throw new Error(`${res.status} ${text}`);
   }
   return res.json() as Promise<T>;
