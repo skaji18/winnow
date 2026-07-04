@@ -31,6 +31,12 @@
   導入しない。前面固定を解くのはスコア逓減（handoffC）まで。**畳むのは人間の明示操作**
   （receive / reject）だけ。
 - 監査サンプルは通常項目と見分けのつかない形で混ぜる（§4-3。専用画面・専用枠にしない）。
+- proposed の一行理由（surfaceReason）は **read 時に現在の構造から導出**する
+  （`gates.deriveProposedGate`）。保存 `executionResult` はゲート発動時点の痕跡で、
+  **表示の真実にしない**（needs_human 由来＝autoExecuted かつ worker 成果
+  （executionSummary/Output）が実在するものは例外＝素通し）。
+  導出は書き込みを伴わない（updatedAt を洗わない＝ageDays 滞留表示を壊さない）。
+  `gateKind` / `blockerId` は QueueItem の計算フィールドで、DB 列に永続化しない。
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 
@@ -54,10 +60,14 @@
 - winnow は巻き戻し・採用（マージ/送信/デプロイ/削除）を**能動実行しない**。rollbackPlan は提示のみ。
   PR作成＝可逆な提示 / マージ＝不可逆な採用、の非対称を堅持。
 
-## 実行ゲート（`executor.ts`）
+## 実行ゲート（`executor.ts` / `gates.ts`）
 
 - ガードは**決定論（構造シグナル）のみ**。推論でゲートしない
   （cross-repo 兄弟 / 上流未完 / auto 出所検証＝confidence null チェック）。
+- ゲートの述語・閾値・文言は **`gates.ts` が単一の真実源**（executor＝write 時の痕跡、
+  queue＝read 時の表示、の双方が import する）。proposed に倒す新ゲートを足すときは
+  gates.ts に述語・GateKind・文言を**同時登録**する（登録漏れは read 時導出が
+  「解消済み」を誤表示する）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
 - 外部送信の解禁は `allowExternalSend` オプトイン時の承認・明示再走のみ（既定 OFF＝緩めは慎重）。
 - レビュー leaf: **深さ1固定**（レビューのレビューを作らない）・同一対象の未決レビューは重複生成しない・

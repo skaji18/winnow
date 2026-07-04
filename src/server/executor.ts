@@ -11,107 +11,25 @@ import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
 import { recordOutcome } from "./calibration.js";
 import { validateProjectDir } from "./paths.js";
+import {
+  buildGateSnapshot,
+  crossRepoSiblingPending,
+  uncertainNodeOrUpstreamPending,
+  uncertainGateReason,
+  isIrreversibleOrHighStakes,
+  HIGH_STAKES_THRESHOLD,
+  GATE_TEXT_IRREVERSIBLE,
+  GATE_TEXT_PAUSE_AUTO,
+  GATE_TEXT_CROSS_REPO,
+  gateTextBadProjectDir,
+} from "./gates.js";
 import { classifyJobError } from "./errors.js";
 
 // 実行とトリガー (REQUIREMENTS §3.4). 自動実行は可逆性で段を分ける:
 //  可逆な実行 → 自動着火 / 不可逆・高ステークス → 提案して人間ワンタップ承認。
 // 自動は全部、安く取り消せる＆痕跡が残る (§4-4)。
-
-const REVERSIBLE_THRESHOLD = 0.6;
-
-/**
- * cross-repo 協調ガード (§3.6-3 締めるのは速く / §2.2). 同一案件で projectDir の異なる
- * leaf が他にも auto/実行中で並んでいるなら、repoをまたぐアトミック変更の暴発(契約の
- * 受け渡し不整合・順序破綻)を疑い、自動着火を止めて人間のワンタップ承認に回す。
- * cross-repo性はテキストから構造的に観測できない (§3.2) ので、推論ではなく
- * 「同一案件×異projectDir×auto/実行中」という決定論的な代理シグナルで安全側に倒す。
- * 独立な多repoタスクも巻き込みうるが、過剰エスカレーションは安く速く可逆 (§3.6-3) なので
- * その側に倒す。承認(approveExecution)はこのガードを通らず実行できる=ワンタップの逃げ道。
- */
-function crossRepoSiblingPending(item: Item): boolean {
-  if (!item.projectId || !item.projectDir) return false;
-  return items.all().some(
-    (o) =>
-      o.id !== item.id &&
-      o.projectId === item.projectId &&
-      o.kind === "leaf" &&
-      o.projectDir != null &&
-      o.projectDir !== item.projectDir &&
-      // まだ片付いていない auto/実行中の兄弟だけを対象に。完了/取消済みは外す
-      // (古い成功が延々とガードを引かないように)。proposed(auto)同士は互いに
-      // マッチし続けるので、同時バーストは両方そろって承認待ちに倒れ対称性が保たれる。
-      // awaiting_handoff は実行成功済み(人間の引き取り待ち)なので「完了側」に数え、下流を塞がない。
-      o.executionStatus !== "succeeded" &&
-      o.executionStatus !== "cancelled" &&
-      o.executionStatus !== "awaiting_handoff" &&
-      (o.disposition === "auto" ||
-        o.executionStatus === "running" ||
-        o.executionStatus === "queued"),
-  );
-}
-
-/**
- * 未確定ノード配下リーフの点火ゲート (§3.4/§3.6-3 締めるのは速く)。crossRepoSiblingPending と
- * 同型の決定論ガード(推論なし・安全側に倒す)。次の3条件の OR が真なら auto 着火せず proposed に
- * 倒す。DAG/依存自動推論/blockedBy 新スキーマは作らず、既存 parentId/orderIndex/status のみで判定:
- *  (a) 親が未確定 (parent.uncertaintyResolved===false): 上の方向が固まる前に下を実行すると外す。
- *  (b) 親を人間が保留 (parent.status==='blocked'): 親解除待ち。
- *  (c) 同一親×上流 (orderIndex が前) の兄弟が未完: 上流完了待ち。
- * parentId が null なら全条件 false (現状維持)。承認(approveExecution)はこのガードを通らない
- * =ワンタップの逃げ道 (crossRepo と対称)。
- */
-function uncertainNodeOrUpstreamPending(item: Item): boolean {
-  if (!item.parentId) return false;
-  const parent = items.get(item.parentId);
-  if (!parent) return false;
-  // (a) 親未確定 / (b) 親 blocked。
-  if (parent.uncertaintyResolved === false) return true;
-  if (parent.status === "blocked") return true;
-  // (c) 同一親×上流(orderIndex 小)に未完の兄弟がいる。
-  return items.children(item.parentId).some((o) => isPendingUpstreamSibling(item, o));
-}
-
-/**
- * 「未完の上流兄弟」判定 (uncertainNodeOrUpstreamPending (c) と uncertainGateReason の
- * 単一の真実源=両者のドリフト防止)。レビュー leaf (reviewOfId 非null) は観察タスクであって
- * 下流の前提物ではないので「上流」と数えない — 未処分のレビューが後続兄弟の自動着火を
- * 黙って塞ぐ穴を閉じる (§3.5 レビューは継ぎ目に乗るがパイプラインを堰き止めない)。
- */
-function isPendingUpstreamSibling(item: Item, o: Item): boolean {
-  return (
-    o.id !== item.id &&
-    o.reviewOfId == null &&
-    o.orderIndex < item.orderIndex &&
-    o.status !== "done" &&
-    o.status !== "rejected" &&
-    o.executionStatus !== "succeeded" &&
-    o.executionStatus !== "cancelled" &&
-    // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
-    o.executionStatus !== "awaiting_handoff"
-  );
-}
-
-/**
- * 点火ゲートが立った理由を判定して一行で返す(キュー一行=executionResult の carrier)。
- * 上流完了待ちは「どの兄弟が塞いでいるか」を実名で出す (§4-2 理由はグランス可能に —
- * 旧文言は原因タスクを特定できず、承認待ちの理由が glance 不能だった)。
- */
-function uncertainGateReason(item: Item): string {
-  if (item.parentId) {
-    const parent = items.get(item.parentId);
-    if (parent) {
-      if (parent.uncertaintyResolved === false)
-        return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
-      if (parent.status === "blocked") return "親が保留(blocked)中です。＝親解除待ち";
-    }
-    const blocker = items
-      .children(item.parentId)
-      .find((o) => isPendingUpstreamSibling(item, o));
-    if (blocker)
-      return `上流「${blocker.title.slice(0, 40)}」が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)`;
-  }
-  return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
-}
+// 点火ゲートの述語・閾値・文言は gates.ts が単一真実源 (queue の read 時導出と共有。
+// proposed に倒す新ゲートを足すときは gates.ts へ同時登録する)。
 
 interface ExecuteOut {
   status: "succeeded" | "failed" | "needs_human";
@@ -147,7 +65,7 @@ function handoffRequired(
 ): boolean {
   const hasArtifacts = Array.isArray(out.artifacts) && out.artifacts.length > 0;
   const declaredIrreversible = out.reversible === false;
-  const highStakes = (item.stakes ?? 0) > 0.7;
+  const highStakes = (item.stakes ?? 0) > HIGH_STAKES_THRESHOLD;
   const approvedExternal = externalApproved && item.domain === "software";
   return hasArtifacts || declaredIrreversible || highStakes || approvedExternal;
 }
@@ -206,7 +124,7 @@ export async function requestExecution(
   if (!manual && settings.get().pauseAuto) {
     return items.update(itemId, {
       executionStatus: "proposed",
-      executionResult: "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。",
+      executionResult: GATE_TEXT_PAUSE_AUTO,
     });
   }
   // auto source 検証 (背骨「口はバカ・分類器が賢い」の executor 側の最終ゲート)。
@@ -227,29 +145,28 @@ export async function requestExecution(
     });
   }
 
-  const reversible = (item.reversibility ?? 0) >= REVERSIBLE_THRESHOLD;
-  const highStakes = (item.stakes ?? 0) > 0.7;
-
-  if (!reversible || highStakes) {
+  if (isIrreversibleOrHighStakes(item)) {
     // 不可逆/高ステークス: 提案して人間のワンタップ承認待ち (§3.4)。
     return items.update(itemId, {
       executionStatus: "proposed",
-      executionResult: "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。",
+      executionResult: GATE_TEXT_IRREVERSIBLE,
     });
   }
-  if (uncertainNodeOrUpstreamPending(item)) {
+  // 構造ゲート用スナップショット (items 全件を1回だけ読む)。
+  const snap = buildGateSnapshot(items.all());
+  if (uncertainNodeOrUpstreamPending(item, snap)) {
     // 未確定ノード配下/上流未完: 親確定・上流完了を待ってから着火 (最上流の制約を先に見せる)。
+    // 保存文言は発動時点の痕跡 — 表示の真実は queue の read 時導出 (gates.deriveProposedGate)。
     return items.update(itemId, {
       executionStatus: "proposed",
-      executionResult: uncertainGateReason(item),
+      executionResult: uncertainGateReason(item, snap),
     });
   }
-  if (crossRepoSiblingPending(item)) {
+  if (crossRepoSiblingPending(item, snap)) {
     // 同一案件で複数repoの自動実行が並んでいる: 横断変更の暴発を防ぎ承認待ちに回す。
     return items.update(itemId, {
       executionStatus: "proposed",
-      executionResult:
-        "同一案件で複数リポジトリにまたがる自動実行が並んでいます。横断変更の暴発(契約不整合・順序破綻)を防ぐため承認待ち(独立した変更なら、そのままワンタップで実行)。",
+      executionResult: GATE_TEXT_CROSS_REPO,
     });
   }
   // 可逆: 自動着火。
@@ -359,7 +276,7 @@ export async function runExecution(
     if (v.escalate) {
       return items.update(itemId, {
         executionStatus: "proposed",
-        executionResult: `作業ディレクトリが不正のため実行を保留しました(${v.reason ?? "検証失敗"})。`,
+        executionResult: gateTextBadProjectDir(v.reason ?? "検証失敗"),
       });
     }
   }

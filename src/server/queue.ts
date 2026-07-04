@@ -1,5 +1,11 @@
 import type { Disposition, Item, LabelAction } from "./domain.js";
-import { items, labels } from "./repo.js";
+import { items, labels, settings } from "./repo.js";
+import {
+  buildGateSnapshot,
+  deriveProposedGate,
+  type GateDerivation,
+  type GateKind,
+} from "./gates.js";
 
 // あなたの「今日なに見る?」ビュー (REQUIREMENTS §4). 火の海ではなく
 // エスカレーションだけの短いキュー。自動分は畳む。ただし監査サンプルは
@@ -12,8 +18,14 @@ export interface QueueItem extends Item {
   topReason: TopReason;
   // 寄生表示の薄い区画判定。'in_progress'=「あなたが着手中」レーン、'queue'=通常キュー。
   lane: "queue" | "in_progress";
-  // キュー一行理由 (blocked語義の種別判別を含む)。
+  // キュー一行理由 (blocked語義の種別判別を含む)。proposed は read 時に構造から導出した
+  // live な理由 (保存 executionResult は発動時点の痕跡で、表示の真実にしない)。
   surfaceReason: string;
+  // ゲート由来 proposed の read 時導出 (gates.deriveProposedGate)。null = ゲート表示なし
+  // (非 proposed / needs_human 由来)。DB 列ではない計算フィールド。
+  gateKind: GateKind | null;
+  // 塞いでいる実体 (待ち先チップのジャンプ先)。上流未完=該当兄弟 / 親ゲート=親 / 他は null。
+  blockerId: string | null;
   // stale 検知 (in_progress のみ非null・STALE_DAYS 以上の粗い経年)。
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
@@ -106,8 +118,12 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
   return { score, topReason };
 }
 
-/** キュー一行理由。blocked が「実行失敗」か「人手保留」かを見分けられるようにする。 */
-function surfaceReasonOf(it: Item, ageDays: number | null): string {
+/**
+ * キュー一行理由。blocked が「実行失敗」か「人手保留」かを見分けられるようにする。
+ * proposed は gate (read 時導出) があればそれを表示の真実にする — 保存 executionResult は
+ * ゲート発動時点の痕跡で、上流完了後も「上流Xが未完です」と表示され続ける陳腐化があった。
+ */
+function surfaceReasonOf(it: Item, ageDays: number | null, gate: GateDerivation | null): string {
   let base: string;
   if (it.executionStatus === "awaiting_handoff") {
     // 引き取り待ち: なぜ handoff かで文言を出し分ける (handoffRequired の3条件に対応)。
@@ -130,7 +146,7 @@ function surfaceReasonOf(it: Item, ageDays: number | null): string {
   } else if (it.status === "blocked") {
     base = `保留中${it.reason ? `: ${it.reason}` : ""}`;
   } else if (it.executionStatus === "proposed") {
-    base = (it.executionResult ?? "").trim() || "承認待ち";
+    base = gate ? gate.reason : (it.executionResult ?? "").trim() || "承認待ち";
   } else {
     base = it.reason ?? "";
   }
@@ -146,6 +162,10 @@ function surfaceReasonOf(it: Item, ageDays: number | null): string {
 
 export function queue(): QueueItem[] {
   const all = items.all();
+  // ゲート read 時導出の共有スナップショット (all を1回だけ走査。/api/state 3秒ポーリングの
+  // ホットパスなので items.all()/children を per-item で呼び直さない)。
+  const gateSnap = buildGateSnapshot(all);
+  const pauseAuto = settings.get().pauseAuto;
   const visible = all.filter((it) => {
     // 1) cancelled は常に再浮上させない(cancelExecution は status='rejected' にもするが
     //    executionStatus でも二重に保険)。
@@ -221,12 +241,16 @@ export function queue(): QueueItem[] {
             toDisposition: last.toDisposition,
           }
         : null;
+    // ゲート由来 proposed の live 導出 (needs_human 由来と非 proposed は null)。
+    const gate = deriveProposedGate(it, gateSnap, { pauseAuto });
     return {
       ...it,
       isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
       topReason: scoreItem(it).topReason,
       lane,
-      surfaceReason: surfaceReasonOf(it, ageDays),
+      surfaceReason: surfaceReasonOf(it, ageDays, gate),
+      gateKind: gate?.kind ?? null,
+      blockerId: gate?.blockerId ?? null,
       staleDays,
       ageDays,
       undoableLabel,

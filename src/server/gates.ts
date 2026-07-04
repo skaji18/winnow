@@ -1,0 +1,268 @@
+// 実行点火ゲートの述語・閾値・文言の単一真実源 (REQUIREMENTS §3.4/§3.6-3)。
+// executor (write 時: ゲート発動の痕跡を executionResult に残す) と queue (read 時:
+// 承認待ちの一行理由を「今この瞬間の構造」から導出する) の両方がここを import する。
+// 依存は domain(型) と paths のみ — repo/ai/executor/queue を import しない (循環ゼロ・軽量)。
+// ガードは全て決定論 (構造シグナル)。推論でゲートしない (docs/INVARIANTS.md 実行ゲート)。
+//
+// 【登録規律】proposed に倒す新ゲートを executor に足すときは、必ずここへ述語・GateKind・
+// 文言を同時登録すること。登録漏れは read 時導出 (deriveProposedGate) が 'clear'
+// (解消済み) を誤表示する。
+
+import type { Item } from "./domain.js";
+import { validateProjectDir } from "./paths.js";
+
+export const REVERSIBLE_THRESHOLD = 0.6;
+// 高ステークス閾値。requestExecution の proposed ゲートと handoffRequired (§3.5) が共有する
+// (片方だけ変えると「ゲートは通るのに handoff 判定は高ステークス」の不整合が生まれる)。
+export const HIGH_STAKES_THRESHOLD = 0.7;
+
+/** 不可逆/高ステークス → 自動着火せず提案止まり (§3.4)。 */
+export function isIrreversibleOrHighStakes(item: Item): boolean {
+  return (
+    (item.reversibility ?? 0) < REVERSIBLE_THRESHOLD ||
+    (item.stakes ?? 0) > HIGH_STAKES_THRESHOLD
+  );
+}
+
+// --- ゲート文言 (write 時の痕跡と read 時導出の両方が使う。ドリフト防止で定数化) ---
+export const GATE_TEXT_IRREVERSIBLE = "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。";
+export const GATE_TEXT_PAUSE_AUTO =
+  "自動実行を一時停止中です(承認待ち。再開するか、そのままワンタップで実行)。";
+export const GATE_TEXT_CROSS_REPO =
+  "同一案件で複数リポジトリにまたがる自動実行が並んでいます。横断変更の暴発(契約不整合・順序破綻)を防ぐため承認待ち(独立した変更なら、そのままワンタップで実行)。";
+export const GATE_TEXT_CLEAR =
+  "着火時のゲートは解消済みです。そのままワンタップで実行できます。";
+export function gateTextBadProjectDir(reason: string): string {
+  return `作業ディレクトリが不正のため実行を保留しました(${reason})。`;
+}
+
+/**
+ * ゲート判定の読み取りスナップショット。requestExecution / queue() が呼び出しごとに
+ * 1回だけ構築し、述語が items.all()/items.children を何度も呼び直すのを避ける
+ * (/api/state は 3秒ポーリングのホットパス)。
+ */
+export interface GateSnapshot {
+  byId: Map<string, Item>;
+  childrenOf: Map<string, Item[]>; // orderIndex ASC (repo items.children と同じ並び)
+  all: Item[];
+  // validateProjectDir は fs realpath を含むため、同一 projectDir はスナップショット内で
+  // 1回だけ検証する (値は escalate 理由。null=OK)。
+  projectDirEscalates: Map<string, string | null>;
+}
+
+export function buildGateSnapshot(all: Item[]): GateSnapshot {
+  const byId = new Map(all.map((i) => [i.id, i] as const));
+  const childrenOf = new Map<string, Item[]>();
+  for (const it of all) {
+    if (!it.parentId) continue;
+    const arr = childrenOf.get(it.parentId) ?? [];
+    arr.push(it);
+    childrenOf.set(it.parentId, arr);
+  }
+  for (const arr of childrenOf.values()) arr.sort((a, b) => a.orderIndex - b.orderIndex);
+  return { byId, childrenOf, all, projectDirEscalates: new Map() };
+}
+
+function projectDirEscalateReason(dir: string, snap: GateSnapshot): string | null {
+  if (!snap.projectDirEscalates.has(dir)) {
+    const v = validateProjectDir(dir);
+    snap.projectDirEscalates.set(dir, v.escalate ? (v.reason ?? "検証失敗") : null);
+  }
+  return snap.projectDirEscalates.get(dir) ?? null;
+}
+
+/**
+ * cross-repo 協調ガード (§3.6-3 締めるのは速く / §2.2). 同一案件で projectDir の異なる
+ * leaf が他にも auto/実行中で並んでいるなら、repoをまたぐアトミック変更の暴発(契約の
+ * 受け渡し不整合・順序破綻)を疑い、自動着火を止めて人間のワンタップ承認に回す。
+ * cross-repo性はテキストから構造的に観測できない (§3.2) ので、推論ではなく
+ * 「同一案件×異projectDir×auto/実行中」という決定論的な代理シグナルで安全側に倒す。
+ * 独立な多repoタスクも巻き込みうるが、過剰エスカレーションは安く速く可逆 (§3.6-3) なので
+ * その側に倒す。承認(approveExecution)はこのガードを通らず実行できる=ワンタップの逃げ道。
+ */
+function isCrossRepoPendingSibling(item: Item, o: Item): boolean {
+  return (
+    o.id !== item.id &&
+    o.projectId === item.projectId &&
+    o.kind === "leaf" &&
+    o.projectDir != null &&
+    o.projectDir !== item.projectDir &&
+    // まだ片付いていない auto/実行中の兄弟だけを対象に。完了/取消済みは外す
+    // (古い成功が延々とガードを引かないように)。proposed(auto)同士は互いに
+    // マッチし続けるので、同時バーストは両方そろって承認待ちに倒れ対称性が保たれる。
+    // awaiting_handoff は実行成功済み(人間の引き取り待ち)なので「完了側」に数え、下流を塞がない。
+    o.executionStatus !== "succeeded" &&
+    o.executionStatus !== "cancelled" &&
+    o.executionStatus !== "awaiting_handoff" &&
+    (o.disposition === "auto" || o.executionStatus === "running" || o.executionStatus === "queued")
+  );
+}
+
+export function crossRepoSiblingPending(item: Item, snap: GateSnapshot): boolean {
+  if (!item.projectId || !item.projectDir) return false;
+  return snap.all.some((o) => isCrossRepoPendingSibling(item, o));
+}
+
+/** cross-repo ガードを引いている相手 (待ち先チップ用)。無ければ null。 */
+function crossRepoBlockerOf(item: Item, snap: GateSnapshot): Item | null {
+  if (!item.projectId || !item.projectDir) return null;
+  return snap.all.find((o) => isCrossRepoPendingSibling(item, o)) ?? null;
+}
+
+/**
+ * 「未完の上流兄弟」判定 (uncertainNodeOrUpstreamPending (c) と uncertainGateReason の
+ * 単一の真実源=両者のドリフト防止)。レビュー leaf (reviewOfId 非null) は観察タスクであって
+ * 下流の前提物ではないので「上流」と数えない — 未処分のレビューが後続兄弟の自動着火を
+ * 黙って塞ぐ穴を閉じる (§3.5 レビューは継ぎ目に乗るがパイプラインを堰き止めない)。
+ */
+export function isPendingUpstreamSibling(item: Item, o: Item): boolean {
+  return (
+    o.id !== item.id &&
+    o.reviewOfId == null &&
+    o.orderIndex < item.orderIndex &&
+    o.status !== "done" &&
+    o.status !== "rejected" &&
+    o.executionStatus !== "succeeded" &&
+    o.executionStatus !== "cancelled" &&
+    // awaiting_handoff は実行成功済み(引き取り待ち)=上流として完了扱い。下流の点火を塞がない。
+    o.executionStatus !== "awaiting_handoff"
+  );
+}
+
+/**
+ * 「何がこの item を塞いでいるか」の構造化導出 — 点火ゲート判定 (uncertainNodeOrUpstreamPending)・
+ * 発動時文言 (uncertainGateReason)・read 時導出 (deriveProposedGate) の三者が共有する
+ * 単一の真実源。why の判定順は点火ゲート (a)(b)(c) と同一:
+ *  parent_unresolved: 親が未確定 (parent.uncertaintyResolved===false)。
+ *  parent_blocked: 親を人間が保留 (parent.status==='blocked')。
+ *  sibling: 同一親×上流 (orderIndex が前) の兄弟が未完 (orderIndex 最小の該当兄弟を返す)。
+ * parentId が null / 親不在 / どれにも該当しなければ { blocker: null, why: null }。
+ */
+export function upstreamBlockerOf(
+  item: Item,
+  snap: GateSnapshot,
+): {
+  blocker: Item | null;
+  why: "parent_unresolved" | "parent_blocked" | "sibling" | null;
+} {
+  if (!item.parentId) return { blocker: null, why: null };
+  const parent = snap.byId.get(item.parentId);
+  if (!parent) return { blocker: null, why: null };
+  if (parent.uncertaintyResolved === false) return { blocker: parent, why: "parent_unresolved" };
+  if (parent.status === "blocked") return { blocker: parent, why: "parent_blocked" };
+  const sib = (snap.childrenOf.get(item.parentId) ?? []).find((o) =>
+    isPendingUpstreamSibling(item, o),
+  );
+  if (sib) return { blocker: sib, why: "sibling" };
+  return { blocker: null, why: null };
+}
+
+/**
+ * 未確定ノード配下リーフの点火ゲート (§3.4/§3.6-3 締めるのは速く)。crossRepoSiblingPending と
+ * 同型の決定論ガード(推論なし・安全側に倒す)。(a)親未確定 / (b)親blocked / (c)上流兄弟未完 の
+ * OR が真なら auto 着火せず proposed に倒す。DAG/依存自動推論/blockedBy 新スキーマは作らず、
+ * 既存 parentId/orderIndex/status のみで判定。承認(approveExecution)はこのガードを通らない
+ * =ワンタップの逃げ道 (crossRepo と対称)。
+ */
+export function uncertainNodeOrUpstreamPending(item: Item, snap: GateSnapshot): boolean {
+  return upstreamBlockerOf(item, snap).why !== null;
+}
+
+function upstreamGateText(
+  why: "parent_unresolved" | "parent_blocked" | "sibling",
+  blocker: Item,
+): string {
+  if (why === "parent_unresolved")
+    return "親ノードの不確実性が未解消です。先に方向を確定してから(確定済みなら、そのままワンタップで実行)。＝親確定待ち";
+  if (why === "parent_blocked") return "親が保留(blocked)中です。＝親解除待ち";
+  return `上流「${blocker.title.slice(0, 40)}」が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)`;
+}
+
+/**
+ * 点火ゲートが立った理由を判定して一行で返す(ゲート発動時に executionResult へ書く痕跡)。
+ * 上流完了待ちは「どの兄弟が塞いでいるか」を実名で出す (§4-2 理由はグランス可能に)。
+ * 表示の真実は read 時導出 (deriveProposedGate) 側 — この保存文言は発動時点の痕跡であり、
+ * 上流完了後は陳腐化しうる (queue が read 時に上書き表示する)。
+ */
+export function uncertainGateReason(item: Item, snap: GateSnapshot): string {
+  const up = upstreamBlockerOf(item, snap);
+  if (up.why && up.blocker) return upstreamGateText(up.why, up.blocker);
+  return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
+}
+
+// --- read 時導出 (queue.ts が /api/state ごとに呼ぶ) ---
+
+export type GateKind =
+  | "bad_project_dir"
+  | "irreversible"
+  | "parent_unresolved"
+  | "parent_blocked"
+  | "upstream"
+  | "cross_repo"
+  | "pause_auto"
+  | "clear";
+
+export interface GateDerivation {
+  kind: GateKind;
+  // 塞いでいる実体 (待ち先チップのジャンプ先)。親ゲートは親、上流/横断は該当兄弟。
+  // 実体が特定できないゲート (不可逆/pause 等) は null。
+  blockerId: string | null;
+  reason: string; // live な一行理由 (保存 executionResult を表示の真実にしない)
+}
+
+/**
+ * proposed の一行理由を「今この瞬間の構造」から導出する (§4-2 理由はグランス可能に)。
+ * ゲート発動時に保存された executionResult は発動時点の痕跡で、上流完了後も
+ * 「上流Xが未完です」と表示され続ける陳腐化があった — read 時導出が表示の真実になる。
+ *
+ * null を返す=導出しない(呼び出し側は従来どおり保存 executionResult を表示):
+ *  - 非 proposed / node。
+ *  - needs_human 由来 (worker が「人間の判断が要る」と返した proposed)。executionResult には
+ *    worker 成果テキストが入っており上書きしてはならない。判別は「worker 成果の実在」
+ *    (autoExecuted=true かつ executionSummary/executionOutput のいずれか非null) —
+ *    ゲート書き込みはこの2列に触れないため、undo/PATCH で status が変わっても判別が外れない
+ *    (status='in_progress' の組で判別すると、undo で classified に戻った needs_human proposed に
+ *    導出が走り、worker の「人間の判断が要る」理由を『解消済み』文言で上書きする穴があった)。
+ *    既知の残穴: 実行済み(成果あり)の item の再実行がゲートに落ちた場合は保存ゲート文言の
+ *    まま表示される (従来と同じ挙動=悪化はしない)。
+ *
+ * 判定順は fire 順 (requestExecution) の鏡写しではなく安全優先:
+ *  1) bad_project_dir — approve でも解除されない唯一のゲート (runExecution 最終ゲート)。
+ *     人間が直すべき原因を他ゲート文言で隠すと「承認→即バウンス」の原因不明ループになる。
+ *  2) irreversible — 不可逆/高ステークス警告を pause 等の一般文言で覆わない (誤承認防止)。
+ *  3) 構造ゲート (親確定待ち/親保留/上流未完/横断) — 塞いでいる相手を実名+ID で。
+ *  4) pause_auto — 上のどれでもなく、一時停止だけが理由のとき。
+ *  5) clear — 全ゲート解消済み。ワンタップを促す (自動再点火はしない=緩めない)。
+ */
+export function deriveProposedGate(
+  item: Item,
+  snap: GateSnapshot,
+  opts: { pauseAuto: boolean },
+): GateDerivation | null {
+  if (item.executionStatus !== "proposed" || item.kind !== "leaf") return null;
+  // needs_human 由来 (worker 成果の実在で判別。ゲート書き込みは summary/output を書かない)。
+  if (item.autoExecuted && (item.executionSummary != null || item.executionOutput != null))
+    return null;
+  if (item.projectDir != null) {
+    const esc = projectDirEscalateReason(item.projectDir, snap);
+    if (esc)
+      return { kind: "bad_project_dir", blockerId: null, reason: gateTextBadProjectDir(esc) };
+  }
+  if (isIrreversibleOrHighStakes(item))
+    return { kind: "irreversible", blockerId: null, reason: GATE_TEXT_IRREVERSIBLE };
+  const up = upstreamBlockerOf(item, snap);
+  if (up.why && up.blocker) {
+    const kind: GateKind =
+      up.why === "sibling"
+        ? "upstream"
+        : up.why === "parent_unresolved"
+          ? "parent_unresolved"
+          : "parent_blocked";
+    return { kind, blockerId: up.blocker.id, reason: upstreamGateText(up.why, up.blocker) };
+  }
+  const cross = crossRepoBlockerOf(item, snap);
+  if (cross) return { kind: "cross_repo", blockerId: cross.id, reason: GATE_TEXT_CROSS_REPO };
+  if (opts.pauseAuto && item.disposition === "auto")
+    return { kind: "pause_auto", blockerId: null, reason: GATE_TEXT_PAUSE_AUTO };
+  return { kind: "clear", blockerId: null, reason: GATE_TEXT_CLEAR };
+}

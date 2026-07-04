@@ -585,6 +585,30 @@ function QueueCard({
               </button>
             );
           })()}
+        {/* 依存の待ち先チップ: ゲートで止まっている承認待ちが「何を待っているか」の実体へ
+            ジャンプ (reviewOfId チップと同型)。サーバの read 時導出 (queue.ts gateKind/blockerId)
+            なので、上流が完了すればチップも自然に消える。 */}
+        {item.blockerId &&
+          (() => {
+            const b = state.items.find((i) => i.id === item.blockerId);
+            const label =
+              item.gateKind === "parent_unresolved" || item.gateKind === "parent_blocked"
+                ? "待ち先(親)"
+                : "待ち先";
+            return (
+              <button
+                className="badge"
+                style={{ cursor: "pointer" }}
+                title="このタスクを塞いでいるカードへ移動"
+                onClick={() => {
+                  const el = document.getElementById(`qc-${item.blockerId}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+              >
+                {label}: {b ? b.title.slice(0, 24) : "(削除済み)"} →
+              </button>
+            );
+          })()}
         {/* 分解の背景ジョブ進捗を静かに前面化する引っぱりナッジ (§3.3, §4)。 */}
         {item.decomposeStatus === "running" && <span className="badge">分解中…</span>}
         {item.decomposeStatus === "ready" && (
@@ -608,8 +632,12 @@ function QueueCard({
       {/* artifacts / sourceUrl のリンクチップ (read-only 痕跡)。 */}
       <ArtifactChips artifacts={item.artifacts} sourceUrl={item.sourceUrl} />
 
-      {/* 実行結果: general は summary/output を分離表示、それ以外は連結を1ペイン。 */}
-      {(item.executionResult || splitOutput) && (
+      {/* 実行結果: general は summary/output を分離表示、それ以外は連結を1ペイン。
+          ゲート由来 proposed (gateKind 非null) で worker 成果物が無いものは出さない —
+          executionResult はゲート発動時点の一行文言そのもので、live な理由 (surfaceReason)
+          との二重表示=陳腐化文言の残置になるため。 */}
+      {(item.executionResult || splitOutput) &&
+        !(item.gateKind && !item.executionSummary && !item.executionOutput) && (
         <details className="exec">
           <summary className="muted">
             {proposed ? "計画プレビュー(実行されたら何が起きるか)を見る" : "実行結果 / メモを見る"}
