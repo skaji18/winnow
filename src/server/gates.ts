@@ -190,6 +190,18 @@ export function uncertainGateReason(item: Item, snap: GateSnapshot): string {
   return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
 }
 
+/**
+ * 「worker 成果の実在」= needs_human 由来 proposed / 実行済み item の単一判別式
+ * (executor の escalate 終端と queue/deriveProposedGate の read 時判別が共有する。
+ * write と read が別々のインライン式を持つとドリフトするため export で一本化)。
+ * ゲート書き込み (requestExecution / runExecution の proposed 倒し) は executionResult のみ
+ * 書き、executionSummary/executionOutput には触れない — needs_human は applyExecuteResult が
+ * この2列を書くので、成果の実在がそのまま「worker が一度は走った」の決定論シグナルになる。
+ */
+export function hasWorkerOutcome(item: Item): boolean {
+  return item.autoExecuted && (item.executionSummary != null || item.executionOutput != null);
+}
+
 // --- read 時導出 (queue.ts が /api/state ごとに呼ぶ) ---
 
 export type GateKind =
@@ -240,14 +252,19 @@ export function deriveProposedGate(
   opts: { pauseAuto: boolean },
 ): GateDerivation | null {
   if (item.executionStatus !== "proposed" || item.kind !== "leaf") return null;
-  // needs_human 由来 (worker 成果の実在で判別。ゲート書き込みは summary/output を書かない)。
-  if (item.autoExecuted && (item.executionSummary != null || item.executionOutput != null))
-    return null;
+  // bad_project_dir は needs_human 素通しより【先】に評価する(素通しの明示例外)。
+  // 成果あり item の projectDir が不正化すると、素通し優先では gateKind=null になり
+  // UI の bad_project_dir 出し分けが不発 → 承認が AI 非起動で即バウンスする原因が
+  // worker 文言の裏に隠れる(「承認→即バウンス」の原因不明ループ)。live 構造導出で
+  // 保存文言に依存しないため、worker 成果を上書きせず両立する。
   if (item.projectDir != null) {
     const esc = projectDirEscalateReason(item.projectDir, snap);
     if (esc)
       return { kind: "bad_project_dir", blockerId: null, reason: gateTextBadProjectDir(esc) };
   }
+  // needs_human 由来 (worker 成果の実在 hasWorkerOutcome で判別。ゲート書き込みは
+  // summary/output を書かない)。
+  if (hasWorkerOutcome(item)) return null;
   if (isIrreversibleOrHighStakes(item))
     return { kind: "irreversible", blockerId: null, reason: GATE_TEXT_IRREVERSIBLE };
   const up = upstreamBlockerOf(item, snap);

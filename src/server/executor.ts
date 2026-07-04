@@ -14,6 +14,7 @@ import { validateProjectDir } from "./paths.js";
 import {
   buildGateSnapshot,
   crossRepoSiblingPending,
+  hasWorkerOutcome,
   uncertainNodeOrUpstreamPending,
   uncertainGateReason,
   isIrreversibleOrHighStakes,
@@ -185,17 +186,28 @@ export async function requestExecution(
 function applyExecuteResult(
   itemId: string,
   out: Partial<ExecuteOut>,
-  opts: { externalApproved?: boolean } = {},
+  opts: { externalApproved?: boolean; humanApproved?: boolean } = {},
 ): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
   const succeeded = out.status === "succeeded";
   // 引き取り要否 (§3.5): 成功かつ責任が残る成果物なら done に沈めず awaiting_handoff へ。
   const handoff = succeeded && handoffRequired(item, out, opts.externalApproved === true);
+  // 承認後 needs_human の escalate 終端: 人間の承認を経た再走(humanApproved=承認事実+前回計画
+  // 注入済みプロンプト)がそれでも needs_human を返したら、proposed に戻さず classified に倒す
+  // = 承認カードの無限再出現を断ち、承認サイクルあたり worker 実行を最大2回で終端する。
+  // hasWorkerOutcome(更新前 item) 条件により、ゲート由来 proposed の初回承認(前回成果なし=
+  // priorPlan 未注入)の needs_human は従来どおり proposed に落ちる(承認チャネルは残る)。
+  // escalate 後の手動再実行は humanApproved 無しなので、needs_human を返せば proposed に戻り
+  // 承認チャネルが再開通する(袋小路にしない。1周ごとに人間タップ=タップ律速で有界)。
+  const repeat =
+    opts.humanApproved === true && out.status === "needs_human" && hasWorkerOutcome(item);
   const updated = items.update(itemId, {
     executionStatus:
       out.status === "needs_human"
-        ? "proposed"
+        ? repeat
+          ? "none"
+          : "proposed"
         : !succeeded
           ? "failed"
           : handoff
@@ -203,7 +215,12 @@ function applyExecuteResult(
             : "succeeded",
     // 成功かつ引き取り要 → done にせず review(引き取り待ち)。やって終わりの成功のみ done。
     // それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
-    status: succeeded ? (handoff ? "review" : "done") : "in_progress",
+    // escalate 終端(repeat)のみ classified へ=キューの通常可視ルールで前面に残る。
+    status: succeeded ? (handoff ? "review" : "done") : repeat ? "classified" : "in_progress",
+    // disposition の書き換えは auto 起点のみ(人間が reclassify で明示した human を label 無しで
+    // 潰さない=人間の処分が勝つ)。labels は積まず recordOutcome も呼ばない(worker 自己申告
+    // 由来の機械遷移を較正母数に混ぜない — requestExecution の auto 出所不正 flip と同型)。
+    ...(repeat && item.disposition === "auto" ? { disposition: "escalate" as const } : {}),
     autoExecuted: true,
     // executionResult は後方互換で連結文字列を維持(UI/キュー一行が参照)。
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
@@ -264,7 +281,10 @@ function applyExecuteResult(
 export async function runExecution(
   itemId: string,
   instruction = "",
-  opts: { externalApproved?: boolean } = {},
+  // humanApproved=true は「人間が(前回の変更計画を見て)ワンタップ承認した再走」
+  // (approveExecution からのみ立つ)。externalApproved と独立: 承認の事実の伝達であって
+  // 外部送信の解禁ではない。needs_human 再返答の escalate 終端(applyExecuteResult)の鍵。
+  opts: { externalApproved?: boolean; humanApproved?: boolean } = {},
 ): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
@@ -304,6 +324,24 @@ export async function runExecution(
     }
   }
 
+  // 承認済み再走の差分保証: 前回 needs_human で返した変更計画/成果をプロンプトへ注入し、
+  // 初回拒否時と同一プロンプトの再投入(worker が同じ判断で needs_human を繰り返す再拒否ループ)を
+  // 構造的に無くす。worker 自己申告由来テキストなので redactSecrets を結合後に1回通し、
+  // レビュー leaf の承認再走で reviewMaterial と同時非空になっても合算が暴れないよう
+  // 先頭 4,000 字に切り詰める。
+  let priorPlan = "";
+  if (opts.humanApproved === true && hasWorkerOutcome(item)) {
+    priorPlan = redactSecrets(
+      [
+        item.executionSummary ? `前回サマリ: ${item.executionSummary}` : "",
+        item.executionOutput ? `前回の変更計画/成果:\n${item.executionOutput}` : "",
+        item.rollbackPlan ? `前回申告の巻き戻し手順:\n${item.rollbackPlan}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    ).slice(0, 4_000);
+  }
+
   items.update(itemId, { executionStatus: "running", status: "in_progress" });
   const driver = await ensureDriver();
   // dispatch の req.id を相関IDとして先に確保し、jobs に永続化する。これで起動時
@@ -336,6 +374,7 @@ export async function runExecution(
       instruction,
       opts.externalApproved === true,
       reviewMaterial,
+      { humanApproved: opts.humanApproved === true, priorPlan },
     ),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
@@ -384,6 +423,8 @@ export async function runExecution(
 
   return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>, {
     externalApproved: opts.externalApproved === true,
+    // これを落とすと escalate 終端(repeat)が通常経路で一切発火しない。
+    humanApproved: opts.humanApproved === true,
   });
 }
 
@@ -421,6 +462,10 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
     const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
     const out = parseJson(raw) as Partial<ExecuteOut>;
     // job に永続化した外部送信ゴーサインを復元して渡す(handoffRequired 安全弁 (d) の発火)。
+    // humanApproved は jobs に永続化していないため復元しない → repeat=false → needs_human は
+    // 従来どおり proposed に戻る(安全側フォールバック。timed_out を跨いだ承認再走の escalate
+    // 終端は失われるが、人間が再承認すれば注入つきで再走する=タップ律速で有界。
+    // jobs への新列永続化(v4→v5)は実測で頻発したら defer 解除)。
     applyExecuteResult(job.itemId, out, { externalApproved: job.externalApproved === true });
     jobs.update(job.id, {
       status: out.status === "failed" ? "failed" : "succeeded",
@@ -553,11 +598,13 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   if (item.executionStatus !== "proposed") return item;
-  // 人間が明示で押した=外部送信(push/PR作成)ゴーサイン。再拒否ループを断つ (§3.4)。
-  // ただし外部送信の解禁は settings.allowExternalSend のオプトイン時のみ(既定 OFF=緩めは慎重 §3.6-3)。
-  // OFF のときは従来どおりゲート解除のみで、worker は外部送信を needs_human で拒否し続ける。
+  // 人間が明示で押した=承認の事実(humanApproved)を必ず worker へ伝える (§3.4)。
+  // 外部送信(push/PR作成)の解禁はこれと独立で、settings.allowExternalSend のオプトイン時のみ
+  // (既定 OFF=緩めは慎重 §3.6-3)。OFF でも承認再走は「承認済み+前回計画+ローカル可逆作業に限る」
+  // 入りの非同一プロンプトになり、needs_human 再返答は applyExecuteResult が escalate 終端する
+  // =承認が no-op になる再拒否ループを断つ。
   const externalApproved = settings.get().allowExternalSend === true;
-  return runExecution(itemId, "", { externalApproved });
+  return runExecution(itemId, "", { externalApproved, humanApproved: true });
 }
 
 /**
@@ -605,7 +652,9 @@ export async function cancelExecution(itemId: string): Promise<Item | null> {
   // 未実行 proposed の「提案を取り消す」= 実行の取り消しではなく提案の却下。cancelled
   // (実行済みの取り消し専用・undo 不能の終端)に倒さず、reject の正規路(label あり=
   // 『さばきを戻す』で復元可能)へ流す (§4-4 誤タップから安く戻れる)。autoExecuted=true の
-  // proposed(needs_human 往復後)も worker は副作用ゼロの契約なので同じ扱いでよい。
+  // proposed(needs_human 往復後)も同じ扱い — ただし承認済み再走(humanApproved)は
+  // 「ローカルで可逆な作業に限り進める」契約なので、needs_human=副作用完全ゼロとは
+  // 限らなくなった。文言は「この提案自体による実行なし+過去の痕跡は履歴に残る」に留める。
   if (item.executionStatus === "proposed") {
     labels.record({
       itemId,
@@ -617,7 +666,8 @@ export async function cancelExecution(itemId: string): Promise<Item | null> {
     return items.update(itemId, {
       executionStatus: "none",
       status: "rejected",
-      executionResult: "実行提案を取り消しました(実行はされていません)。",
+      executionResult:
+        "実行提案を取り消しました(この提案による実行はされていません。過去の実行痕跡があれば履歴に残ります)。",
     });
   }
 

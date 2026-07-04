@@ -177,6 +177,10 @@ export function executePrompt(
   instruction = "",
   externalApproved = false,
   reviewMaterial = "",
+  // 承認済み再走 (approveExecution 経由) のみが渡す。humanApproved=承認の事実の伝達
+  // (外部送信の解禁は含まない=解禁は externalApproved のみ)。priorPlan=前回の変更計画/成果。
+  // 両方空なら出力は従来と一字一句同一 (後方互換)。
+  opts: { humanApproved?: boolean; priorPlan?: string } = {},
 ): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
@@ -210,12 +214,37 @@ export function executePrompt(
 レビューし、問題点があれば具体的に output に列挙してください(問題が無ければ「問題なし」と明記)。
 ${fenceBody("レビュー対象", reviewMaterial.trim())}`
     : "";
+  // 承認済み再走: 承認の事実を domain 非依存で伝える (§3.4 人間が明示で押したものは流す)。
+  // これが無いと general は承認が一切プロンプトに載らず、software(送信OFF)も初回拒否時と
+  // 同一プロンプトの再投入になり、worker が同じ判断で needs_human を繰り返す(再拒否ループ)。
+  // 承認が伝えるのは「人間が計画を確認した」の事実のみ — 外部送信の解禁は externalApproved
+  // だけが担い、採用/破壊(マージ・本番デプロイ・データ削除)は承認後も常に禁止。
+  const approvedNote = opts.humanApproved
+    ? `\n\n## 人間の承認済み
+人間は前回のあなたの変更計画を確認のうえ、ワンタップで承認済みです。実行できる部分を進め、
+status を "succeeded" で返すことを目指すこと。ただし:
+- 外部送信(push/PR作成)の可否はこの承認では変わらない(可否は上の外部送信に関する指示に従う)。
+- 採用/破壊(マージ・本番デプロイ・データ削除)は承認後も常に禁止。
+- ソフトウェアタスクで外部送信が許可されていない場合は、ローカルで可逆な作業(編集・コミット・検証)に
+  限り進め、外部送信の一歩手前まで完了させて "succeeded" で返すこと(送信待ちであることを output に明記)。
+- それでも "needs_human" で返す場合は、前回と同じ文面を繰り返さず、人間が外で行うべき操作を
+  箇条書きで具体的に output に書くこと。`
+    : "";
+  // 承認済み再走の差分保証: 前回の変更計画/成果を観察対象データとして渡し、ゼロからの
+  // 作り直し(時間/クォータの浪費)と完全同一プロンプトの再投入を構造的に無くす。
+  const priorPlan = (opts.priorPlan ?? "").trim();
+  const priorNote = priorPlan
+    ? `\n\n## 前回の実行(人間確認待ちで停止)
+このタスクは前回の実行が人間確認待ち(needs_human)で停止し、人間の確認を経て再開されたものです。
+ゼロから作り直さず、以下の前回の計画/成果を踏まえて続きから進めること。
+${fenceBody("前回の変更計画", priorPlan)}`
+    : "";
   return `${SPINE}
 ${ctx}
 # タスク: 実行(Executor)
 以下は「リーフ(実行可能タスク)」です。上の【文脈】(プロダクト前提・案件前提・上位の意図)に
 沿って実行してください。bodyの受け入れ基準を満たすことをゴールにすること。
-${softwareNote}${redirectNote}${reviewNote}
+${softwareNote}${approvedNote}${redirectNote}${reviewNote}${priorNote}
 
 ## アイテム
 ${fenceBody("title", item.title)}
