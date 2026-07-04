@@ -1,3 +1,4 @@
+import { clip } from "./context.js";
 import type { Disposition, Item, LabelAction } from "./domain.js";
 import { items, labels, settings } from "./repo.js";
 import {
@@ -161,22 +162,21 @@ function surfaceReasonOf(it: Item, ageDays: number | null, gate: GateDerivation 
     // 先頭行を優先する(worker 語の【列選択】であり導出上書きではない)。summary 欠落時も
     // executionResult 全文を素通しせず先頭行+80字上限に丸める(一行理由が長文に埋もれる/
     // INVARIANTS「先頭行の列選択まで」の線を守る。timed_out/failed の trace 切り詰めと対称)。
+    // 80字上限は clip(番兵つき・サロゲートペア非分断)で丸める(生 slice は絵文字等の
+    // ペアを分断し U+FFFD 化しうる。priorPlan 切り詰めと同じ共有ヘルパ)。
     base = gate
       ? gate.reason
-      : (firstLine(it.executionSummary) || firstLine(it.executionResult) || "承認待ち").slice(
-          0,
-          80,
-        );
+      : clip(firstLine(it.executionSummary) || firstLine(it.executionResult) || "承認待ち", 80, "…");
   } else if (isEscalateTerminated(it)) {
     // 承認後 needs_human の escalate 終端 (executor.applyExecuteResult の repeat 遷移。
     // 述語は gates.isEscalateTerminated が単一真実源=write 側の遷移とドリフトさせない)。
     // worker の停止理由(最新の needs_human 文面)を一行で前面に出す。この状態組には
     // 他経路(reject→undo 復帰等)でも到達しうるため、回数(「2回」)は断定しない。
-    base = `AI停止(人間の対応待ち): ${(
-      firstLine(it.executionSummary) ||
-      firstLine(it.executionResult) ||
-      "詳細は実行結果を参照"
-    ).slice(0, 80)}`;
+    base = `AI停止(人間の対応待ち): ${clip(
+      firstLine(it.executionSummary) || firstLine(it.executionResult) || "詳細は実行結果を参照",
+      80,
+      "…",
+    )}`;
   } else {
     base = it.reason ?? "";
   }

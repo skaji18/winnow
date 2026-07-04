@@ -68,6 +68,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         it.kind === "leaf" &&
         it.disposition === "auto" &&
         it.executionStatus === "none" &&
+        // 一度でも worker が走った項目は自動では再点火しない(他の自動再点火経路
+        // resumePausedAuto / 在庫再適用 / 案件割当 sweep と同じガード)。これが無いと、
+        // needs_human 提案の「取り消し→undo」で disposition=auto に復元された項目や
+        // escalate 終端後に人間が auto へ再分類した項目が、worker が「人間の判断が要る」と
+        // 申告した直後に無承認で自動再実行される。再実行は人間の明示タップ(manual)で。
+        !it.autoExecuted &&
         !igniting.has(it.id)
       ) {
         if (budget <= 0) break;

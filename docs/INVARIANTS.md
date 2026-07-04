@@ -45,10 +45,10 @@
   （needs_human 判別式をクライアントに複製しない）。
 - `gates.isEscalateTerminated`（classified + leaf + executionStatus='none' + worker成果実在）は
   承認後 needs_human の **escalate 終端の正規状態**（一行理由「AI停止(人間の対応待ち)」）。
-  自動再点火の対象にしない（掃き出しは disposition=auto 限定・escalate flip 済み /
-  resumePausedAuto は !autoExecuted 限定 / 在庫再適用は !autoExecuted 限定 /
-  **案件割当の再分類 sweep は !autoExecuted 限定**＝実行済み項目を classify に流して
-  auto 復帰→無承認再着火させない）。
+- **一度でも worker が走った項目（autoExecuted）は自動では再点火しない**。全ての自動再点火経路が
+  `!autoExecuted` でガードする: /api/state の点火掃き出し / resumePausedAuto / 在庫再適用 /
+  案件割当の再分類 sweep（実行済み項目を classify に流して auto 復帰→無承認再着火させない）。
+  undo 等で disposition=auto に復元された実行済み項目の再実行は人間の明示タップのみ。
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 

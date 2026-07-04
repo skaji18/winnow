@@ -305,7 +305,13 @@ export async function runExecution(
     if (v.escalate) {
       return items.update(itemId, {
         executionStatus: "proposed",
-        executionResult: gateTextBadProjectDir(v.reason ?? "検証失敗"),
+        // needs_human 起源の proposed への承認がここでバウンスした場合、worker 成果の
+        // executionResult をゲート文言で上書きしない: 起源判別(連結一致)が壊れ、projectDir
+        // 修正後の承認で priorPlan 注入と escalate 終端が1周分失われる。表示の真実は
+        // read 時導出(deriveProposedGate が bad_project_dir を先に出す)なので痕跡は不要。
+        ...(isNeedsHumanProposed(item)
+          ? {}
+          : { executionResult: gateTextBadProjectDir(v.reason ?? "検証失敗") }),
       });
     }
   }

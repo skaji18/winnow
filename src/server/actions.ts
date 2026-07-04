@@ -47,7 +47,14 @@ export function doIt(itemId: string): Item | null {
     note: aiStopped ? DO_NOTE_AI_STOPPED : undefined,
   });
   if (aiStopped) {
-    return items.update(itemId, { status: "in_progress" });
+    // 監査サンプルが armed のまま(取り消し→undo で disposition=auto に復元された場合等)なら
+    // 旗だけ下ろす: audit_ok を簿記すると「自律完遂に失敗した実行」を是認として積む汚染、
+    // 放置すると isAudit チップが永久に残り監査サンプルが未決のまま失われる。
+    // 人間は現に確認している=旗は畳む・較正には数えない。
+    return items.update(itemId, {
+      status: "in_progress",
+      ...(item.auditSampled ? { auditSampled: false } : {}),
+    });
   }
   // 監査サンプルの auto を「やる」=自動処理を是認 → audit_ok の教師信号 (§4-3 見分けつかない混入).
   // recordAudit が audit_ok の簿記(bump+label)を一手に出すので、ここで recordOutcome を二重に呼ばない。
