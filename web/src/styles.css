@@ -304,3 +304,65 @@ summary.lane-head { cursor: pointer; }
   .badge, .card, .board-col { border: 1px solid currentColor; }
   .conf-fill { background: Highlight; }
 }
+
+/* --- モバイル対応 (DECISIONS「リモートアクセス（リバースプロキシ委譲）とモバイル対応」) ------ */
+/* 毎秒更新される経過秒表示でヘッダ幅が揺れないように。 */
+.header-counts { font-variant-numeric: tabular-nums; }
+/* 390px 幅で横スクロールの発生源になる flex 行は折り返す (デスクトップでも無害)。 */
+.mini-scores { flex-wrap: wrap; }
+.tree-row { flex-wrap: wrap; }
+/* タイトルは1文字幅まで潰さない: 収まらないバッジ/ボタンを折り返し側に追い出す。 */
+.tree-title { flex: 1; min-width: min(220px, 62vw); }
+/* 横持ちスマホで端末が画面を占有しない。 */
+.term { height: min(380px, 55dvh); }
+/* レビュー束ねのネスト (App.tsx の inline style から class 化。狭幅でインデントを縮める)。 */
+.review-bundle { margin-left: 18px; padding-left: 10px; border-left: 2px solid rgba(128,128,128,0.35); }
+/* キューの操作列: レンズ切替 + 検索トグル (検索はキーボード '/' 専用だったのを可視化)。 */
+.queue-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; flex-wrap: wrap; }
+.queue-toolbar .lens-toggle { margin: 0; }
+.filter-toggle { font-size: 12px; padding: 3px 12px; border-radius: 999px; }
+.filter-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+@media (max-width: 700px) {
+  .app { padding: 10px; }
+  /* iOS Safari は 16px 未満の入力欄フォーカスで自動ズームする。 */
+  input, textarea, select { font-size: 16px; }
+  /* タブは折り返しの壁にせず 1 行横スクロール。 */
+  nav.tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+  nav.tabs button { flex: 0 0 auto; white-space: nowrap; }
+  header.top { row-gap: 4px; }
+  header.top .tagline { display: none; }
+  .summary-line { margin-left: 0; flex-basis: 100%; }
+  /* 固定サイドバー系グリッドは縦積みに。min-width:0 でグリッド子の min-content 幅
+     (カンバン列の固定幅合計) がページ全体を押し広げるのを防ぐ (.board は内側でスクロール)。 */
+  .proj-layout { grid-template-columns: 1fr; }
+  .sessions-grid { grid-template-columns: 1fr; }
+  .proj-layout > *, .sessions-grid > * { min-width: 0; }
+  /* カードの見出しはタイトルを全幅にし、バッジ列を下に折る (タイトルの縦落ち防止)。 */
+  .card-head { flex-wrap: wrap; }
+  .card-title { flex: 1 1 100%; }
+  /* カンバンは列単位の横スクロール (縦積みだと隣列への移動先が見えない)。 */
+  .board { display: flex; overflow-x: auto; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+  .board-col { flex: 0 0 min(260px, 82vw); scroll-snap-align: start; }
+  /* ネストの累積インデントを浅く。 */
+  .tree-node { margin-left: 8px; padding-left: 8px; }
+  .review-bundle { margin-left: 6px; padding-left: 8px; }
+  .modal { width: 96%; padding: 14px; max-height: 90dvh; }
+  /* 見通し: rung 見出しを上に積み、タイトルは折り返して読めるように。 */
+  .horizon-row { display: block; }
+  .horizon-rung { padding-top: 0; margin-bottom: 4px; }
+  .horizon-title { white-space: normal; }
+}
+
+/* タッチ環境のみタップ目標を拡大 (マウス環境の密度は保つ)。title ツールチップは出ない前提で
+   誤タップ・タップ不能を減らす側に倒す。 */
+@media (pointer: coarse) {
+  button { min-height: 40px; padding: 8px 12px; }
+  select { min-height: 40px; }
+  .filter-chip { padding: 8px 12px; font-size: 12px; }
+  button.badge { padding: 6px 10px; font-size: 12px; min-height: 30px; }
+  .undo-inline { padding: 8px 4px; min-height: 0; }
+  .board-card select { padding: 8px 6px; font-size: 13px; }
+  .lens-toggle button, .filter-toggle { min-height: 36px; padding: 6px 14px; }
+  summary.lane-head, details.exec summary { padding: 6px 0; }
+}

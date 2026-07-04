@@ -5,6 +5,7 @@ import {
   DueBadge,
   PriorityBadge,
   ProjectChip,
+  copyText,
   parseDate,
   provisionalTitle,
 } from "./components/Bits.js";
@@ -128,7 +129,13 @@ export default function App() {
         {state.preflight && !state.preflight.ok && (
           <div className="cold-banner danger" role="alert">
             AI 未接続: {state.preflight.reason ?? "接続を確認できません"} →{" "}
-            <button onClick={() => api.initAi().then(refresh)}>セッション起動</button>
+            <button
+              onClick={() =>
+                api.initAi().then(refresh).catch((e) => setError((e as Error).message))
+              }
+            >
+              セッション起動
+            </button>
           </div>
         )}
 
@@ -338,22 +345,40 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
         />
       )}
 
-      {/* 俯瞰レンズの切替 (FilterBar とは別軸の純フロント状態)。処理量メトリクスは出さない。 */}
-      <div className="lens-toggle" role="group" aria-label="俯瞰レンズ">
-        {([
-          ["flat", "まとめない"],
-          ["project", "案件"],
-          ["horizon", "見通し"],
-        ] as const).map(([key, label]) => (
-          <button
-            key={key}
-            className={groupBy === key ? "active" : ""}
-            aria-pressed={groupBy === key}
-            onClick={() => setGroupBy(key)}
-          >
-            {label}
-          </button>
-        ))}
+      {/* 俯瞰レンズの切替 (FilterBar とは別軸の純フロント状態)。処理量メトリクスは出さない。
+          検索トグルはタッチ到達性のため常設 ('/' はキーボード専用でモバイルから到達不能だった)。 */}
+      <div className="queue-toolbar">
+        <div className="lens-toggle" role="group" aria-label="俯瞰レンズ">
+          {([
+            ["flat", "まとめない"],
+            ["project", "案件"],
+            ["horizon", "見通し"],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              className={groupBy === key ? "active" : ""}
+              aria-pressed={groupBy === key}
+              onClick={() => setGroupBy(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          className="filter-toggle"
+          aria-pressed={filterOpen}
+          onClick={() => {
+            if (filterOpen) {
+              // 閉じるときは FilterBar の onClose と同じ扱い (絞り込みも解除)。
+              setFilterOpen(false);
+              setFilter(emptyFilter());
+            } else {
+              setFilterOpen(true);
+            }
+          }}
+        >
+          検索 / 絞り込み
+        </button>
       </div>
 
       {/* 実績ゼロ初日の第一級メッセージ (§4 末 Jカーブ・期待値管理)。 */}
@@ -419,13 +444,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
               return (
                 <div key={q.id}>
                   {card}
-                  <div
-                    style={{
-                      marginLeft: 18,
-                      paddingLeft: 10,
-                      borderLeft: "2px solid rgba(128,128,128,0.35)",
-                    }}
-                  >
+                  <div className="review-bundle">
                     <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
                       └ この実行結果のレビュー
                     </div>
@@ -1049,9 +1068,13 @@ function GeneralOutlet({
     <div className="actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
       <button
         disabled={!output}
-        onClick={() => {
-          navigator.clipboard?.writeText(output);
-          live("成果物をコピーしました");
+        onClick={async () => {
+          // 偽の成功通知を出さない: http 越しのモバイル等では clipboard API が使えない。
+          live(
+            (await copyText(output))
+              ? "成果物をコピーしました"
+              : "コピーできませんでした。成果物のテキストを長押しで選択してください",
+          );
         }}
       >
         コピー
@@ -1175,7 +1198,7 @@ function AddItem({ state, onChange }: { state: AppState; onChange: () => void })
       <div className="add-form">
         {/* 本文(会話ログ/メモ)を主役に。雑に貼るだけで登録できる(新規儀式ゼロ §3.1)。 */}
         <textarea
-          placeholder="会話・メモ・タスクを雑に貼る（タイトルは空でOK。Ctrl/⌘+Enterで登録）"
+          placeholder="会話・メモ・タスクを雑に貼る（タイトルは空でOK）"
           value={body}
           rows={3}
           onChange={(e) => setBody(e.target.value)}
@@ -1260,6 +1283,7 @@ function DecomposeModal({
 }) {
   const live = useLive();
   const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   // item.id ごとに分解リクエストを1回だけ発火させる ref ガード(StrictMode 二重起動・再レンダ対策)。
   const kickedFor = useRef<string | null>(null);
@@ -1323,10 +1347,16 @@ function DecomposeModal({
 
   const apply = async (opt: DecomposeOption) => {
     setApplying(true);
+    setApplyError(null);
     try {
       await api.applyDecompose(item.id, opt);
       await onChange();
       onClose();
+    } catch (e) {
+      // 失敗を可視化しないと unhandled rejection でモーダルが開いたままになり、
+      // 再タップ=サーバ側で子アイテムの二重生成を誘う。
+      setApplyError((e as Error).message);
+      live("割り当てに失敗しました");
     } finally {
       setApplying(false);
     }
@@ -1339,8 +1369,19 @@ function DecomposeModal({
     api.decompose(item.id).catch(() => {});
   };
 
+  // タッチでモーダル内をスクロール中、指が縁の backdrop に触れただけで閉じる事故を防ぐ:
+  // mousedown/up (タップの開始と終了) が共に backdrop 上のときだけ閉じる。
+  const downOnBackdrop = useRef(false);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && downOnBackdrop.current) onClose();
+      }}
+    >
       <div
         className="modal"
         role="dialog"
@@ -1362,6 +1403,11 @@ function DecomposeModal({
         <p className="muted" style={{ fontSize: 12.5 }}>
           割り方の選択肢。サイクル長は不確実性に反比例（不明な段はPoCで情報を買う短サイクル §2.3）。
         </p>
+        {applyError && (
+          <div className="cold-banner" role="alert" style={{ marginBottom: 8 }}>
+            割り当てに失敗しました: {applyError}
+          </div>
+        )}
         {waiting && <DecomposeWaiting elapsed={elapsed} />}
         {needsRetry && (
           <div className="actions" style={{ marginTop: 4, flexWrap: "wrap" }}>
@@ -1488,7 +1534,7 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
     <div>
       <div className="tree-row">
         <span>{item.kind === "leaf" ? "▸" : "◆"}</span>
-        <span style={{ flex: 1 }}>
+        <span className="tree-title">
           {item.title}{" "}
           <span className="muted" style={{ fontSize: 11 }}>
             [{RUNG_LABEL[item.rung]}]
@@ -1516,6 +1562,9 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
         <button
           className="danger"
           onClick={async () => {
+            // 折り返しの多い狭幅レイアウトでの誤タップが即削除にならないよう確認を挟む
+            // (削除は UNDOABLE 外の不可逆操作)。
+            if (!window.confirm(`「${item.title}」を削除しますか？`)) return;
             await api.deleteItem(item.id);
             await onChange();
           }}
@@ -1538,12 +1587,16 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
 function SessionsView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [sel, setSel] = useState<string | null>(state.sessions[0]?.name ?? null);
   const [initing, setIniting] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
 
   const init = async () => {
     setIniting(true);
+    setInitError(null);
     try {
       await api.initAi();
       await onChange();
+    } catch (e) {
+      setInitError((e as Error).message);
     } finally {
       setIniting(false);
     }
@@ -1557,6 +1610,11 @@ function SessionsView({ state, onChange }: { state: AppState; onChange: () => vo
           {initing ? "起動中…" : "セッションを起動 / 再確認"}
         </button>
       </div>
+      {initError && (
+        <div className="cold-banner" role="alert">
+          セッション起動に失敗しました: {initError}
+        </div>
+      )}
       {state.sessions.length === 0 ? (
         <p className="muted">
           セッション未起動。「セッションを起動」を押すとtmuxにcontrol/workerのclaudeを常駐させます。
@@ -1812,9 +1870,12 @@ function McpSnippet({ endpoint }: { endpoint: string }) {
         </pre>
         <button
           aria-label="MCP 接続コマンドをコピー"
-          onClick={() => {
-            navigator.clipboard?.writeText(snippet);
-            live("MCP 接続コマンドをコピーしました");
+          onClick={async () => {
+            live(
+              (await copyText(snippet))
+                ? "MCP 接続コマンドをコピーしました"
+                : "コピーできませんでした。左のコマンドを長押しで選択してください",
+            );
           }}
         >
           コピー

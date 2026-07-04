@@ -108,7 +108,7 @@ export function FilterBar({
         <input
           ref={inputRef}
           type="text"
-          placeholder="本文・理由をインクリメンタル検索（Escで閉じる）"
+          placeholder="本文・理由をインクリメンタル検索"
           value={filter.text}
           onChange={(e) => setFilter({ ...filter, text: e.target.value })}
           style={{ flex: 1 }}

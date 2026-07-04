@@ -20,6 +20,23 @@ export const PATHS = {
 
 export const SERVER_PORT = Number(process.env.WINNOW_PORT ?? 8787);
 
+// リモートアクセス (DECISIONS「リモートアクセス」節): 既定は loopback のまま。
+// 公開はリバースプロキシ(認証+TLS を前段で担保)が正で、緩めは起動時 env のみ
+// (PATCH /api/settings からは緩められない=許可リストを API から緩めない非対称ポリシー)。
+export const SERVER_HOST = process.env.WINNOW_HOST ?? "127.0.0.1";
+
+/** カンマ区切りの追加許可ホスト名 (例: "winnow.example.com")。Origin/Host 検証に合流する。 */
+export const EXTRA_ALLOWED_HOSTS = (process.env.WINNOW_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+/** カンマ区切りの追加許可ポート。HTTPS(443) は Origin にポートが乗らないため通常不要。 */
+export const EXTRA_ALLOWED_PORTS = (process.env.WINNOW_ALLOWED_PORTS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 export function ensureDirs(): void {
   for (const p of [
     PATHS.home,

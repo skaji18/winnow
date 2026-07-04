@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import { ensureDirs, SERVER_PORT } from "./config.js";
+import { ensureDirs, SERVER_HOST, SERVER_PORT } from "./config.js";
 import "./db.js"; // initialize schema (quick_check 失敗時はここで throw して listen 前に落ちる)
 import { registerRoutes } from "./api/routes.js";
 import { registerMcp } from "./mcp/transport.js";
@@ -13,7 +13,13 @@ import { reconcileOnBoot, inFlightCount } from "./executor.js";
 import { recoverStuckDecomposes } from "./decomposer.js";
 import { preflightCheck } from "./ai/preflight.js";
 import { getRuntimeState, setReconcile, setPreflight } from "./runtime-state.js";
-import { registerSecurityHook, LOCAL_SECRET, originAllowed } from "./security.js";
+import {
+  registerSecurityHook,
+  LOCAL_SECRET,
+  originAllowed,
+  BIND_IS_LOOPBACK,
+  REMOTE_EXPOSED,
+} from "./security.js";
 
 ensureDirs();
 
@@ -144,6 +150,24 @@ if (fs.existsSync(webDist)) {
   });
 }
 
-await app.listen({ port: SERVER_PORT, host: "127.0.0.1" });
+// リモート公開の安全ゲート (DECISIONS「リモートアクセス」節):
+// dev (NODE_ENV!==production) は状態変更系のシークレットが免除されるため、公開向け緩め
+// (非 loopback バインド / 追加許可ホスト) と併用すると保護層が消える。組合せ自体を起動拒否する。
+// 公開構成の判定 (REMOTE_EXPOSED) は security.ts の /mcp loopback 限定と単一真実源。
+if (REMOTE_EXPOSED && process.env.NODE_ENV !== "production") {
+  console.error(
+    "winnow: WINNOW_HOST/WINNOW_ALLOWED_HOSTS を使う公開構成では NODE_ENV=production が必須です " +
+      "(dev はローカルシークレット免除のため公開すると変更系が無防備になる)。起動を中止します。",
+  );
+  process.exit(1);
+}
+if (!BIND_IS_LOOPBACK) {
+  console.warn(
+    `winnow: ${SERVER_HOST} にバインドします。winnow 自身は認証も TLS も持たないため、` +
+      "必ず前段のリバースプロキシ等で認証・TLS・/mcp 遮断を担保してください (OPERATOR_GUIDE §5)。",
+  );
+}
+
+await app.listen({ port: SERVER_PORT, host: SERVER_HOST });
 console.log(`\n  Winnow server → http://localhost:${SERVER_PORT}`);
 console.log(`  (dev frontend: http://localhost:5174)\n`);

@@ -81,7 +81,11 @@ export function Kanban({
                 )}
               </div>
             ))}
-            {cards.length === 0 && <div className="board-empty muted">ここにドロップ</div>}
+            {/* タッチでは DnD が使えないため「ドロップ」だけの案内にしない
+                (移動はカードのステータス選択でも可能)。 */}
+            {cards.length === 0 && (
+              <div className="board-empty muted">（空）ドロップまたはステータス選択で移動</div>
+            )}
           </div>
         );
       })}

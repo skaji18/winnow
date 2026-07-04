@@ -114,6 +114,39 @@ export function provisionalTitle(text: string): string {
   return (line ?? "").slice(0, 60);
 }
 
+/**
+ * クリップボードコピー。navigator.clipboard はセキュアコンテキスト(https/localhost)限定のため、
+ * 非対応環境では隠し textarea + execCommand にフォールバックし、成否を必ず返す。
+ * 呼び出し側は false のとき「コピーしました」を出さないこと(偽の成功通知を出さない)。
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 権限拒否等 → フォールバックへ。
+  }
+  // フォールバックは select() でフォーカスを奪うため、元のフォーカス(押したボタン)を復元する。
+  const active = document.activeElement as HTMLElement | null;
+  const ta = document.createElement("textarea");
+  try {
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    ta.remove();
+    active?.focus?.();
+  }
+}
+
 /** 期日入力(date)をepoch msに。空なら null。 */
 export function parseDate(v: string): number | null {
   if (!v) return null;
