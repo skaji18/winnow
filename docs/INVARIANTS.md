@@ -33,10 +33,16 @@
 - 監査サンプルは通常項目と見分けのつかない形で混ぜる（§4-3。専用画面・専用枠にしない）。
 - proposed の一行理由（surfaceReason）は **read 時に現在の構造から導出**する
   （`gates.deriveProposedGate`）。保存 `executionResult` はゲート発動時点の痕跡で、
-  **表示の真実にしない**（needs_human 由来＝autoExecuted かつ worker 成果
-  （executionSummary/Output）が実在するものは例外＝素通し）。
+  **表示の真実にしない**（needs_human 由来＝`gates.hasWorkerOutcome` が真のものは例外＝
+  worker 語を出す。ただし全文素通しではなく executionSummary の**先頭行の列選択**まで許す。
+  導出での上書きは不可）。**bad_project_dir だけは worker 成果の実在より先に評価**する
+  （素通し優先だと承認→無言バウンスの原因が worker 文言の裏に隠れる。素通しの明示例外）。
   導出は書き込みを伴わない（updatedAt を洗わない＝ageDays 滞留表示を壊さない）。
-  `gateKind` / `blockerId` は QueueItem の計算フィールドで、DB 列に永続化しない。
+  `gateKind` / `blockerId` / `needsHuman` は QueueItem の計算フィールドで、DB 列に永続化しない
+  （needs_human 判別式をクライアントに複製しない）。
+- `classified + leaf + executionStatus='none' + hasWorkerOutcome` は承認後 needs_human の
+  **escalate 終端の正規状態**（一行理由「AI停止(人間の対応待ち)」）。自動再点火の対象にしない
+  （掃き出しは disposition=auto 限定・escalate flip 済み / resumePausedAuto は !autoExecuted 限定）。
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 
@@ -70,6 +76,15 @@
   「解消済み」を誤表示する）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
 - 外部送信の解禁は `allowExternalSend` オプトイン時の承認・明示再走のみ（既定 OFF＝緩めは慎重）。
+- **承認経由の再実行プロンプトは初回 needs_human 時と同一にならない**（`humanApproved`＝承認の事実
+  ＋`priorPlan`＝前回計画を注入。同一プロンプト再投入は再拒否ループの再導入＝禁止）。承認が伝える
+  のは承認の事実のみで、外部送信の解禁を含まない（解禁は externalApproved だけが担う）。
+- **humanApproved な再走**（`approveExecution` 経由）への needs_human 応答は proposed に戻らず
+  classified に倒れる（escalate 終端）。disposition は auto の場合のみ escalate に書き換わる
+  （human は保持＝人間の処分が勝つ）。labels / recordOutcome は積まない（較正母数の純度）。
+  timed_out→sentinel 回収は humanApproved を復元できないため proposed に戻る（安全側）。
+- needs_human 判別の単一真実源は `gates.hasWorkerOutcome`（executor＝write と queue/導出＝read が
+  同一述語を import する。インライン複製を作らない）。
 - レビュー leaf: **深さ1固定**（レビューのレビューを作らない）・同一対象の未決レビューは重複生成しない・
   成功時のみ生成・上流未完ゲートの「上流」に数えない。
 - 実行の終端は受領（`receivedAt`）。全成功実行は人間が受領するまで取消ハンドルとして可視。
