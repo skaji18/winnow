@@ -74,6 +74,18 @@
   成功時のみ生成・上流未完ゲートの「上流」に数えない。
 - 実行の終端は受領（`receivedAt`）。全成功実行は人間が受領するまで取消ハンドルとして可視。
 
+## リモートアクセスの信頼境界（`security.ts` / `config.ts`）
+
+- winnow 本体は**認証・TLS を持たない**（ユーザ識別子なし）。公開時の境界は前段のリバースプロキシ
+  （認証＋TLS）が担保する。
+- バインド（`WINNOW_HOST`）と Origin/Host 許可リストの追加（`WINNOW_ALLOWED_HOSTS` /
+  `WINNOW_ALLOWED_PORTS`）は**起動時 env のみ**で緩められ、`PATCH /api/settings` からは緩められない
+  （claudeAllowedFlags と同じ非対称ポリシー）。
+- 公開構成（非 loopback バインド or `WINNOW_ALLOWED_HOSTS` 設定）× `NODE_ENV !== "production"` は
+  **起動拒否**（dev のシークレット免除と公開を併用させない）。
+- `WINNOW_ALLOWED_HOSTS` 設定時、`/mcp` は **loopback Host からのみ**受け付ける
+  （ローカル claude 直結の正規経路を維持しつつ、プロキシ設定ミスでも外から書き込めない）。
+
 ## DB スキーマ変更の規約（`db.ts`）
 
 - `CREATE TABLE` への列追記だけでは既存 DB に効かない。**`CODE_SCHEMA_VERSION` 繰り上げ ＋

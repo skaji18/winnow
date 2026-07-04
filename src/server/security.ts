@@ -7,7 +7,7 @@
 // 状態変更系のシークレットを免除する (security.ts に dev 分岐を閉じ込める)。
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { SERVER_PORT } from "./config.js";
+import { EXTRA_ALLOWED_HOSTS, EXTRA_ALLOWED_PORTS, SERVER_PORT } from "./config.js";
 
 /** 起動時に1回だけ生成するエフェメラルなローカルシークレット (プロセス内メモリのみ・DBに置かない)。 */
 export const LOCAL_SECRET = randomBytes(24).toString("hex");
@@ -20,6 +20,10 @@ const ALLOWED_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 /** 許可するポート (空=ポート不問)。本サーバと dev Vite。 */
 const ALLOWED_PORTS = new Set<string>([String(SERVER_PORT), ""]);
 if (IS_DEV) ALLOWED_PORTS.add("5174");
+// リバースプロキシ公開 (DECISIONS「リモートアクセス」節): 追加許可は起動時 env のみ。
+// URL parse は hostname を小文字化して返すため、比較は小文字で揃える(config.ts 側で正規化済み)。
+for (const h of EXTRA_ALLOWED_HOSTS) ALLOWED_HOSTS.add(h);
+for (const p of EXTRA_ALLOWED_PORTS) ALLOWED_PORTS.add(p);
 
 function firstHeader(v: string | string[] | undefined): string | undefined {
   if (Array.isArray(v)) return v[0];
@@ -103,8 +107,13 @@ export function validateClaudeCmd(cmd: string, allowedFlags: string[]): boolean 
  *  - 状態変更系(/api の非GET)はローカルシークレットを要求。/api/state・/api/export は GET なので不要。
  *  - /mcp はローカル claude(同一マシン・同一オリジンでシークレットを持てない)からの正規経路なので
  *    Origin/Host 検証のみ課しシークレットは免除する(Host=127.0.0.1/localhost 検証で DNS rebinding は防げる)。
+ *    ただしリモート公開構成(WINNOW_ALLOWED_HOSTS 設定時)では、シークレット免除の根拠
+ *    (同一マシン前提)が崩れるため /mcp は loopback Host からのみ許可する
+ *    (プロキシの /mcp 遮断ミスでも外から書き込めない。ローカル claude は直結なので影響なし)。
  *  - /healthz・/ws・静的アセットは対象外。
  */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
 export function registerSecurityHook(app: FastifyInstance): void {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     const url = req.url.split("?")[0] ?? req.url;
@@ -115,6 +124,13 @@ export function registerSecurityHook(app: FastifyInstance): void {
     if (!originAllowed(req)) {
       reply.code(403).send({ error: "origin not allowed" });
       return reply;
+    }
+    if (isMcp && EXTRA_ALLOWED_HOSTS.length > 0) {
+      const { host } = hostnameOf(firstHeader(req.headers.host) ?? "");
+      if (!LOOPBACK_HOSTS.has(host)) {
+        reply.code(403).send({ error: "mcp is loopback-only" });
+        return reply;
+      }
     }
     // /mcp はローカル claude の正規経路なのでシークレット免除 (Origin/Host 検証のみ)。
     if (isApi && isMutation(req.method) && !checkSecret(req)) {

@@ -124,7 +124,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       totalLabels: labels.total(),
       captureStats: items.captureStats(),
       // MCP 接続先 (read-only。ローカル claude が capture を直接投げる正規経路 /mcp)。
-      mcpEndpoint: `http://${(req.headers.host as string) || `localhost:${SERVER_PORT}`}/mcp`,
+      // 受信 Host を反射しない: /mcp はローカル直結が正 (リモート公開時は loopback 限定になるため、
+      // HTTPS プロキシ越しに公開ホスト名を見せると誤った接続先を案内してしまう)。
+      mcpEndpoint: `http://localhost:${SERVER_PORT}/mcp`,
     };
   });
 

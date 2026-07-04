@@ -2,7 +2,7 @@
 
 Winnow を立てる・運用する・守る・止めるための運用者向け手順書。設定値の詳細は [docs/CONFIG.md](./CONFIG.md)、障害対応は [docs/TROUBLESHOOTING.md](./TROUBLESHOOTING.md) を参照すること。MCP/REST の連携面は [docs/MCP.md](./MCP.md) にまとめてある。
 
-> 重要な前提: Winnow は **`127.0.0.1` 固定・認証なし**で動く単一ユーザ向けローカルツールである。認証は持たないが、`/api`・`/mcp` には**同一オリジン保証層**（Origin/Host 許可リスト＋起動時生成のローカルシークレット）が掛かっている。loopback の外へ出す場合は本書「信頼境界」を必ず読むこと。
+> 重要な前提: Winnow は **既定で `127.0.0.1` バインド・認証なし**で動く単一ユーザ向けローカルツールである。認証は持たないが、`/api`・`/mcp` には**同一オリジン保証層**（Origin/Host 許可リスト＋起動時生成のローカルシークレット）が掛かっている。loopback の外へ出す（レンサバ/VPS からスマホで使う等）場合は、**必ず認証付きリバースプロキシを前段に置き**、本書「信頼境界」の公開手順に従うこと。
 
 ---
 
@@ -131,7 +131,7 @@ worker のプロジェクト隔離は OS レベルで強制されていない点
 
 ### 現状
 
-- サーバは **`host: "127.0.0.1"` にハードコードでバインド**される。バインドホストを変える env var も設定も存在しない。
+- サーバは **既定で `host: "127.0.0.1"` にバインド**される（`WINNOW_HOST` で変更可だが、後述の通りリバースプロキシ構成では変更不要）。
 - **REST API・MCP ともに「認証」は無い**（トークン・APIキー・ログイン UI のいずれも無い）。代わりに `/api`・`/mcp` には**同一オリジン保証層**（`src/server/security.ts`）が `onRequest` フックで掛かる。これは認証ではない（ユーザ識別子を持たない）が、loopback 前提を確実に成立させる最小防御。
 
 ### 同一オリジン保証層（security.ts）
@@ -151,10 +151,22 @@ worker のプロジェクト隔離は OS レベルで強制されていない点
 - tmux セッションの capture/attach REST（`GET /api/sessions/:name/capture`, `/attach`）は既知 session のみ許可し、未知なら `404 {error:"unknown session"}`。
 - それでも、同一オリジン保証を満たすローカルプロセス（同一マシンの正規ブラウザ等）からは広く操作できる前提は変わらない。ローカルに信頼できないプロセス/ユーザが居る環境では引き続き警戒すること。
 
-### loopback の外へ出す場合
+### loopback の外へ出す場合（レンサバ/VPS からスマホで使う）
 
-- そのまま 0.0.0.0 等に晒す手段は無く、晒すべきでもない。
-- 公開が必要なら、**外部に認証付きリバースプロキシ**を立てるか、**Tailscale ACL 等のネットワーク層アクセス制御**で限定すること。Winnow 自身は誰でも全権限で操作できる前提なので、境界は必ず前段で担保する。
+Winnow 自身は誰でも全権限で操作できる前提なので、**境界は必ず前段で担保する**。公開が必要なら、**外部に認証付きリバースプロキシ**を立てるか、**Tailscale ACL 等のネットワーク層アクセス制御**で限定すること。プロキシ認証なしで到達可能な構成は、`GET /api/export`（DB 全量ダンプ・シークレット不要）と `GET /`（ローカルシークレット配布）が誰にでも開くことを意味する — **認証の除外パスを作らないこと**（`/ws/` にも必ず掛ける。tmux 画面＝作業内容が read-only で流出する面）。
+
+推奨構成（リバースプロキシ同居）:
+
+1. バインドは既定の `127.0.0.1:8787` のまま（`WINNOW_HOST` は触らない）。
+2. 前段に Caddy（自動 HTTPS + `basic_auth`。WebSocket 透過は自動）または nginx（HTTPS + `auth_basic` + `/ws/` に `proxy_http_version 1.1` と `Upgrade`/`Connection` ヘッダ）を置き、`127.0.0.1:8787` へ転送する。
+3. `WINNOW_ALLOWED_HOSTS=<公開ホスト名>` を設定して起動する（例: `WINNOW_ALLOWED_HOSTS=winnow.example.com`）。これで Host/Origin/Referer 検証と WebSocket の Origin 検証が公開ホスト名を通す。HTTPS 標準ポート（443）は Origin にポートが乗らないため `WINNOW_ALLOWED_PORTS` は不要（非標準ポート公開時のみカンマ区切りで追加）。
+4. **`NODE_ENV=production` は必須**。公開向け env（`WINNOW_HOST` 非 loopback / `WINNOW_ALLOWED_HOSTS`）が設定されているのに `NODE_ENV` が production でない場合、dev のシークレット免除と衝突するため**サーバは起動を拒否する**（`npm start` は設定済み）。あわせて `npm run build` を忘れると UI が出ない（§2）。
+5. **`/mcp` はプロキシで外部公開しない**（nginx: `location /mcp { deny all; }` / Caddy: `respond /mcp* 403`）。`WINNOW_ALLOWED_HOSTS` 設定時、winnow 側でも `/mcp` は loopback Host 以外を 403 で弾く（多層防御）。ローカルの MCP クライアント（claude 等）はプロキシを経由せず `http://localhost:8787/mcp` に直結する。
+
+運用ノート:
+
+- ローカルシークレットは**サーバ起動毎に再生成**される。サーバを再起動すると、スマホ等で開きっぱなしのタブは状態変更系が `403 missing local secret` になる — **ページを再読込すれば回復する**（UI もその旨を案内する）。
+- `WINNOW_HOST=0.0.0.0` 等の直バインドは**非推奨**（認証・TLS なしで全データとシークレットが露出する）。設定した場合は起動時に警告が出る。Tailscale 等の閉域網内で完結する場合のみ検討すること。
 
 ---
 
