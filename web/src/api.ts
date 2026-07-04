@@ -7,23 +7,37 @@ const LOCAL_SECRET: string | undefined = (
   globalThis as unknown as { __WINNOW_SECRET__?: string }
 ).__WINNOW_SECRET__;
 
-async function j<T>(url: string, opts?: RequestInit): Promise<T> {
+async function j<T>(url: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const { timeoutMs, ...init } = opts ?? {};
   // ボディ無し POST に Content-Type: application/json を付けると Fastify が空ボディを
   // FST_ERR_CTP_EMPTY_JSON_BODY で弾く(分解する/classify/execute 等)。ボディがあるときだけ付ける。
   const headers: Record<string, string> = {};
-  if (opts?.body != null) headers["Content-Type"] = "application/json";
+  if (init.body != null) headers["Content-Type"] = "application/json";
   if (LOCAL_SECRET) headers["x-winnow-secret"] = LOCAL_SECRET;
   // モバイル回線の電波断・切替でリクエストが無期限ハングすると busy なボタンが固まったままになる。
   // タイムアウトは通常エラーとして投げ、呼び出し側の catch → aria-live 表示に乗せる。
+  // 既定20秒。同期でAI/tmuxを待つ長時間API(classify/ai/init/decompose/apply)は呼び出し側が
+  // timeoutMs で延長する(短く切るとサーバ側処理は続くのに偽の失敗を表示し、再タップ=二重実行を誘う)。
+  // タイマーはボディ読取完了まで生かす(ヘッダ受信後の電波断でも abort が効くように)。
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 20_000);
-  let res: Response;
+  const timer = setTimeout(() => timeout.abort(), timeoutMs ?? 20_000);
   try {
-    res = await fetch(url, {
-      ...opts,
-      signal: opts?.signal ?? timeout.signal,
-      headers: { ...headers, ...(opts?.headers as Record<string, string> | undefined) },
+    const res = await fetch(url, {
+      ...init,
+      signal: init.signal ?? timeout.signal,
+      headers: { ...headers, ...(init.headers as Record<string, string> | undefined) },
     });
+    if (!res.ok) {
+      // 楽観ロック競合(409)は専用接頭辞で投げ、UI が『他所で更新された→再取得』へ分岐できるように。
+      const text = await res.text();
+      if (res.status === 409) throw new Error(`CONFLICT ${text}`);
+      // サーバ再起動でローカルシークレットが再生成された場合の 403。原因が分かりにくいので案内する。
+      if (res.status === 403 && text.includes("missing local secret")) {
+        throw new Error("サーバが再起動されたため操作を送れませんでした。ページを再読込してください");
+      }
+      throw new Error(`${res.status} ${text}`);
+    }
+    return (await res.json()) as T;
   } catch (e) {
     if ((e as { name?: string }).name === "AbortError") {
       throw new Error("サーバの応答がありません（タイムアウト）。接続を確認して再試行してください");
@@ -32,17 +46,6 @@ async function j<T>(url: string, opts?: RequestInit): Promise<T> {
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
-    // 楽観ロック競合(409)は専用接頭辞で投げ、UI が『他所で更新された→再取得』へ分岐できるように。
-    const text = await res.text();
-    if (res.status === 409) throw new Error(`CONFLICT ${text}`);
-    // サーバ再起動でローカルシークレットが再生成された場合の 403。原因が分かりにくいので案内する。
-    if (res.status === 403 && text.includes("missing local secret")) {
-      throw new Error("サーバが再起動されたため操作を送れませんでした。ページを再読込してください");
-    }
-    throw new Error(`${res.status} ${text}`);
-  }
-  return res.json() as Promise<T>;
 }
 
 export const api = {
@@ -73,7 +76,9 @@ export const api = {
 
   deleteItem: (id: string) => j(`/api/items/${id}`, { method: "DELETE" }),
 
-  classify: (id: string) => j<Item>(`/api/items/${id}/classify`, { method: "POST" }),
+  // 同期AI呼び出し(サーバ既定 classifyTimeoutMs=90秒)。既定20秒で切ると偽タイムアウトになる。
+  classify: (id: string) =>
+    j<Item>(`/api/items/${id}/classify`, { method: "POST", timeoutMs: 120_000 }),
 
   toProject: (id: string) =>
     j<{ project: Project; assigned: number }>(`/api/items/${id}/to-project`, { method: "POST" }),
@@ -83,10 +88,12 @@ export const api = {
   decompose: (id: string) =>
     j<{ started: boolean }>(`/api/items/${id}/decompose`, { method: "POST" }),
 
+  // 子を直列に classify する同期API (子1件あたり最大90秒)。子数に応じて余裕を取る。
   applyDecompose: (id: string, option: DecomposeOption) =>
     j<{ created: Item[] }>(`/api/items/${id}/decompose/apply`, {
       method: "POST",
       body: JSON.stringify({ option }),
+      timeoutMs: 60_000 + option.children.length * 100_000,
     }),
 
   execute: (id: string) => j(`/api/items/${id}/execute`, { method: "POST" }),
@@ -116,7 +123,8 @@ export const api = {
   attachCommand: (name: string) =>
     j<{ command: string }>(`/api/sessions/${encodeURIComponent(name)}/attach`),
 
-  initAi: () => j<{ sessions: unknown[] }>("/api/ai/init", { method: "POST" }),
+  // 初回は tmux セッション生成 + claude プロンプト待ち(最大30秒)を同期で待つ。
+  initAi: () => j<{ sessions: unknown[] }>("/api/ai/init", { method: "POST", timeoutMs: 60_000 }),
 
   updateSettings: (patch: Partial<Settings>) =>
     j<Settings>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }),

@@ -129,7 +129,13 @@ export default function App() {
         {state.preflight && !state.preflight.ok && (
           <div className="cold-banner danger" role="alert">
             AI 未接続: {state.preflight.reason ?? "接続を確認できません"} →{" "}
-            <button onClick={() => api.initAi().then(refresh)}>セッション起動</button>
+            <button
+              onClick={() =>
+                api.initAi().then(refresh).catch((e) => setError((e as Error).message))
+              }
+            >
+              セッション起動
+            </button>
           </div>
         )}
 
@@ -1277,6 +1283,7 @@ function DecomposeModal({
 }) {
   const live = useLive();
   const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   // item.id ごとに分解リクエストを1回だけ発火させる ref ガード(StrictMode 二重起動・再レンダ対策)。
   const kickedFor = useRef<string | null>(null);
@@ -1340,10 +1347,16 @@ function DecomposeModal({
 
   const apply = async (opt: DecomposeOption) => {
     setApplying(true);
+    setApplyError(null);
     try {
       await api.applyDecompose(item.id, opt);
       await onChange();
       onClose();
+    } catch (e) {
+      // 失敗を可視化しないと unhandled rejection でモーダルが開いたままになり、
+      // 再タップ=サーバ側で子アイテムの二重生成を誘う。
+      setApplyError((e as Error).message);
+      live("割り当てに失敗しました");
     } finally {
       setApplying(false);
     }
@@ -1390,6 +1403,11 @@ function DecomposeModal({
         <p className="muted" style={{ fontSize: 12.5 }}>
           割り方の選択肢。サイクル長は不確実性に反比例（不明な段はPoCで情報を買う短サイクル §2.3）。
         </p>
+        {applyError && (
+          <div className="cold-banner" role="alert" style={{ marginBottom: 8 }}>
+            割り当てに失敗しました: {applyError}
+          </div>
+        )}
         {waiting && <DecomposeWaiting elapsed={elapsed} />}
         {needsRetry && (
           <div className="actions" style={{ marginTop: 4, flexWrap: "wrap" }}>
@@ -1569,12 +1587,16 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
 function SessionsView({ state, onChange }: { state: AppState; onChange: () => void }) {
   const [sel, setSel] = useState<string | null>(state.sessions[0]?.name ?? null);
   const [initing, setIniting] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
 
   const init = async () => {
     setIniting(true);
+    setInitError(null);
     try {
       await api.initAi();
       await onChange();
+    } catch (e) {
+      setInitError((e as Error).message);
     } finally {
       setIniting(false);
     }
@@ -1588,6 +1610,11 @@ function SessionsView({ state, onChange }: { state: AppState; onChange: () => vo
           {initing ? "起動中…" : "セッションを起動 / 再確認"}
         </button>
       </div>
+      {initError && (
+        <div className="cold-banner" role="alert">
+          セッション起動に失敗しました: {initError}
+        </div>
+      )}
       {state.sessions.length === 0 ? (
         <p className="muted">
           セッション未起動。「セッションを起動」を押すとtmuxにcontrol/workerのclaudeを常駐させます。

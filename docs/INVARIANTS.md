@@ -83,8 +83,10 @@
   （claudeAllowedFlags と同じ非対称ポリシー）。
 - 公開構成（非 loopback バインド or `WINNOW_ALLOWED_HOSTS` 設定）× `NODE_ENV !== "production"` は
   **起動拒否**（dev のシークレット免除と公開を併用させない）。
-- `WINNOW_ALLOWED_HOSTS` 設定時、`/mcp` は **loopback Host からのみ**受け付ける
-  （ローカル claude 直結の正規経路を維持しつつ、プロキシ設定ミスでも外から書き込めない）。
+- 公開構成では `/mcp` は **loopback からのみ**受け付ける（Host ヘッダ と 接続元アドレスの両方で判定。
+  ローカル claude 直結の正規経路を維持しつつ、直バインド時の Host 偽装と、プロキシの `/mcp`
+  遮断漏れへの多層防御。Host 側の判定は**プロキシがクライアント Host を透過する構成が前提** —
+  nginx は `proxy_set_header Host $host` 必須）。
 
 ## DB スキーマ変更の規約（`db.ts`）
 

@@ -25,6 +25,9 @@ export function TerminalPane({ session }: { session: string | null }) {
     let retryTimer: number | undefined;
     let stopped = false;
     let attempt = 0;
+    // 一度でもフレームを受信したら、以後の接続失敗で最終画面を消さない
+    // (再接続バナーに委ねる。誤って tmux 不調を疑わせる文言も出さない)。
+    let gotFrame = false;
 
     const connect = () => {
       if (stopped) return;
@@ -37,6 +40,7 @@ export function TerminalPane({ session }: { session: string | null }) {
         setDisconnected(false);
       };
       ws.onmessage = (ev) => {
+        gotFrame = true;
         setText(ev.data);
         const box = boxRef.current;
         // 最下部付近にいるときだけ追従 (スクロールバック中は引き戻さない)。
@@ -44,7 +48,9 @@ export function TerminalPane({ session }: { session: string | null }) {
           box.scrollTop = box.scrollHeight;
         }
       };
-      ws.onerror = () => setText("(端末への接続に失敗。tmuxセッションが起動しているか確認)");
+      ws.onerror = () => {
+        if (!gotFrame) setText("(端末への接続に失敗。tmuxセッションが起動しているか確認)");
+      };
       ws.onclose = () => {
         if (stopped) return;
         setDisconnected(true);

@@ -128,19 +128,22 @@ export async function copyText(text: string): Promise<boolean> {
   } catch {
     // 権限拒否等 → フォールバックへ。
   }
+  // フォールバックは select() でフォーカスを奪うため、元のフォーカス(押したボタン)を復元する。
+  const active = document.activeElement as HTMLElement | null;
+  const ta = document.createElement("textarea");
   try {
-    const ta = document.createElement("textarea");
     ta.value = text;
     ta.setAttribute("readonly", "");
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
     ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
+    return document.execCommand("copy");
   } catch {
     return false;
+  } finally {
+    ta.remove();
+    active?.focus?.();
   }
 }
 
