@@ -3,7 +3,8 @@ import { items, labels, settings } from "./repo.js";
 import {
   buildGateSnapshot,
   deriveProposedGate,
-  hasWorkerOutcome,
+  isEscalateTerminated,
+  isNeedsHumanProposed,
   type GateDerivation,
   type GateKind,
 } from "./gates.js";
@@ -28,7 +29,7 @@ export interface QueueItem extends Item {
   // 塞いでいる実体 (待ち先チップのジャンプ先)。上流未完=該当兄弟 / 親ゲート=親 / 他は null。
   blockerId: string | null;
   // needs_human 由来 proposed (worker が「人間の判断が要る」と返した承認待ち)。判別式は
-  // gates.hasWorkerOutcome の単一真実源をサーバで計算して届ける(クライアントに複製しない)。
+  // gates.isNeedsHumanProposed の単一真実源をサーバで計算して届ける(クライアントに複製しない)。
   // UI はこれと settings.allowExternalSend で「押した先」を正直に出し分ける。
   needsHuman: boolean;
   // stale 検知 (in_progress のみ非null・STALE_DAYS 以上の粗い経年)。
@@ -157,25 +158,25 @@ function surfaceReasonOf(it: Item, ageDays: number | null, gate: GateDerivation 
     base = `保留中${it.reason ? `: ${it.reason}` : ""}`;
   } else if (it.executionStatus === "proposed") {
     // needs_human 由来 (gate==null): worker の停止理由をグランス可能に = executionSummary の
-    // 先頭行を優先する(全文連結 executionResult の素通しだと一行理由が長文に埋もれる。
-    // worker 語の【列選択】であり導出上書きではない — 素通し規約の緩やかな改訂)。
+    // 先頭行を優先する(worker 語の【列選択】であり導出上書きではない)。summary 欠落時も
+    // executionResult 全文を素通しせず先頭行+80字上限に丸める(一行理由が長文に埋もれる/
+    // INVARIANTS「先頭行の列選択まで」の線を守る。timed_out/failed の trace 切り詰めと対称)。
     base = gate
       ? gate.reason
-      : firstLine(it.executionSummary) ||
-        (it.executionResult ?? "").trim() ||
-        "承認待ち";
-  } else if (
-    it.status === "classified" &&
-    it.kind === "leaf" &&
-    it.executionStatus === "none" &&
-    hasWorkerOutcome(it)
-  ) {
-    // 承認後 needs_human の escalate 終端 (executor.applyExecuteResult の repeat 遷移)。
+      : (firstLine(it.executionSummary) || firstLine(it.executionResult) || "承認待ち").slice(
+          0,
+          80,
+        );
+  } else if (isEscalateTerminated(it)) {
+    // 承認後 needs_human の escalate 終端 (executor.applyExecuteResult の repeat 遷移。
+    // 述語は gates.isEscalateTerminated が単一真実源=write 側の遷移とドリフトさせない)。
     // worker の停止理由(最新の needs_human 文面)を一行で前面に出す。この状態組には
     // 他経路(reject→undo 復帰等)でも到達しうるため、回数(「2回」)は断定しない。
-    base = `AI停止(人間の対応待ち): ${
-      firstLine(it.executionSummary) || (it.executionResult ?? "").trim().slice(0, 80) || "詳細は実行結果を参照"
-    }`;
+    base = `AI停止(人間の対応待ち): ${(
+      firstLine(it.executionSummary) ||
+      firstLine(it.executionResult) ||
+      "詳細は実行結果を参照"
+    ).slice(0, 80)}`;
   } else {
     base = it.reason ?? "";
   }
@@ -280,7 +281,9 @@ export function queue(): QueueItem[] {
       surfaceReason: surfaceReasonOf(it, ageDays, gate),
       gateKind: gate?.kind ?? null,
       blockerId: gate?.blockerId ?? null,
-      needsHuman: it.executionStatus === "proposed" && gate == null && hasWorkerOutcome(it),
+      // 起源判別(isNeedsHumanProposed)を使う: 成果の実在だけだと、実行済み item がゲート経由で
+      // proposed に落ちた場合まで「AI停止」と誤ラベルし、送信OFF警告も誤発火する。
+      needsHuman: gate == null && isNeedsHumanProposed(it),
       staleDays,
       ageDays,
       undoableLabel,

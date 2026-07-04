@@ -229,13 +229,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // まださばかれていない(inbox/classified)かつ未実行の項目だけ再分類に流し、
     // 案件前提を踏まえた仕分けへ更新する。done/in_progress/実行済みは触らない
     // (進行中の作業や履歴・教師信号を乱さない)。control は直列なので背景で順に処理。
+    // 「実行済み」の判定は executionStatus だけでは足りない: 承認後 needs_human の
+    // escalate 終端(executor.applyExecuteResult repeat)は classified+none に戻すため、
+    // executionStatus のみだと終端項目を再分類→auto 復帰→無承認の自動再実行まで
+    // 連鎖しうる。autoExecuted(一度でも worker が走った)で除外する。
     let reclassified = 0;
     for (const itemId of ids) {
       const it = items.get(itemId);
       if (
         it &&
         (it.status === "inbox" || it.status === "classified") &&
-        it.executionStatus === "none"
+        it.executionStatus === "none" &&
+        !it.autoExecuted
       ) {
         reclassified++;
         background(() => classify(itemId));

@@ -5,7 +5,7 @@ import { ensureDriver } from "./ai/index.js";
 import { executePrompt } from "./ai/prompts.js";
 import { parseJson } from "./ai/tmux-driver.js";
 import { PATHS } from "./config.js";
-import { buildContextBlock, redactSecrets } from "./context.js";
+import { buildContextBlock, clip, redactSecrets } from "./context.js";
 import { extractLearning } from "./learning.js";
 import type { ExecutionJob, Item } from "./domain.js";
 import { items, jobs, labels, settings } from "./repo.js";
@@ -14,7 +14,7 @@ import { validateProjectDir } from "./paths.js";
 import {
   buildGateSnapshot,
   crossRepoSiblingPending,
-  hasWorkerOutcome,
+  isNeedsHumanProposed,
   uncertainNodeOrUpstreamPending,
   uncertainGateReason,
   isIrreversibleOrHighStakes,
@@ -186,22 +186,29 @@ export async function requestExecution(
 function applyExecuteResult(
   itemId: string,
   out: Partial<ExecuteOut>,
-  opts: { externalApproved?: boolean; humanApproved?: boolean } = {},
+  opts: { externalApproved?: boolean; approvedRetry?: boolean } = {},
 ): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
+  // worker JSON は無検証の Partial (parseJson は形を強制しない)。needs_human で summary/output が
+  // 両方欠落すると hasWorkerOutcome が立たず、承認再走の注入・escalate 終端・UI の needs_human
+  // 判別が全て不発になり「ゲートは解消済み」の逆信号まで出る。最低限の停止理由を合成して
+  // 決定論の判別(isNeedsHumanProposed の連結一致を含む)を成立させる。
+  if (out.status === "needs_human" && !(out.summary ?? "").trim() && !(out.output ?? "").trim()) {
+    out = { ...out, summary: "AIが人間の判断が必要と申告しました(停止理由の申告なし)。" };
+  }
   const succeeded = out.status === "succeeded";
   // 引き取り要否 (§3.5): 成功かつ責任が残る成果物なら done に沈めず awaiting_handoff へ。
   const handoff = succeeded && handoffRequired(item, out, opts.externalApproved === true);
-  // 承認後 needs_human の escalate 終端: 人間の承認を経た再走(humanApproved=承認事実+前回計画
-  // 注入済みプロンプト)がそれでも needs_human を返したら、proposed に戻さず classified に倒す
+  // 承認後 needs_human の escalate 終端: needs_human 起源の proposed を人間が承認し、前回計画
+  // 注入済みの再走がそれでも needs_human を返したら、proposed に戻さず classified に倒す
   // = 承認カードの無限再出現を断ち、承認サイクルあたり worker 実行を最大2回で終端する。
-  // hasWorkerOutcome(更新前 item) 条件により、ゲート由来 proposed の初回承認(前回成果なし=
-  // priorPlan 未注入)の needs_human は従来どおり proposed に落ちる(承認チャネルは残る)。
-  // escalate 後の手動再実行は humanApproved 無しなので、needs_human を返せば proposed に戻り
-  // 承認チャネルが再開通する(袋小路にしない。1周ごとに人間タップ=タップ律速で有界)。
-  const repeat =
-    opts.humanApproved === true && out.status === "needs_human" && hasWorkerOutcome(item);
+  // approvedRetry は runExecution が発火前の item に isNeedsHumanProposed で判定して渡す
+  // (成果の実在だけで判定すると、failed/succeeded の残骸を持つ item がゲート経由で proposed に
+  // 落ちた場合の初回承認まで誤って終端する)。ゲート由来 proposed の初回承認の needs_human は
+  // 従来どおり proposed に落ちる(承認チャネルは残る)。escalate 後の手動再実行は承認を経ないので
+  // needs_human を返せば proposed に戻り承認チャネルが再開通する(袋小路にしない。タップ律速で有界)。
+  const repeat = opts.approvedRetry === true && out.status === "needs_human";
   const updated = items.update(itemId, {
     executionStatus:
       out.status === "needs_human"
@@ -217,10 +224,12 @@ function applyExecuteResult(
     // それ以外(needs_human/failed)は in_progress のまま(blocked にしない)。
     // escalate 終端(repeat)のみ classified へ=キューの通常可視ルールで前面に残る。
     status: succeeded ? (handoff ? "review" : "done") : repeat ? "classified" : "in_progress",
-    // disposition の書き換えは auto 起点のみ(人間が reclassify で明示した human を label 無しで
-    // 潰さない=人間の処分が勝つ)。labels は積まず recordOutcome も呼ばない(worker 自己申告
-    // 由来の機械遷移を較正母数に混ぜない — requestExecution の auto 出所不正 flip と同型)。
-    ...(repeat && item.disposition === "auto" ? { disposition: "escalate" as const } : {}),
+    // disposition の書き換えは human 以外(auto/escalate/null)を escalate へ。human だけは保持
+    // (人間が reclassify で明示した処分を label 無しで潰さない=人間の処分が勝つ)。null を
+    // 素通しすると classified+null がキュー可視ルールのどの段も通らず黙って消える。
+    // labels は積まず recordOutcome も呼ばない(worker 自己申告由来の機械遷移を較正母数に
+    // 混ぜない — requestExecution の auto 出所不正 flip と同型)。
+    ...(repeat && item.disposition !== "human" ? { disposition: "escalate" as const } : {}),
     autoExecuted: true,
     // executionResult は後方互換で連結文字列を維持(UI/キュー一行が参照)。
     executionResult: `${out.summary ?? ""}\n\n${out.output ?? ""}`.trim(),
@@ -324,22 +333,31 @@ export async function runExecution(
     }
   }
 
+  // 承認済み再走(approvedRetry)の判定は発火前の item に対して一度だけ行う:
+  // isNeedsHumanProposed = needs_human 起源の proposed(成果の実在+連結一致)。成果の実在だけだと
+  // failed/succeeded の残骸を持つ item がゲート経由で proposed に落ちた場合まで「前回 needs_human で
+  // 停止」と誤注入し、初回承認の needs_human を誤って escalate 終端させる。
+  const approvedRetry = opts.humanApproved === true && isNeedsHumanProposed(item);
   // 承認済み再走の差分保証: 前回 needs_human で返した変更計画/成果をプロンプトへ注入し、
   // 初回拒否時と同一プロンプトの再投入(worker が同じ判断で needs_human を繰り返す再拒否ループ)を
   // 構造的に無くす。worker 自己申告由来テキストなので redactSecrets を結合後に1回通し、
   // レビュー leaf の承認再走で reviewMaterial と同時非空になっても合算が暴れないよう
-  // 先頭 4,000 字に切り詰める。
+  // clip で先頭 4,000 字に切り詰める(番兵つき=切ったことを worker から見えるようにする)。
   let priorPlan = "";
-  if (opts.humanApproved === true && hasWorkerOutcome(item)) {
-    priorPlan = redactSecrets(
-      [
-        item.executionSummary ? `前回サマリ: ${item.executionSummary}` : "",
-        item.executionOutput ? `前回の変更計画/成果:\n${item.executionOutput}` : "",
-        item.rollbackPlan ? `前回申告の巻き戻し手順:\n${item.rollbackPlan}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-    ).slice(0, 4_000);
+  if (approvedRetry) {
+    priorPlan = clip(
+      redactSecrets(
+        [
+          item.executionSummary ? `前回サマリ: ${item.executionSummary}` : "",
+          item.executionOutput ? `前回の変更計画/成果:\n${item.executionOutput}` : "",
+          item.rollbackPlan ? `前回申告の巻き戻し手順:\n${item.rollbackPlan}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      ),
+      4_000,
+      "\n…(前回計画はここで切り詰め。全文は項目の実行結果を参照)",
+    );
   }
 
   items.update(itemId, { executionStatus: "running", status: "in_progress" });
@@ -424,7 +442,7 @@ export async function runExecution(
   return applyExecuteResult(itemId, res.data as Partial<ExecuteOut>, {
     externalApproved: opts.externalApproved === true,
     // これを落とすと escalate 終端(repeat)が通常経路で一切発火しない。
-    humanApproved: opts.humanApproved === true,
+    approvedRetry,
   });
 }
 
@@ -462,9 +480,9 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
     const raw = fs.existsSync(resPath) ? fs.readFileSync(resPath, "utf8") : "";
     const out = parseJson(raw) as Partial<ExecuteOut>;
     // job に永続化した外部送信ゴーサインを復元して渡す(handoffRequired 安全弁 (d) の発火)。
-    // humanApproved は jobs に永続化していないため復元しない → repeat=false → needs_human は
-    // 従来どおり proposed に戻る(安全側フォールバック。timed_out を跨いだ承認再走の escalate
-    // 終端は失われるが、人間が再承認すれば注入つきで再走する=タップ律速で有界。
+    // 承認済み再走(approvedRetry)は jobs に永続化していないため復元しない → repeat=false →
+    // needs_human は従来どおり proposed に戻る(安全側フォールバック。timed_out を跨いだ承認再走の
+    // escalate 終端は失われるが、人間が再承認すれば注入つきで再走する=タップ律速で有界。
     // jobs への新列永続化(v4→v5)は実測で頻発したら defer 解除)。
     applyExecuteResult(job.itemId, out, { externalApproved: job.externalApproved === true });
     jobs.update(job.id, {
