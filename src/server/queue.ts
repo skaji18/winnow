@@ -1,8 +1,11 @@
+import { clip } from "./context.js";
 import type { Disposition, Item, LabelAction } from "./domain.js";
 import { items, labels, settings } from "./repo.js";
 import {
   buildGateSnapshot,
   deriveProposedGate,
+  isEscalateTerminated,
+  isNeedsHumanProposed,
   type GateDerivation,
   type GateKind,
 } from "./gates.js";
@@ -26,6 +29,10 @@ export interface QueueItem extends Item {
   gateKind: GateKind | null;
   // 塞いでいる実体 (待ち先チップのジャンプ先)。上流未完=該当兄弟 / 親ゲート=親 / 他は null。
   blockerId: string | null;
+  // needs_human 由来 proposed (worker が「人間の判断が要る」と返した承認待ち)。判別式は
+  // gates.isNeedsHumanProposed の単一真実源をサーバで計算して届ける(クライアントに複製しない)。
+  // UI はこれと settings.allowExternalSend で「押した先」を正直に出し分ける。
+  needsHuman: boolean;
   // stale 検知 (in_progress のみ非null・STALE_DAYS 以上の粗い経年)。
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
@@ -123,6 +130,11 @@ export function scoreItem(x: Item): { score: number; topReason: TopReason } {
  * proposed は gate (read 時導出) があればそれを表示の真実にする — 保存 executionResult は
  * ゲート発動時点の痕跡で、上流完了後も「上流Xが未完です」と表示され続ける陳腐化があった。
  */
+/** worker 語の列選択用: 先頭の非空行 (グランス可能な一行理由に切り出す)。 */
+function firstLine(text: string | null | undefined): string {
+  return (text ?? "").trim().split("\n")[0]?.trim() ?? "";
+}
+
 function surfaceReasonOf(it: Item, ageDays: number | null, gate: GateDerivation | null): string {
   let base: string;
   if (it.executionStatus === "awaiting_handoff") {
@@ -146,7 +158,25 @@ function surfaceReasonOf(it: Item, ageDays: number | null, gate: GateDerivation 
   } else if (it.status === "blocked") {
     base = `保留中${it.reason ? `: ${it.reason}` : ""}`;
   } else if (it.executionStatus === "proposed") {
-    base = gate ? gate.reason : (it.executionResult ?? "").trim() || "承認待ち";
+    // needs_human 由来 (gate==null): worker の停止理由をグランス可能に = executionSummary の
+    // 先頭行を優先する(worker 語の【列選択】であり導出上書きではない)。summary 欠落時も
+    // executionResult 全文を素通しせず先頭行+80字上限に丸める(一行理由が長文に埋もれる/
+    // INVARIANTS「先頭行の列選択まで」の線を守る。timed_out/failed の trace 切り詰めと対称)。
+    // 80字上限は clip(番兵つき・サロゲートペア非分断)で丸める(生 slice は絵文字等の
+    // ペアを分断し U+FFFD 化しうる。priorPlan 切り詰めと同じ共有ヘルパ)。
+    base = gate
+      ? gate.reason
+      : clip(firstLine(it.executionSummary) || firstLine(it.executionResult) || "承認待ち", 80, "…");
+  } else if (isEscalateTerminated(it)) {
+    // 承認後 needs_human の escalate 終端 (executor.applyExecuteResult の repeat 遷移。
+    // 述語は gates.isEscalateTerminated が単一真実源=write 側の遷移とドリフトさせない)。
+    // worker の停止理由(最新の needs_human 文面)を一行で前面に出す。この状態組には
+    // 他経路(reject→undo 復帰等)でも到達しうるため、回数(「2回」)は断定しない。
+    base = `AI停止(人間の対応待ち): ${clip(
+      firstLine(it.executionSummary) || firstLine(it.executionResult) || "詳細は実行結果を参照",
+      80,
+      "…",
+    )}`;
   } else {
     base = it.reason ?? "";
   }
@@ -251,6 +281,9 @@ export function queue(): QueueItem[] {
       surfaceReason: surfaceReasonOf(it, ageDays, gate),
       gateKind: gate?.kind ?? null,
       blockerId: gate?.blockerId ?? null,
+      // 起源判別(isNeedsHumanProposed)を使う: 成果の実在だけだと、実行済み item がゲート経由で
+      // proposed に落ちた場合まで「AI停止」と誤ラベルし、送信OFF警告も誤発火する。
+      needsHuman: gate == null && isNeedsHumanProposed(it),
       staleDays,
       ageDays,
       undoableLabel,

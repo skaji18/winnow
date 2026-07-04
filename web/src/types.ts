@@ -113,6 +113,10 @@ export interface QueueItem extends Item {
   gateKind?: GateKind | null;
   // 塞いでいる実体 (待ち先チップのジャンプ先)。上流未完=兄弟 / 親ゲート=親 / 他は null。
   blockerId?: string | null;
+  // needs_human 由来 proposed (worker が「人間の判断が要る」と返した承認待ち)。判別は
+  // サーバ計算 (gates.hasWorkerOutcome) — クライアントに判別式を複製しない。
+  // サーバ未提供時 undefined=従来表示 (旧サーバ互換)。
+  needsHuman?: boolean;
   staleDays: number | null;
   ageDays: number | null;
   // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。サーバ未提供時 undefined=非表示。

@@ -879,25 +879,68 @@ function QueueCard({
       {!autoDone && !failed && !timedOut && !handoff && !inProgress && (
         <div className="actions" style={{ marginTop: 10 }}>
           {proposed ? (
-            // 不可逆/高ステークス: ワンタップ承認 (§3.4, §4-4)
-            <>
-              <span className="badge disp-escalate">承認待ち</span>
-              <button
-                className="primary"
-                disabled={busy}
-                onClick={() => run(() => api.approve(item.id), "承認して実行しました")}
-              >
-                承認して実行
-              </button>
-              <button
-                className="danger"
-                disabled={busy}
-                title="この実行提案を取り消す(実行しない)"
-                onClick={() => run(() => api.cancel(item.id), "提案を取り消しました")}
-              >
-                提案を取り消す
-              </button>
-            </>
+            item.gateKind === "bad_project_dir" ? (
+              // 作業ディレクトリ不正: サーバは承認でも実行しない(runExecution 最終ゲート)。
+              // ボタンを消さず disabled+理由で「押しても実行されない」を正直に開示する
+              // (タップ手段を奪う変更ではなくサーバ既決挙動の開示 §3.4)。承認→無言バウンスの
+              // 原因不明ループをUIで塞ぐ。
+              <>
+                <span className="badge disp-escalate">承認待ち(要修正)</span>
+                <button
+                  className="primary"
+                  disabled
+                  title="作業ディレクトリが不正のため、承認しても実行されません"
+                >
+                  承認して実行
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy}
+                  title="この実行提案を取り消す(実行しない)"
+                  onClick={() => run(() => api.cancel(item.id), "提案を取り消しました")}
+                >
+                  提案を取り消す
+                </button>
+                <div className="muted" style={{ fontSize: 12, width: "100%" }}>
+                  作業ディレクトリが不正のため、承認しても実行されません。項目の projectDir
+                  を修正してください。
+                </div>
+              </>
+            ) : (
+              // 不可逆/高ステークスのゲート由来、または worker の needs_human 由来:
+              // ワンタップ承認 (§3.4, §4-4)。needs_human 由来はバッジで判別可能に。
+              <>
+                <span className="badge disp-escalate">
+                  {item.needsHuman ? "AI停止: あなたの判断待ち" : "承認待ち"}
+                </span>
+                <button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => run(() => api.approve(item.id), "承認して実行しました")}
+                >
+                  承認して実行
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy}
+                  title="この実行提案を取り消す(実行しない)"
+                  onClick={() => run(() => api.cancel(item.id), "提案を取り消しました")}
+                >
+                  提案を取り消す
+                </button>
+                {/* 外部送信OFFの事実開示: needs_human の理由が送信以外でもミスリードしないよう
+                    原因は断定せず「承認が何を解禁しないか」だけを言う (§4-2 グランス可能に)。 */}
+                {item.needsHuman &&
+                  item.domain === "software" &&
+                  !state.settings.allowExternalSend && (
+                    <div className="muted" style={{ fontSize: 12, width: "100%" }}>
+                      設定「外部送信(push/PR作成)を承認時に解禁」はOFFです。承認しても外部送信は
+                      解禁されません(AIは送信の一歩手前までの作業を進め、必要な外部操作を提示します)。
+                      送信まで任せる場合は設定からONにしてください。
+                    </div>
+                  )}
+              </>
+            )
           ) : (
             // 通常の処分=ラベル (§4-1). 監査サンプルもここに同じ形で混ざる (§4-3)。
             <>
