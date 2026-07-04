@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"src/server/**/*.test.ts\" \"web/src/**/*.test.ts\"",
     "gate": "npm run typecheck && npm test && npm run build && WINNOW_HOME=$(mktemp -d) tsx scripts-smoke-feedback.ts",
+    "smoke:web": "tsx scripts-smoke-web.ts",
     "seed": "tsx scripts-seed.ts",
     "demo": "node demo/run.mjs",
     "demo:seed": "tsx scripts-seed-demo.ts",
