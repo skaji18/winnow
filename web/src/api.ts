@@ -1,4 +1,13 @@
-import type { AppState, Disposition, Item, Priority, Project, Settings, Sprint } from "./types.js";
+import type {
+  AppState,
+  Disposition,
+  Item,
+  Priority,
+  Project,
+  Settings,
+  Sprint,
+  UpdateState,
+} from "./types.js";
 
 // 同一オリジン保証: サーバが index.html に注入したローカルシークレットを window から読み、
 // 状態変更系リクエストに x-winnow-secret として乗せる(他オリジンの fetch はこれを読めない)。
@@ -125,6 +134,11 @@ export const api = {
 
   // 初回は tmux セッション生成 + claude プロンプト待ち(最大30秒)を同期で待つ。
   initAi: () => j<{ sessions: unknown[] }>("/api/ai/init", { method: "POST", timeoutMs: 60_000 }),
+
+  // 自己更新: 手動チェック(GitHub API を同期で待つ)と適用の点火(即返し。進行は /api/state)。
+  checkUpdate: () => j<UpdateState>("/api/update/check", { method: "POST", timeoutMs: 30_000 }),
+  applyUpdate: () =>
+    j<{ started: boolean; reason?: string }>("/api/update/apply", { method: "POST" }),
 
   updateSettings: (patch: Partial<Settings>) =>
     j<Settings>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }),

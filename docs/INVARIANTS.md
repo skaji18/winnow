@@ -88,6 +88,17 @@
   遮断漏れへの多層防御。Host 側の判定は**プロキシがクライアント Host を透過する構成が前提** —
   nginx は `proxy_set_header Host $host` 必須）。
 
+## 自己更新の信頼境界（`updater.ts`）
+
+- 取得元は**コード内定数のリポジトリ**（検知）と **clone の origin**（適用）のみ。
+  API・settings・env から取得元/チェック間隔を変更できない（非対称ポリシーの適用）。
+- 検知は **read-only**（GitHub API への GET のみ・DB/ファイル書き込みなし）。`/api/state` の
+  背景 sweep に相乗りし、専用の常駐タイマーを作らない。
+- 適用は**人間の明示ワンタップのみ**（自動適用しない）。状態変更系としてローカルシークレットが
+  要求される。実行中ジョブあり / working tree dirty / 適用進行中 / 非 production は拒否。
+- プロセスは**自前 re-exec しない**。適用後は非0 exit し、再起動は supervisor（systemd 等）に
+  委ねる。`bootId`（プロセス毎・非秘密）の変化を web が検知して自動再読込する。
+
 ## DB スキーマ変更の規約（`db.ts`）
 
 - `CREATE TABLE` への列追記だけでは既存 DB に効かない。**`CODE_SCHEMA_VERSION` 繰り上げ ＋

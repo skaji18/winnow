@@ -29,6 +29,14 @@ import { redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
 import { SERVER_PORT } from "../config.js";
+import {
+  BOOT_ID,
+  CURRENT_VERSION,
+  checkForUpdate,
+  getUpdateState,
+  startApplyUpdate,
+  sweepUpdateCheck,
+} from "../updater.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -95,6 +103,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executor.sweepLateExecutions();
       // memory AIゾーンの自動減衰: 未使用・未 pin の AI 学びを薄れさせる (read-only sweep に相乗り)。
       decayLearnings();
+      // 自己更新の検知 (read-only GET・スロットル付き) も同じ sweep に相乗りする (updater.ts)。
+      sweepUpdateCheck();
     });
     return {
       items: items.all(),
@@ -127,6 +137,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // 受信 Host を反射しない: /mcp はローカル直結が正 (リモート公開時は loopback 限定になるため、
       // HTTPS プロキシ越しに公開ホスト名を見せると誤った接続先を案内してしまう)。
       mcpEndpoint: `http://localhost:${SERVER_PORT}/mcp`,
+      // 自己更新 (updater.ts): 現在バージョン・検知結果・適用の進行状況。
+      version: CURRENT_VERSION,
+      // プロセス毎の起動識別子。web は変化=再起動(シークレット失効)とみなし自動再読込する。
+      bootId: BOOT_ID,
+      update: getUpdateState(),
     };
   });
 
@@ -375,6 +390,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await ensureDriver();
     return { sessions: getDriver().listSessions() };
   });
+
+  // --- 自己更新 (updater.ts / DECISIONS「自己更新」節) -----------------------
+  // どちらも非 GET=状態変更系としてローカルシークレットが要求される (security.ts)。
+  // check はスロットルを無視した手動チェック (取得元はコード内定数で固定・変更不可)。
+  app.post("/api/update/check", async () => {
+    await checkForUpdate(true);
+    return getUpdateState();
+  });
+  // apply は点火するだけの即返し (decompose と同型)。進行は /api/state の update.apply で追う。
+  // ガードで弾いた場合は started:false + reason。成功すれば npm ci / vite build 後に
+  // 非0 exit し、supervisor (systemd 等) が新バージョンで上げ直す。
+  app.post("/api/update/apply", async () => startApplyUpdate());
 
   // --- settings / 再調律スライダー ------------------------------------------
   // claudeAllowedFlags 自体は PATCH 対象に含めない=許可リスト緩めの穴を作らない(非対称:

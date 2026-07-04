@@ -12,6 +12,7 @@ import { getDriver } from "./ai/index.js";
 import { reconcileOnBoot, inFlightCount } from "./executor.js";
 import { recoverStuckDecomposes } from "./decomposer.js";
 import { preflightCheck } from "./ai/preflight.js";
+import { CURRENT_VERSION } from "./updater.js";
 import { getRuntimeState, setReconcile, setPreflight } from "./runtime-state.js";
 import {
   registerSecurityHook,
@@ -74,6 +75,8 @@ app.get("/healthz", async () => {
     busy: running > 0,
     recentFailedOver: rt.reconcile.failedOver,
     preflightOk: rt.preflight.tmuxOk && rt.preflight.claudeOk,
+    // 自己更新後の外形確認用 (再起動を跨いで新版が上がったかを機械的に見られる)。
+    version: CURRENT_VERSION,
   };
 });
 

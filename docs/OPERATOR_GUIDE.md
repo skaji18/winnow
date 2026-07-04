@@ -185,6 +185,44 @@ DB は `~/.winnow/winnow.db`。**SQLite は WAL モードが有効**（`journal_
 
 ## 7. アップグレード方針
 
+### セルフアップデート（UI からの更新）
+
+git clone で配備してあれば（→「2. インストール・ビルド・起動」）、UI からワンタップで最新リリースへ更新できる（`src/server/updater.ts`。設計判断は [DECISIONS.md](./DECISIONS.md)「自己更新」節）。
+
+- **検知**: GitHub Releases の最新版を最大6時間に1回チェックし（`/api/state` ポーリングに相乗り。取得元リポジトリはコード内定数で固定・変更不可）、新しければ画面トップにバナーが出る。設定タブの「バージョン・更新」から手動チェック（`POST /api/update/check`）もできる。
+- **適用**: バナーの「更新して再起動」（`POST /api/update/apply`）。サーバが `git fetch --tags` → 該当タグを checkout → `npm ci --include=dev` → `vite build` を実行し、完了すると**非0 exit する**。再起動は supervisor に委ねるため、**systemd 等での常駐運用が前提**（`Restart=on-failure` または `always`）。フォアグラウンド起動中に適用するとプロセスは終了するだけなので、手で `npm start` し直すこと。適用後はページが自動で再読込される（プロセス毎の `bootId` の変化で再起動を検知する。再起動でローカルシークレットが変わるため）。
+- **ガード**: 実行中ジョブあり / 未コミットの手元変更（dirty tree）/ 適用進行中 / dev 起動（`NODE_ENV !== production`）の場合は適用を開始せず理由を返す。
+- **失敗時**: 元の commit へ checkout + `npm ci` + `vite build` のベストエフォート巻き戻しを試み、エラーは `/api/state` の `update.apply.error` とサーバログに残る。手動復旧は [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)「セルフアップデートが失敗する」を参照。
+- **更新前のバックアップ**は従来どおり推奨（→「6. バックアップ」。特に DB マイグレーションを含むリリースは、失敗＝起動不能が最悪ケース）。
+
+Linux + systemd での常駐例（ユーザサービス。パスや env は環境に合わせる）:
+
+```ini
+# ~/.config/systemd/user/winnow.service
+[Unit]
+Description=winnow server
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/winnow
+# 公開構成なら WINNOW_ALLOWED_HOSTS 等をここで (→「5. 信頼境界」)
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user enable --now winnow` で起動し、ログアウト後も残すなら `loginctl enable-linger <user>` を設定する。node/npm をバージョンマネージャ経由で入れている場合は `ExecStart` や `Environment=PATH=...` でそのバイナリが解決できるようにすること（`claude` / `tmux` もサーバプロセスの PATH から見える必要がある →「1. 前提条件」）。
+
+### リリースの作り方（開発側）
+
+1. `package.json` の `version` を上げてコミットする。
+2. `v<version>` タグを push する（例 `git tag v0.2.0 && git push origin v0.2.0`）。
+3. GitHub Actions（`.github/workflows/release.yml`）がビルドゲート（server tsc / web build / smoke）を通してから Release を自動作成する（`--generate-notes`）。タグと `package.json` の version が食い違うと fail する（配備側の semver 比較を壊さないための防波堤）。
+
+### DB スキーマとマイグレーション
+
 - DB スキーマ版は **`PRAGMA user_version` を単一の真実源**として管理される（Settings JSON ではない）。コードが期待する版は定数 `CODE_SCHEMA_VERSION`（現在 `1`）。
 - 起動時に DB の `user_version` が `CODE_SCHEMA_VERSION` より小さければ、`MIGRATIONS` の `up` を版数順に適用する。版0→版1 の単一マイグレーションが items に多数の新カラム（`rawDisposition` / `rawConfidence` / `envEscalated` / `executionSummary` / `executionOutput` / `rollbackPlan` / `declaredReversible` / `artifacts` / `sourceUrl` / `externalKey` 等）、jobs に `ipcId`、projects に `context`、category_stats に `confBin`（PK に追加）を加え、label_events.itemId を FK `ON DELETE SET NULL` 化（NOT NULL 解除）、sprints から `projectId` 列を除去する。
 - 破壊的 table-rebuild（label_events の FK 化 / sprints の死列除去 / category_stats の PK 再構築）は `foreign_keys=OFF` を要するため、マイグレーションは `db.transaction` を使わず手動 `BEGIN`/`COMMIT` で原子化し、最後に `foreign_key_check` で整合確認する（NG なら `ROLLBACK` して起動停止）。table-rebuild は旧スキーマ検出時のみ一度きり走る。
@@ -197,7 +235,7 @@ DB は `~/.winnow/winnow.db`。**SQLite は WAL モードが有効**（`journal_
 
 ## 8. 監視・ヘルス確認
 
-- **機械向けヘルスチェック `GET /healthz`** がある（人間向け UI なし、security フック対象外でシークレット不要）。返却は `{ready, busy(実行中>0), recentFailedOver(起動時 reconcile の failedOver 数), preflightOk(tmuxOk && claudeOk)}`。
+- **機械向けヘルスチェック `GET /healthz`** がある（人間向け UI なし、security フック対象外でシークレット不要）。返却は `{ready, busy(実行中>0), recentFailedOver(起動時 reconcile の failedOver 数), preflightOk(tmuxOk && claudeOk), version(現在バージョン)}`。`version` はセルフアップデート後に新版が上がったかの外形確認に使える。
 
 ```bash
 curl http://127.0.0.1:8787/healthz                # ready/busy/recentFailedOver/preflightOk
