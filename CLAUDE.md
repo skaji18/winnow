@@ -2,11 +2,18 @@
 
 AI実行つきタスク管理ツール。背骨は `REQUIREMENTS.md`（§番号で引用される）。用語は `docs/GLOSSARY.md`。
 
-## ビルドゲート（テストランナー無し）
+## ビルドゲート（ランナーは node 組み込みのみ・追加依存なし）
 
-- server: `npx tsc --noEmit`
-- web: `cd web && npx tsc --noEmit && npx vite build`
+- typecheck: `npx tsc --noEmit`（ルート1枚の tsconfig が src/ と web/src/ と colocate した `*.test.ts` を検査）
+- test: `npm test`（node:test + 既存 tsx。DB に触るテストは `src/server/testing/tmp-home.ts` を先頭 import）
+- build: `npx vite build`
 - smoke: `WINNOW_HOME=$(mktemp -d) npx tsx scripts-smoke-feedback.ts`
+
+まとめて: `npm run gate`（typecheck → test → build → smoke）。
+
+- web結合（任意・gate 外）: `npm run smoke:web`（Playwright 実ブラウザで
+  キュー描画/絞り込み/却下処分/console error 0件 を検証。本番ビルド+実ブラウザで重いため
+  軽い決定論ゲートと分離。根拠は docs/DECISIONS.md「テスト基盤の導入」）。
 
 ## ドキュメント運用ルール（重要・ユーザ確認済み）
 

@@ -145,5 +145,9 @@
 - 新画面・新タスク種別・新 LabelAction を安易に足さない。俯瞰は QueueView 内 groupBy の
   2レンズ（案件/見通し）まで。既存軸から導出できる事象に新 executionStatus を足さない。
 - 週次一行に足してよいのは「注意の落とし所の健康指標」1語まで（受領/送り返し等）。
-- ビルドゲート: server `npx tsc --noEmit` / web `npx tsc --noEmit && npx vite build` /
-  smoke `WINNOW_HOME=$(mktemp -d) npx tsx scripts-smoke-feedback.ts`（テストランナー無し）。
+- ビルドゲート: typecheck `npx tsc --noEmit`（ルート1枚の tsconfig が src/ と web/src/ を検査。
+  colocate した `*.test.ts` も同時に型検査される）/ test `npm test`（node:test + 既存 tsx。
+  ランナーは node 組み込みのみ・追加依存なし）/ build `npx vite build` /
+  smoke `WINNOW_HOME=$(mktemp -d) npx tsx scripts-smoke-feedback.ts`。
+- DB に触るテストは `src/server/testing/tmp-home.ts` を import 文の先頭に置き、WINNOW_HOME を
+  使い捨て一時ディレクトリへ向ける（実 `~/.winnow` をテストが触らない）。
