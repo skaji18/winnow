@@ -1516,7 +1516,7 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
     <div>
       <div className="tree-row">
         <span>{item.kind === "leaf" ? "▸" : "◆"}</span>
-        <span style={{ flex: 1 }}>
+        <span className="tree-title">
           {item.title}{" "}
           <span className="muted" style={{ fontSize: 11 }}>
             [{RUNG_LABEL[item.rung]}]

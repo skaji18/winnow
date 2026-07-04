@@ -311,6 +311,8 @@ summary.lane-head { cursor: pointer; }
 /* 390px 幅で横スクロールの発生源になる flex 行は折り返す (デスクトップでも無害)。 */
 .mini-scores { flex-wrap: wrap; }
 .tree-row { flex-wrap: wrap; }
+/* タイトルは1文字幅まで潰さない: 収まらないバッジ/ボタンを折り返し側に追い出す。 */
+.tree-title { flex: 1; min-width: min(220px, 62vw); }
 /* 横持ちスマホで端末が画面を占有しない。 */
 .term { height: min(380px, 55dvh); }
 /* レビュー束ねのネスト (App.tsx の inline style から class 化。狭幅でインデントを縮める)。 */
@@ -331,9 +333,14 @@ summary.lane-head { cursor: pointer; }
   header.top { row-gap: 4px; }
   header.top .tagline { display: none; }
   .summary-line { margin-left: 0; flex-basis: 100%; }
-  /* 固定サイドバー系グリッドは縦積みに。 */
+  /* 固定サイドバー系グリッドは縦積みに。min-width:0 でグリッド子の min-content 幅
+     (カンバン列の固定幅合計) がページ全体を押し広げるのを防ぐ (.board は内側でスクロール)。 */
   .proj-layout { grid-template-columns: 1fr; }
   .sessions-grid { grid-template-columns: 1fr; }
+  .proj-layout > *, .sessions-grid > * { min-width: 0; }
+  /* カードの見出しはタイトルを全幅にし、バッジ列を下に折る (タイトルの縦落ち防止)。 */
+  .card-head { flex-wrap: wrap; }
+  .card-title { flex: 1 1 100%; }
   /* カンバンは列単位の横スクロール (縦積みだと隣列への移動先が見えない)。 */
   .board { display: flex; overflow-x: auto; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
   .board-col { flex: 0 0 min(260px, 82vw); scroll-snap-align: start; }
