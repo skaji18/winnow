@@ -177,6 +177,10 @@ export function executePrompt(
   instruction = "",
   externalApproved = false,
   reviewMaterial = "",
+  // 承認済み再走 (approveExecution 経由) のみが渡す。humanApproved=承認の事実の伝達
+  // (外部送信の解禁は含まない=解禁は externalApproved のみ)。priorPlan=前回の変更計画/成果。
+  // 両方空なら出力は従来と一字一句同一 (後方互換)。
+  opts: { humanApproved?: boolean; priorPlan?: string } = {},
 ): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
@@ -193,7 +197,13 @@ export function executePrompt(
 着手前に、変更計画を output の冒頭に必ず書くこと: (1)対象ファイル一覧 (2)実行するコマンド (3)外部送信の有無。${
         externalApproved
           ? `この実行は人間がワンタップ承認済みです。このアイテムに限り、外部送信(リモートへの push / PR 作成)を実行してよい。ただしマージ・本番デプロイ・データ削除など『採用/破壊』にあたる最終操作はしないこと(PR作成・push までに留める)。外部に生じた成果物(PR の URL など)は artifacts に必ず入れること。それでも push/PR 作成を超える不可逆操作(本番デプロイ・データ削除など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと。`
-          : `不可逆な操作(本番デプロイ・データ削除・外部送信(push/PR作成)など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと(既存の needs_human ガードを使う。追加の往復はしない)。`
+          : opts.humanApproved
+            ? // 承認済みだが外部送信は未解禁: 送信方針の指示はこの一箇所だけに置く。
+              // 「何もせず needs_human」(下の未承認文言)と「ローカルは進めて succeeded」を
+              // 同一プロンプトに同居させると worker への命令が矛盾し、解釈の運次第で
+              // 再拒否ループが再発するため、humanApproved で文言ごと分岐する。
+              `外部送信(push/PR作成)はこの実行でも許可されていない。ローカルで可逆な作業(編集・コミット・検証)に限り進め、外部送信の一歩手前まで完了させて status を "succeeded" にして返すこと(外部送信待ちであることを output に明記する)。マージ・本番デプロイ・データ削除など外部送信以外の不可逆操作が必要な場合は、それは行わず status を "needs_human" にして、人間が外で行うべき操作を箇条書きで output に書くこと。`
+            : `不可逆な操作(本番デプロイ・データ削除・外部送信(push/PR作成)など)が必要なら、何もせず status を "needs_human" にして変更計画だけ返すこと(既存の needs_human ガードを使う。追加の往復はしない)。`
       }
 実行した場合は output の末尾に巻き戻し手順を必ず書くこと: 変更したファイルの一覧と、その変更を元に戻す具体的な git コマンド(例: git checkout -- <file> / git revert <sha> / git stash / リモートに出した場合は git revert + 再push や PR クローズ。force-push はしない)。これは rollbackPlan にも同じ内容を入れること。winnow はこれを自動実行しない。人間が取り消しを押したときの手順として提示するだけ。`
       : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。${dirNote}`;
@@ -210,12 +220,39 @@ export function executePrompt(
 レビューし、問題点があれば具体的に output に列挙してください(問題が無ければ「問題なし」と明記)。
 ${fenceBody("レビュー対象", reviewMaterial.trim())}`
     : "";
+  const priorPlan = (opts.priorPlan ?? "").trim();
+  // 承認済み: 承認の事実を domain 非依存で伝える (§3.4 人間が明示で押したものは流す)。
+  // これが無いと general は承認が一切プロンプトに載らず、software(送信OFF)も初回拒否時と
+  // 同一プロンプトの再投入になり、worker が同じ判断で needs_human を繰り返す(再拒否ループ)。
+  // 送信可否・採用/破壊の方針はここに書かない(softwareNote 側の一箇所が真実源。二重に書くと
+  // 変更時にドリフトし、LLM に矛盾した規範を与える)。文言は priorPlan の有無で分ける:
+  // needs_human 再走(計画あり)と、ゲート由来 proposed の初回承認(worker 未実行=前回計画は
+  // 存在しない)で「前回の変更計画を確認済み」と偽の前提を注入しない。
+  const approvedNote = opts.humanApproved
+    ? priorPlan
+      ? `\n\n## 人間の承認済み
+人間は前回のあなたの変更計画(下記の「前回の実行」)を確認のうえ、ワンタップで承認済みです。
+実行できる部分を進め、status を "succeeded" で返すことを目指すこと。それでも "needs_human" で
+返す場合は、前回と同じ文面を繰り返さず、人間が外で行うべき操作を箇条書きで具体的に output に書くこと。`
+      : `\n\n## 人間の承認済み
+人間はこの実行提案(タイトル・本文・承認理由)を確認のうえ、ワンタップで承認済みです。
+実行できる部分を進めること。判断に迷う場合は従来どおり status を "needs_human" にして
+変更計画を返してよい(その場合、人間が判断すべき点を具体的に output に書くこと)。`
+    : "";
+  // 承認済み再走の差分保証: 前回の変更計画/成果を観察対象データとして渡し、ゼロからの
+  // 作り直し(時間/クォータの浪費)と完全同一プロンプトの再投入を構造的に無くす。
+  const priorNote = priorPlan
+    ? `\n\n## 前回の実行(人間確認待ちで停止)
+このタスクは前回の実行が人間確認待ち(needs_human)で停止し、人間の確認を経て再開されたものです。
+ゼロから作り直さず、以下の前回の計画/成果を踏まえて続きから進めること。
+${fenceBody("前回の変更計画", priorPlan)}`
+    : "";
   return `${SPINE}
 ${ctx}
 # タスク: 実行(Executor)
 以下は「リーフ(実行可能タスク)」です。上の【文脈】(プロダクト前提・案件前提・上位の意図)に
 沿って実行してください。bodyの受け入れ基準を満たすことをゴールにすること。
-${softwareNote}${redirectNote}${reviewNote}
+${softwareNote}${approvedNote}${redirectNote}${reviewNote}${priorNote}
 
 ## アイテム
 ${fenceBody("title", item.title)}

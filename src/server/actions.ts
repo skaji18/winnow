@@ -3,6 +3,7 @@ import { rollAudit } from "./classifier.js";
 import type { Disposition, Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import * as executor from "./executor.js";
+import { isEscalateTerminated } from "./gates.js";
 import { UNDOABLE } from "./queue.js";
 import { categoryStats, items, labels, rules } from "./repo.js";
 import { confBinOf } from "./text.js";
@@ -22,17 +23,39 @@ function reapplyAndIgnite(category: string): void {
 // 処分=ラベル (REQUIREMENTS §4-1). 各項目の操作はそのまま教師信号になる。
 // 「やる / 下段へ降ろす / 分類し直す / この種類はもう上げるな」。追加労力ゼロ。
 
+// doIt の note 決定論マーカー (INVARIANTS 状態機械とUndo: 逆適用が状態依存で分かれる場合は
+// note で分岐)。AI停止(escalate 終端)項目の「やる」は agreed を積まないため、undo 側も
+// このマーカーを見て unbump をスキップする(積んでいない bump の巻き戻しで母数を歪めない)。
+const DO_NOTE_AI_STOPPED = "AI停止の引き取り";
+
 /** やる: 人間が引き取って着手。AIの仕分けを是認したことになる。 */
 export function doIt(itemId: string): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
+  // AI停止(承認後 needs_human の escalate 終端)の引き取り: これは分類の是認ではなく
+  // 「AIが止めた作業を人間が引き取る」一手。rawDisposition が auto のまま残るため下の
+  // recordOutcome に流すと agreed(auto) が積まれ、自律完遂に失敗したばかりの項目で
+  // 較正を緩め方向に汚す — 簿記を丸ごとスキップする(監査分岐も disposition が escalate に
+  // 倒れているため通らない=audit の簿記も発生しない)。
+  const aiStopped = isEscalateTerminated(item);
   labels.record({
     itemId,
     action: "do",
     fromDisposition: item.disposition,
     toDisposition: "human",
     category: item.category,
+    note: aiStopped ? DO_NOTE_AI_STOPPED : undefined,
   });
+  if (aiStopped) {
+    // 監査サンプルが armed のまま(取り消し→undo で disposition=auto に復元された場合等)なら
+    // 旗だけ下ろす: audit_ok を簿記すると「自律完遂に失敗した実行」を是認として積む汚染、
+    // 放置すると isAudit チップが永久に残り監査サンプルが未決のまま失われる。
+    // 人間は現に確認している=旗は畳む・較正には数えない。
+    return items.update(itemId, {
+      status: "in_progress",
+      ...(item.auditSampled ? { auditSampled: false } : {}),
+    });
+  }
   // 監査サンプルの auto を「やる」=自動処理を是認 → audit_ok の教師信号 (§4-3 見分けつかない混入).
   // recordAudit が audit_ok の簿記(bump+label)を一手に出すので、ここで recordOutcome を二重に呼ばない。
   if (item.auditSampled && item.disposition === "auto") {
@@ -365,6 +388,9 @@ export function undoLastLabel(itemId: string): Item | null {
       // doIt: status を in_progress にした。
       patch.status = "classified";
       if (ev.fromDisposition) patch.disposition = ev.fromDisposition;
+      // AI停止の引き取り(note マーカー): doIt 側で agreed を積んでいないので unbump もしない
+      // (無条件 unbump は同カテゴリの他項目が正当に積んだ agreed を横取りして母数を歪める)。
+      if (ev.note === DO_NOTE_AI_STOPPED) break;
       // 監査 do(recordAudit true)と通常 do(auto 項目の是認)は最終状態が区別不能のため、
       // auditSampled の再武装はしない(存在しなかった監査サンプルを誤って再浮上させない)。
       // bump の巻き戻し(agreed)は両 do とも同じ auto/agreed 母数なので unbump のみ残す。

@@ -30,11 +30,17 @@ export function redactSecrets(s: string): string {
     .replace(RE_HIGH_ENTROPY, "[REDACTED-HIGH-ENTROPY]");
 }
 
-// 切り詰め (前方優先 slice + 番兵)。区画別予算で人間ゾーン/AIゾーンに別々に適用する。
-function clip(text: string, max: number, sentinel: string): string {
+// 切り詰め (前方優先 slice + 番兵=省略を可視化する。黙って欠落させない)。区画別予算で
+// 人間ゾーン/AIゾーンに別々に適用するほか、executor の priorPlan 切り詰めも共有する。
+export function clip(text: string, max: number, sentinel: string): string {
   if (max <= 0) return ""; // 予算ゼロ=ゾーンごと省く(番兵だけ注入しない)。
   if (text.length <= max) return text;
-  return text.slice(0, max) + sentinel;
+  let cut = text.slice(0, max);
+  // UTF-16 サロゲートペアの途中で切らない(先頭サロゲートの単独残りは書き出し時に
+  // U+FFFD へ置換され末尾が壊れる)。
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut + sentinel;
 }
 
 /**

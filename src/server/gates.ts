@@ -190,6 +190,50 @@ export function uncertainGateReason(item: Item, snap: GateSnapshot): string {
   return "同一まとまり内の上流タスク(orderIndex が前)が未完です。＝上流完了待ち(独立なら、そのままワンタップで実行)";
 }
 
+/**
+ * 「worker 成果の実在」= needs_human 由来 proposed / 実行済み item の単一判別式
+ * (executor の escalate 終端と queue/deriveProposedGate の read 時判別が共有する。
+ * write と read が別々のインライン式を持つとドリフトするため export で一本化)。
+ * ゲート書き込み (requestExecution / runExecution の proposed 倒し) は executionResult のみ
+ * 書き、executionSummary/executionOutput には触れない — needs_human は applyExecuteResult が
+ * この2列を書くので、成果の実在がそのまま「worker が一度は走った」の決定論シグナルになる。
+ */
+export function hasWorkerOutcome(item: Item): boolean {
+  return item.autoExecuted && (item.executionSummary != null || item.executionOutput != null);
+}
+
+/**
+ * 「この proposed は needs_human 起源か」の単一判別式。hasWorkerOutcome(成果の実在)だけでは
+ * 「過去の任意の実行の残骸」と「今回の承認サイクルの needs_human」を区別できない —
+ * failed/succeeded の残骸を持つ item が再ゲートで proposed に落ちると、承認の初回から
+ * 前回計画が誤注入され escalate 終端が1タップで誤発火し、live なゲート警告も隠れる。
+ * 起源は書き込みの構造差で決定論に判別する: needs_human の書き込み(applyExecuteResult)は
+ * executionResult を summary\n\noutput の連結で同時に書く。ゲート書き込みは executionResult に
+ * ゲート文言を書き summary/output に触れない。従って連結の再計算一致 = needs_human 起源
+ * (推論なし・新しい状態カラムなし)。
+ */
+export function isNeedsHumanProposed(item: Item): boolean {
+  if (item.executionStatus !== "proposed" || !hasWorkerOutcome(item)) return false;
+  const workerTrace = `${item.executionSummary ?? ""}\n\n${item.executionOutput ?? ""}`.trim();
+  return (item.executionResult ?? "").trim() === workerTrace;
+}
+
+/**
+ * 承認後 needs_human の escalate 終端(executor.applyExecuteResult の repeat 遷移が書く状態組)の
+ * read 側判別。queue(一行理由「AI停止」)と actions.doIt(引き取り時の較正簿記スキップ)が共有する
+ * (write と read が別々のインライン式を持つとドリフトする)。同じ状態組には他経路
+ * (reject→undo 復帰等)でも到達しうるため「終端の事実」ではなく「AIが止まり人間へ渡った
+ * 実行済み項目」の判別として使う。
+ */
+export function isEscalateTerminated(item: Item): boolean {
+  return (
+    item.status === "classified" &&
+    item.kind === "leaf" &&
+    item.executionStatus === "none" &&
+    hasWorkerOutcome(item)
+  );
+}
+
 // --- read 時導出 (queue.ts が /api/state ごとに呼ぶ) ---
 
 export type GateKind =
@@ -218,13 +262,12 @@ export interface GateDerivation {
  * null を返す=導出しない(呼び出し側は従来どおり保存 executionResult を表示):
  *  - 非 proposed / node。
  *  - needs_human 由来 (worker が「人間の判断が要る」と返した proposed)。executionResult には
- *    worker 成果テキストが入っており上書きしてはならない。判別は「worker 成果の実在」
- *    (autoExecuted=true かつ executionSummary/executionOutput のいずれか非null) —
- *    ゲート書き込みはこの2列に触れないため、undo/PATCH で status が変わっても判別が外れない
- *    (status='in_progress' の組で判別すると、undo で classified に戻った needs_human proposed に
- *    導出が走り、worker の「人間の判断が要る」理由を『解消済み』文言で上書きする穴があった)。
- *    既知の残穴: 実行済み(成果あり)の item の再実行がゲートに落ちた場合は保存ゲート文言の
- *    まま表示される (従来と同じ挙動=悪化はしない)。
+ *    worker 成果テキストが入っており上書きしてはならない。判別は isNeedsHumanProposed
+ *    (worker 成果の実在 + executionResult 連結一致=起源判別) —
+ *    ゲート書き込みは summary/output に触れないため、undo/PATCH で status が変わっても
+ *    判別が外れない。実行済み(成果あり)の item の再実行がゲートに落ちた場合は連結が
+ *    一致せず通常のゲート導出に落ち、fresh なゲート理由が出る(旧判別の「保存ゲート文言の
+ *    まま表示される」残穴は起源判別で解消)。
  *
  * 判定順は fire 順 (requestExecution) の鏡写しではなく安全優先:
  *  1) bad_project_dir — approve でも解除されない唯一のゲート (runExecution 最終ゲート)。
@@ -240,14 +283,21 @@ export function deriveProposedGate(
   opts: { pauseAuto: boolean },
 ): GateDerivation | null {
   if (item.executionStatus !== "proposed" || item.kind !== "leaf") return null;
-  // needs_human 由来 (worker 成果の実在で判別。ゲート書き込みは summary/output を書かない)。
-  if (item.autoExecuted && (item.executionSummary != null || item.executionOutput != null))
-    return null;
+  // bad_project_dir は needs_human 素通しより【先】に評価する(素通しの明示例外)。
+  // 成果あり item の projectDir が不正化すると、素通し優先では gateKind=null になり
+  // UI の bad_project_dir 出し分けが不発 → 承認が AI 非起動で即バウンスする原因が
+  // worker 文言の裏に隠れる(「承認→即バウンス」の原因不明ループ)。live 構造導出で
+  // 保存文言に依存しないため、worker 成果を上書きせず両立する。
   if (item.projectDir != null) {
     const esc = projectDirEscalateReason(item.projectDir, snap);
     if (esc)
       return { kind: "bad_project_dir", blockerId: null, reason: gateTextBadProjectDir(esc) };
   }
+  // needs_human 由来 (isNeedsHumanProposed: 成果の実在+executionResult 連結一致で起源まで判別)。
+  // 旧判別(hasWorkerOutcome のみ)は「実行済み item の再実行がゲートに落ちた」場合まで素通しし、
+  // live なゲート警告(不可逆等)が古い worker サマリの裏に隠れる残穴があった — 連結一致の
+  // 起源判別でその穴を閉じる(ゲート起源なら通常のゲート導出に落ち、fresh な理由が出る)。
+  if (isNeedsHumanProposed(item)) return null;
   if (isIrreversibleOrHighStakes(item))
     return { kind: "irreversible", blockerId: null, reason: GATE_TEXT_IRREVERSIBLE };
   const up = upstreamBlockerOf(item, snap);

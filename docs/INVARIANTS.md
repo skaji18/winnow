@@ -10,6 +10,9 @@
   レビュー完了）は呼ばない — 受領は「分類が正しかったか」の信号ではない。
 - `learnings` は `calibration.ts` を import しない（コンパイル時に非呼出を保証）。
   `category_stats` / `label_events` に1行も書かない。
+- **AI停止（escalate 終端）項目の「やる」（doIt）は recordOutcome を積まない** — AIが止めた作業の
+  引き取りであって分類の是認ではない（rawDisposition=auto のまま流すと agreed(auto) が緩め方向に
+  効く）。label note の決定論マーカー「AI停止の引き取り」で undo 側も unbump をスキップする。
 - 母数は分類器の**生提案**（`rawDisposition` / `rawConfidence`）で数える。env-escalated
   （環境不全由来の escalate）は母数に積まない。
 - 緩め方向の自動化は Wilson 下限 + probation（`calibration.ts`）だけ。AIゾーンの学びは
@@ -33,10 +36,19 @@
 - 監査サンプルは通常項目と見分けのつかない形で混ぜる（§4-3。専用画面・専用枠にしない）。
 - proposed の一行理由（surfaceReason）は **read 時に現在の構造から導出**する
   （`gates.deriveProposedGate`）。保存 `executionResult` はゲート発動時点の痕跡で、
-  **表示の真実にしない**（needs_human 由来＝autoExecuted かつ worker 成果
-  （executionSummary/Output）が実在するものは例外＝素通し）。
+  **表示の真実にしない**（needs_human 由来＝`gates.isNeedsHumanProposed` が真のものは例外＝
+  worker 語を出す。ただし全文素通しではなく **先頭行の列選択＋80字上限**まで。
+  導出での上書きは不可）。**bad_project_dir だけは needs_human 素通しより先に評価**する
+  （素通し優先だと承認→無言バウンスの原因が worker 文言の裏に隠れる。素通しの明示例外）。
   導出は書き込みを伴わない（updatedAt を洗わない＝ageDays 滞留表示を壊さない）。
-  `gateKind` / `blockerId` は QueueItem の計算フィールドで、DB 列に永続化しない。
+  `gateKind` / `blockerId` / `needsHuman` は QueueItem の計算フィールドで、DB 列に永続化しない
+  （needs_human 判別式をクライアントに複製しない）。
+- `gates.isEscalateTerminated`（classified + leaf + executionStatus='none' + worker成果実在）は
+  承認後 needs_human の **escalate 終端の正規状態**（一行理由「AI停止(人間の対応待ち)」）。
+- **一度でも worker が走った項目（autoExecuted）は自動では再点火しない**。全ての自動再点火経路が
+  `!autoExecuted` でガードする: /api/state の点火掃き出し / resumePausedAuto / 在庫再適用 /
+  案件割当の再分類 sweep（実行済み項目を classify に流して auto 復帰→無承認再着火させない）。
+  undo 等で disposition=auto に復元された実行済み項目の再実行は人間の明示タップのみ。
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 
@@ -70,6 +82,24 @@
   「解消済み」を誤表示する）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
 - 外部送信の解禁は `allowExternalSend` オプトイン時の承認・明示再走のみ（既定 OFF＝緩めは慎重）。
+- **承認経由の再実行プロンプトは初回 needs_human 時と同一にならない**（`humanApproved`＝承認の事実
+  ＋needs_human 起源のときのみ `priorPlan`＝前回計画を注入。同一プロンプト再投入は再拒否ループの
+  再導入＝禁止）。承認が伝えるのは承認の事実のみで、外部送信の解禁を含まない（解禁は
+  externalApproved だけが担う）。**送信可否・採用/破壊の方針の規範文は softwareNote 側の一箇所が
+  真実源**（approvedNote に重複させない＝同一プロンプト内で規範が矛盾/ドリフトしない）。
+  前回計画が存在しない初回承認（ゲート由来）に「前回計画を確認済み」と偽の前提を注入しない。
+- **承認済み再走（approvedRetry＝承認 × `gates.isNeedsHumanProposed`）**への needs_human 応答は
+  proposed に戻らず classified に倒れる（escalate 終端）。判定は「worker 成果の実在」ではなく
+  **needs_human 起源**（成果実在＋executionResult 連結一致）＝failed/succeeded の残骸を持つ item の
+  ゲート由来初回承認を誤終端させない。disposition は human 以外（auto/null/escalate）を escalate へ
+  （human のみ保持＝人間の処分が勝つ。null 素通しは可視ルールを通らず黙って消えるため不可）。
+  labels / recordOutcome は積まない（較正母数の純度）。timed_out→sentinel 回収は approvedRetry を
+  復元できないため proposed に戻る（安全側）。
+- needs_human 判別の単一真実源は `gates.ts`（`hasWorkerOutcome`＝成果の実在 /
+  `isNeedsHumanProposed`＝proposed の needs_human 起源 / `isEscalateTerminated`＝終端状態。
+  executor＝write と queue/actions＝read が同一述語を import する。インライン複製を作らない）。
+  needs_human 応答で summary/output が両方欠落した場合は executor が最低限の停止理由を合成する
+  （無検証 Partial のまま判別を不発にしない）。
 - レビュー leaf: **深さ1固定**（レビューのレビューを作らない）・同一対象の未決レビューは重複生成しない・
   成功時のみ生成・上流未完ゲートの「上流」に数えない。
 - 実行の終端は受領（`receivedAt`）。全成功実行は人間が受領するまで取消ハンドルとして可視。
