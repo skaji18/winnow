@@ -419,13 +419,7 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
               return (
                 <div key={q.id}>
                   {card}
-                  <div
-                    style={{
-                      marginLeft: 18,
-                      paddingLeft: 10,
-                      borderLeft: "2px solid rgba(128,128,128,0.35)",
-                    }}
-                  >
+                  <div className="review-bundle">
                     <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
                       └ この実行結果のレビュー
                     </div>
