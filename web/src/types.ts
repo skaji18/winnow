@@ -91,11 +91,28 @@ export type LabelAction =
 // server queue.ts TopReason のミラー。
 export type TopReason = "期日" | "高ステークス" | "優先度" | "確信度低" | null;
 
+// server gates.ts GateKind のミラー。
+export type GateKind =
+  | "bad_project_dir"
+  | "irreversible"
+  | "parent_unresolved"
+  | "parent_blocked"
+  | "upstream"
+  | "cross_repo"
+  | "pause_auto"
+  | "clear";
+
 export interface QueueItem extends Item {
   isAudit: boolean;
   topReason: TopReason;
   lane: "queue" | "in_progress";
   surfaceReason: string;
+  // ゲート由来 proposed の read 時導出。null=ゲート表示なし (非 proposed / needs_human 由来)。
+  // 非 null のとき executionResult はゲート発動時点の痕跡 (陳腐化しうる) で、live な理由は
+  // surfaceReason 側に入っている。サーバ未提供時 undefined=非表示 (旧サーバ互換)。
+  gateKind?: GateKind | null;
+  // 塞いでいる実体 (待ち先チップのジャンプ先)。上流未完=兄弟 / 親ゲート=親 / 他は null。
+  blockerId?: string | null;
   staleDays: number | null;
   ageDays: number | null;
   // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。サーバ未提供時 undefined=非表示。
