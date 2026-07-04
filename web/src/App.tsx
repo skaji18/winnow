@@ -15,6 +15,11 @@ import { ProjectsView } from "./components/Projects.js";
 import { MiniScores, ScoreBadges } from "./components/ScoreBadges.js";
 import { SprintsView } from "./components/Sprints.js";
 import { TerminalPane } from "./components/TerminalPane.js";
+import { splitExecutionResult } from "./lib/execution-text.js";
+import { deriveHeaderCounts } from "./lib/header-counts.js";
+import { groupByProject } from "./lib/project-lanes.js";
+import { bundleReviews } from "./lib/review-bundle.js";
+import { undoLabelText } from "./lib/undo-label.js";
 import type {
   AppState,
   Disposition,
@@ -251,33 +256,16 @@ function UpdateBanner({
   );
 }
 
-// ヘッダ集計: 実行中N/承認待ちM。N>maxWorkers のとき薄く色付け(機械ブロックはしない=ナッジ §4)。
+// ヘッダ集計: 実行中N/承認待ちM/引き取り待ちK(ブラウザを開けば必ず目に入るよう常時表示)。
+// 導出は lib/header-counts.ts。ここは1秒 tick で再描画して最長経過秒を進めるだけ。
 function HeaderCounts({ state }: { state: AppState }) {
-  const running =
-    state.inFlight?.running ?? state.items.filter((i) => i.executionStatus === "running").length;
-  const proposed =
-    state.inFlight?.proposed ?? state.items.filter((i) => i.executionStatus === "proposed").length;
-  // 引き取り待ち K (§3.5): 実行完了・人間の受領/採用待ち。ブラウザを開けば必ず目に入るよう常時表示。
-  const handoff =
-    state.inFlight?.awaitingHandoff ??
-    state.items.filter((i) => i.executionStatus === "awaiting_handoff").length;
-  const over = running > state.settings.maxWorkers;
-  // proposal 6: 実行中の最長経過秒を添える。auto 実行はキューに溢れさせない設計なので、ヘッダの
-  // この数字が「動いている」唯一の正直な信号になる(running 中は updatedAt≒着火時刻で固定=近似に使える)。
+  const { running, proposed, handoff, over, longestSec } = deriveHeaderCounts(state, Date.now());
   const [, tick] = useState(0);
   useEffect(() => {
     if (running <= 0) return;
     const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, [running]);
-  const longestSec =
-    running > 0
-      ? Math.floor(
-          state.items
-            .filter((i) => i.executionStatus === "running")
-            .reduce((mx, i) => Math.max(mx, Date.now() - i.updatedAt), 0) / 1000,
-        )
-      : 0;
   return (
     <span
       className={`header-counts${over ? " over" : ""}`}
@@ -292,8 +280,7 @@ function HeaderCounts({ state }: { state: AppState }) {
 // ---------------------------------------------------------------------------
 // キュー: 火の海ではなくエスカレーションだけの短いキュー (§4)
 // ---------------------------------------------------------------------------
-// 案件レーン: キュー(エスカレ)を案件でまとめる。未所属は Inbox レーン。見出しには件数進捗でなく
-// 「滞留」(escalate の本数と最長 ageDays)だけを添える (背骨: 処理量メトリクスを出さない)。
+// 案件レーン: キュー(エスカレ)を案件でまとめる。レーン分け・滞留一行の導出は lib/project-lanes.ts。
 function ProjectLanes({
   cards,
   state,
@@ -304,41 +291,17 @@ function ProjectLanes({
   // null = 束ね描画で対象カード側に吸収済み(スキップ)。
   renderCard: (q: QueueItem) => JSX.Element | null;
 }) {
-  const groups = new Map<string, QueueItem[]>();
-  for (const q of cards) {
-    const key = q.projectId ?? "__inbox__";
-    (groups.get(key) ?? groups.set(key, []).get(key)!).push(q);
-  }
-  const nameOf = (key: string): string =>
-    key === "__inbox__"
-      ? "未所属（Inbox）"
-      : (state.projects.find((p) => p.id === key)?.name ?? "（不明な案件）");
-  // Inbox を末尾、それ以外は案件名順。各レーン内はサーバ score 順(cards 配列順)を保つ。
-  const keys = [...groups.keys()].sort((a, b) => {
-    if (a === "__inbox__") return 1;
-    if (b === "__inbox__") return -1;
-    return nameOf(a).localeCompare(nameOf(b), "ja");
-  });
   return (
     <>
-      {keys.map((key) => {
-        const lane = groups.get(key)!;
-        const escal = lane.filter((q) => q.disposition === "escalate");
-        const maxAge = escal.reduce((m, q) => Math.max(m, q.ageDays ?? 0), 0);
-        const stagnation =
-          escal.length > 0
-            ? `エスカレ ${escal.length}件${maxAge > 0 ? `・最長 ${Math.round(maxAge)}日 滞留` : ""}`
-            : "";
-        return (
-          <details className="lane-section" key={key} open>
-            <summary className="lane-head">
-              <b>{nameOf(key)}</b>
-              {stagnation && <span className="muted"> （{stagnation}）</span>}
-            </summary>
-            {lane.map(renderCard)}
-          </details>
-        );
-      })}
+      {groupByProject(cards, state.projects).map(({ key, name, cards: lane, stagnation }) => (
+        <details className="lane-section" key={key} open>
+          <summary className="lane-head">
+            <b>{name}</b>
+            {stagnation && <span className="muted"> （{stagnation}）</span>}
+          </summary>
+          {lane.map(renderCard)}
+        </details>
+      ))}
     </>
   );
 }
@@ -506,22 +469,8 @@ function QueueView({ state, onChange }: { state: AppState; onChange: () => void 
           {/* さばく場(キュー)。仕分けと処分を行う面。flat=現行 / project=案件レーン。 */}
           {(() => {
             const queueCards = visible.filter((q) => q.lane !== "in_progress");
-            // 束ね描画: レビュー leaf(reviewOfId)が対象カードと同時にキューに見えるとき、
-            // 対象カードの直下にネスト描画する。並びはサーバ score 順の配列が唯一の真実のまま
-            // (束の位置=対象カードの位置。client は隣接描画のみで並べ替えない)。対象が
-            // キューに居ない(畳み済み等)レビューは従来どおり単独カードで出る。
-            const visibleIds = new Set(queueCards.map((q) => q.id));
-            const reviewsOf = new Map<string, QueueItem[]>();
-            for (const q of queueCards) {
-              if (q.reviewOfId && visibleIds.has(q.reviewOfId)) {
-                const arr = reviewsOf.get(q.reviewOfId) ?? [];
-                arr.push(q);
-                reviewsOf.set(q.reviewOfId, arr);
-              }
-            }
-            const bundledIds = new Set(
-              [...reviewsOf.values()].flat().map((q) => q.id),
-            );
+            // 束ね描画のグルーピングは lib/review-bundle.ts (client は隣接描画のみで並べ替えない)。
+            const { reviewsOf, bundledIds } = bundleReviews(queueCards);
             const renderCard = (q: QueueItem) => {
               if (bundledIds.has(q.id)) return null; // 対象カード側の束で描画済み
               const card = (
@@ -652,16 +601,8 @@ function QueueCard({
   // 承認待ち/引き取り待ちは前面強調を共有(専用CSSは増やさない)。
   const cls = `card${proposed || handoff ? " proposed" : ""}`;
 
-  // general 成果物の summary/output 分離: executionSummary/Output があればそれを優先、
-  // 無ければ executionResult を `summary\n\noutput` で分割(executor の連結形)。
-  const [splitSummary, splitOutput] = (() => {
-    if (item.executionSummary != null || item.executionOutput != null) {
-      return [item.executionSummary ?? "", item.executionOutput ?? ""];
-    }
-    const r = item.executionResult ?? "";
-    const parts = r.split(/\n\n/);
-    return [parts[0] ?? "", parts.slice(1).join("\n\n")];
-  })();
+  // general 成果物の summary/output 分離 (分割規則は lib/execution-text.ts)。
+  const [splitSummary, splitOutput] = splitExecutionResult(item);
 
   return (
     // id はカード間ジャンプ(レビュー対象チップ)のアンカー。
@@ -1161,26 +1102,6 @@ function QueueCard({
       )}
     </div>
   );
-}
-
-function undoLabelText(action: string): string {
-  switch (action) {
-    case "do":
-      return "着手";
-    case "reject":
-      return "却下";
-    case "send_back":
-      return "問いに戻す";
-    case "reclassify":
-    case "override":
-      return "分類し直し";
-    case "mute_category":
-      return "この種類を自動化";
-    case "receive":
-      return "受領・畳み";
-    default:
-      return action;
-  }
 }
 
 // general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
