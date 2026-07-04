@@ -1,6 +1,11 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// 配備ルート (= リポジトリルート)。web/dist 配信 (index.ts) と自己更新の git/npm 実行
+// (updater.ts) が共有する単一真実源 (配備レイアウト変更時にここだけ直せば揃う)。
+export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 // All persistent + runtime state lives under a single home dir so the tool is
 // "externalized to a DB, free and deterministic" (REQUIREMENTS §1.3, §6).

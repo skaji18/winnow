@@ -1,0 +1,46 @@
+# リリース作成 (DECISIONS「自己更新」節)。
+# 手順: package.json の version を上げてコミット → `v<version>` タグを push → 本ワークフローが
+# ビルドゲート(CLAUDE.md と同一)を通してから GitHub Release を自動作成する。
+# サーバ側の updater.ts はこの Release (releases/latest) を検知し、タグを checkout して適用する。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # Release 作成に必要 (それ以外の権限は付けない)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # タグと package.json の version の食い違いは検知(semver 比較)を壊すので、ここで止める。
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag v$TAG does not match package.json version $PKG" >&2
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci --include=dev --no-audit --no-fund
+
+      # ビルドゲート (CLAUDE.md と単一真実源の npm run gate: tsc / vite build / smoke)。
+      # 壊れたタグから Release を作らない=適用側 (updater.ts) が壊れた版を掴まない最初の防波堤。
+      - name: Build gate
+        run: npm run gate
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes

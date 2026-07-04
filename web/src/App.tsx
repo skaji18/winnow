@@ -23,6 +23,7 @@ import type {
   Item,
   Priority,
   QueueItem,
+  UpdateState,
 } from "./types.js";
 import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "./types.js";
 
@@ -57,6 +58,20 @@ export default function App() {
     const t = setInterval(refresh, 3000); // §4 自動分の進捗を映す軽いポーリング
     return () => clearInterval(t);
   }, [refresh]);
+
+  // サーバ再起動の自動検知: bootId(プロセス毎の識別子)が変わったら再読込する。再起動で
+  // ローカルシークレットが再生成され、開きっぱなしタブの変更系が 403 になるため
+  // (自己更新の適用後は必ずここを通って新しい index.html + シークレットを取り直す)。
+  // dev (シークレット未注入=Vite:5174) では発火しない: tsx watch の再起動毎に bootId が
+  // 変わり、保護すべきシークレットも無いのに編集中の画面状態を吹き飛ばしてしまう。
+  const bootIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const injected = (globalThis as unknown as { __WINNOW_SECRET__?: string }).__WINNOW_SECRET__;
+    const id = state?.bootId;
+    if (!injected || !id) return;
+    if (bootIdRef.current === null) bootIdRef.current = id;
+    else if (bootIdRef.current !== id) location.reload();
+  }, [state?.bootId]);
 
   if (!state) {
     return (
@@ -139,6 +154,11 @@ export default function App() {
           </div>
         )}
 
+        {/* 自己更新バナー: 新版検知→ワンタップ適用 (server updater.ts)。未提供なら何も出さない。 */}
+        {state.update && (
+          <UpdateBanner update={state.update} version={state.version} onChange={refresh} />
+        )}
+
         {error && <div className="cold-banner">通信エラー: {error}</div>}
 
         {/* どこからでも即キャプチャ (新規儀式ゼロ §4)。全タブ共通の登録口。 */}
@@ -154,6 +174,80 @@ export default function App() {
         </main>
       </div>
     </LiveContext.Provider>
+  );
+}
+
+// 自己更新バナー (DECISIONS「自己更新」節)。検知結果の案内と適用のワンタップだけを持つ。
+// 適用中はフェーズを映す。サーバは vite build 後に exit → supervisor が新版で上げ直し →
+// bootId 変化で App が自動再読込するので、ここで完了を検知する必要はない。
+const APPLY_PHASE_LABEL: Record<string, string> = {
+  fetching: "取得中",
+  installing: "依存導入中",
+  building: "ビルド中",
+  restarting: "再起動中",
+};
+function UpdateBanner({
+  update,
+  version,
+  onChange,
+}: {
+  update: UpdateState;
+  version?: string;
+  onChange: () => void;
+}) {
+  const live = useLive();
+  const [failMsg, setFailMsg] = useState<string | null>(null);
+  const phase = update.apply.phase;
+  if (phase !== "idle" && phase !== "failed") {
+    return (
+      <div className="cold-banner" role="status">
+        更新を適用中（{APPLY_PHASE_LABEL[phase] ?? phase}）…
+        完了するとサーバは終了し、常駐(supervisor)運用なら新版で自動再起動→このページも
+        自動再読込されます。手動起動の場合は npm start で上げ直してください。
+      </div>
+    );
+  }
+  // 適用失敗の痕跡は available と独立に出す (新版が取り下げられて available が false に
+  // 戻っても、直前の失敗を黙って消さない)。
+  const applyError = phase === "failed" ? update.apply.error : null;
+  if (!update.available && !applyError && !failMsg) return null;
+  const apply = async () => {
+    // 実行中ジョブ・dirty tree 等の最終ゲートはサーバ側 (started:false + reason)。
+    if (!window.confirm(`${update.latestTag} に更新してサーバを再起動します。よろしいですか？`))
+      return;
+    try {
+      const r = await api.applyUpdate();
+      if (r.started) {
+        setFailMsg(null);
+        live("更新を開始しました");
+      } else {
+        setFailMsg(r.reason ?? "更新を開始できませんでした");
+      }
+      onChange();
+    } catch (e) {
+      setFailMsg((e as Error).message);
+    }
+  };
+  // エラー表示は1本に畳む (ローカルの開始拒否 > 直前の適用失敗の順で新しい方)。
+  const errLine = failMsg ?? (applyError ? `前回の適用が失敗: ${applyError}` : null);
+  return (
+    <div className="cold-banner" role="status">
+      {update.available && (
+        <>
+          新しいバージョン {update.latestTag}
+          {version ? `（現在 v${version}）` : ""} → <button onClick={apply}>更新して再起動</button>
+          {update.url && (
+            <>
+              {" "}
+              <a href={update.url} target="_blank" rel="noreferrer">
+                リリースノート
+              </a>
+            </>
+          )}
+        </>
+      )}
+      {errLine && <span className="muted"> {errLine}</span>}
+    </div>
   );
 }
 
@@ -1689,6 +1783,7 @@ function SessionsView({ state, onChange }: { state: AppState; onChange: () => vo
 // ---------------------------------------------------------------------------
 // 再調律の取っ手 (§4 末): 最適点に着地する画面ではなく、動く標的を追う計器盤。
 function SettingsView({ state, onChange }: { state: AppState; onChange: () => void }) {
+  const live = useLive();
   const s = state.settings;
   const set = async (patch: Partial<typeof s>) => {
     await api.updateSettings(patch);
@@ -1842,6 +1937,43 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
           onSet={(ms) => set({ timedOutGraceMs: ms })}
         />
       </div>
+
+      {/* バージョンと更新チェック。バナー(App 直下)は新版がある時だけ出るので、
+          ここは「いま何が動いているか」と手動チェックの置き場 (サーバ未提供時は出さない)。 */}
+      {state.version && (
+        <div className="panel">
+          <h3>バージョン・更新</h3>
+          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+            現在 v{state.version}
+            {state.update?.latestTag ? ` / 最新リリース ${state.update.latestTag}` : ""}
+            {state.update?.checkedAt != null
+              ? ` (確認 ${new Date(state.update.checkedAt).toLocaleString("ja-JP")})`
+              : " (未チェック)"}
+          </p>
+          {state.update?.error && (
+            <p className="muted" style={{ fontSize: 12 }}>
+              更新チェックに失敗: {state.update.error}
+            </p>
+          )}
+          <button
+            onClick={() =>
+              api
+                .checkUpdate()
+                .then((u) => {
+                  // サーバはチェック失敗を throw せず error に畳んで返す。失敗を「最新です」と
+                  // 誤案内しない (エラーを黙って捨てない)。
+                  if (u.error) live(`更新チェックに失敗: ${u.error}`);
+                  else if (u.available) live(`新しいバージョン ${u.latestTag} があります`);
+                  else live("最新です");
+                  onChange();
+                })
+                .catch((e) => live(`更新チェックに失敗: ${(e as Error).message}`))
+            }
+          >
+            更新を確認
+          </button>
+        </div>
+      )}
 
       {/* MCP 接続スニペット (コピー可) + 直近の捕獲。サーバ未提供時(undefined)は出さない。 */}
       {(state.mcpEndpoint || state.captureStats) && (

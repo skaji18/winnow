@@ -259,6 +259,20 @@ export interface RuntimeState {
   };
 }
 
+// 自己更新 (server updater.ts のミラー)。現在バージョンは AppState.version が単一の真実源。
+export interface UpdateState {
+  latestTag: string | null;
+  available: boolean;
+  url: string | null;
+  checkedAt: number | null;
+  error: string | null;
+  apply: {
+    phase: "idle" | "fetching" | "installing" | "building" | "restarting" | "failed";
+    error: string | null;
+    startedAt: number | null;
+  };
+}
+
 export interface Job {
   id: string;
   itemId: string;
@@ -297,6 +311,12 @@ export interface AppState {
   captureStats?: { count: number; lastAt: number | null };
   // MCP 接続スニペット用 (例 http://localhost:8787/mcp)。
   mcpEndpoint?: string;
+  // 自己更新 (server updater.ts): 検知結果と適用の進行状況。サーバ未提供時 undefined=非表示。
+  update?: UpdateState;
+  // 現在のサーババージョン (package.json 由来)。
+  version?: string;
+  // プロセス毎の起動識別子。変化=サーバ再起動=ローカルシークレット失効なので自動再読込に使う。
+  bootId?: string;
 }
 
 // Agile/Jira 文脈の語彙 (内部キーは不変)。

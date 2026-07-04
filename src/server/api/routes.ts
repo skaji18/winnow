@@ -24,11 +24,19 @@ import { getRuntimeState } from "../runtime-state.js";
 import { decayLearnings } from "../learning.js";
 import { horizonView } from "../horizon.js";
 import { weekly } from "../summary.js";
-import { validateClaudeCmd } from "../security.js";
+import { BOOT_ID, validateClaudeCmd } from "../security.js";
 import { redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
 import { SERVER_PORT } from "../config.js";
+import {
+  CURRENT_VERSION,
+  checkForUpdate,
+  getUpdateState,
+  isApplyInProgress,
+  startApplyUpdate,
+  sweepUpdateCheck,
+} from "../updater.js";
 
 // Run a possibly-long AI op in the background; the UI reflects progress by
 // polling /api/state (job + item status are persisted as it runs).
@@ -61,7 +69,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // ポーリングまで待たせる(break)。igniting.size を差し引いて同一ポーリング内の過剰点火を防ぐ。
     const cfg = settings.get();
     const { running } = executor.inFlightCount();
-    let budget = Math.max(0, cfg.maxWorkers - running - igniting.size);
+    // 自己更新の適用中は新規点火を止める (点火→サーバ exit の轢き逃げ防止。適用開始時の
+    // running=0 ガードだけでは npm ci/ビルドの数分間に sweep が点火しうる)。
+    let budget = isApplyInProgress()
+      ? 0
+      : Math.max(0, cfg.maxWorkers - running - igniting.size);
     for (const it of items.all()) {
       if (
         it.status === "classified" &&
@@ -98,6 +110,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // sentinel を書いていれば、再起動を待たず取り込んで succeeded 等へ昇格させる。猶予超過分は
     // failed へ落とす。AI 非起動の read-only/同期処理だが、/api/state 応答を妨げないよう背景発火する。
     background(async () => {
+      // 自己更新の検知 (read-only GET・スロットル付き・throw しない) は先頭で発火する
+      // (後続の同期 sweep が throw しても検知が飢えないように。updater.ts)。
+      sweepUpdateCheck();
       executor.sweepLateExecutions();
       // memory AIゾーンの自動減衰: 未使用・未 pin の AI 学びを薄れさせる (read-only sweep に相乗り)。
       decayLearnings();
@@ -133,6 +148,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // 受信 Host を反射しない: /mcp はローカル直結が正 (リモート公開時は loopback 限定になるため、
       // HTTPS プロキシ越しに公開ホスト名を見せると誤った接続先を案内してしまう)。
       mcpEndpoint: `http://localhost:${SERVER_PORT}/mcp`,
+      // 自己更新 (updater.ts): 現在バージョン・検知結果・適用の進行状況。
+      version: CURRENT_VERSION,
+      // プロセス毎の起動識別子。web は変化=再起動(シークレット失効)とみなし自動再読込する。
+      bootId: BOOT_ID,
+      update: getUpdateState(),
     };
   });
 
@@ -386,6 +406,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await ensureDriver();
     return { sessions: getDriver().listSessions() };
   });
+
+  // --- 自己更新 (updater.ts / DECISIONS「自己更新」節) -----------------------
+  // どちらも非 GET=状態変更系としてローカルシークレットが要求される (security.ts)。
+  // check はスロットルを無視した手動チェック (取得元はコード内定数で固定・変更不可)。
+  app.post("/api/update/check", async () => {
+    await checkForUpdate(true);
+    return getUpdateState();
+  });
+  // apply は点火するだけの即返し (decompose と同型)。進行は /api/state の update.apply で追う。
+  // ガードで弾いた場合は started:false + reason。成功すれば npm ci / vite build 後に
+  // 非0 exit し、supervisor (systemd 等) が新バージョンで上げ直す。
+  app.post("/api/update/apply", async () => startApplyUpdate());
 
   // --- settings / 再調律スライダー ------------------------------------------
   // claudeAllowedFlags 自体は PATCH 対象に含めない=許可リスト緩めの穴を作らない(非対称:

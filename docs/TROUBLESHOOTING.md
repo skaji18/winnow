@@ -226,6 +226,37 @@
 
 ---
 
+## セルフアップデートが失敗する / 反映されない
+
+**症状**
+- 更新バナーの適用後に「前回の適用が失敗: …」が出る（`/api/state` の `update.apply.phase` が `failed`）。
+- 「更新して再起動」を押しても `started:false` の理由が返る。
+- 適用は走ったがサーバが上がってこない。
+
+**原因**
+- 適用（`POST /api/update/apply`）はガードで開始を拒否することがあります: 実行中ジョブあり / 未コミットの手元変更（dirty tree）/ 適用進行中 / dev 起動（`NODE_ENV !== production`）/ git clone 配備でない。理由はレスポンスとバナーにそのまま出ます。
+- 適用中の失敗（`git fetch` 不達・`npm ci` 失敗・`vite build` 失敗）は元 commit へのベストエフォート巻き戻し（checkout + `npm ci` + `vite build`）を試みたうえで `update.apply.error` とサーバログに痕跡を残します。
+- 適用完了後にサーバが上がらない場合、supervisor が再起動していない（`Restart=` 未設定・フォアグラウンド起動）か、新版の起動時チェック（DB マイグレーション・`quick_check`）で落ちています（→「起動時に DB 整合チェック…で落ちる」）。
+- バナーが出ない場合: 検知は最大6時間に1回のポーリングです。設定タブの「更新を確認」で即チェックできます。`update.error` に GitHub API への到達失敗（ネットワーク・レート制限）が残ることもあります。
+
+**対処**
+- `started:false` は理由に従う（ジョブの決着を待つ / 手元変更を退避 / production 起動にする）。
+- 適用失敗は配備ディレクトリで手動復旧できます（git clone 配備なので状態はすべて git で見えます）:
+
+```bash
+cd <配備ディレクトリ>
+git status && git log --oneline -3   # いまどの commit にいるか
+git checkout <戻したい commit/tag>
+npm ci --include=dev
+npm run build
+# supervisor 経由で再起動 (systemd なら systemctl --user restart winnow)
+```
+
+- サーバが上がらないときは supervisor のログ（systemd なら `journalctl --user -u winnow`）で起動時エラーを確認する。マイグレーション失敗ならバックアップから DB を戻して旧版で起動する（→ OPERATOR_GUIDE「6. バックアップ」「7. アップグレード方針」）。
+- 更新後は再起動でローカルシークレットが変わるため、開きっぱなしのタブは自動で再読込されます。されない場合は手動でリロードしてください。
+
+---
+
 ## それでも直らないとき
 
 - 一度クリーンに落とす：`tmux kill-session -t winnow` → アプリ再起動（フレッシュ起動で window が再構成されます）。

@@ -159,6 +159,13 @@ MCP と同じ捕獲は REST でも可能（`POST /api/items`、`captureItem` 経
 | `GET /api/export` | 全テーブルを版数付き JSON で書き出す（read-only。秘密は伏字化され、winnow は外部送出しない）。 |
 | `POST /api/import` | 版数付き JSON の復元。**空 DB 限定**（items / projects 件数 0）。版数不一致または非空 DB は 409。 |
 
+### 自己更新（`updater.ts`）
+
+| メソッド・パス | 説明 |
+|---|---|
+| `POST /api/update/check` | GitHub Releases の最新版を手動チェック（スロットル無視）。取得元リポジトリはコード内定数で固定。 |
+| `POST /api/update/apply` | 更新の適用を点火（即返し `{started, reason?}`）。進行は `/api/state` の `update.apply`。完了するとサーバは非0 exit し supervisor が再起動する。詳細は [`OPERATOR_GUIDE.md`](./OPERATOR_GUIDE.md) §7。 |
+
 ### 案件 / スプリント / ルール
 
 | メソッド・パス | 説明 |
