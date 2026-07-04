@@ -62,10 +62,13 @@ export default function App() {
   // サーバ再起動の自動検知: bootId(プロセス毎の識別子)が変わったら再読込する。再起動で
   // ローカルシークレットが再生成され、開きっぱなしタブの変更系が 403 になるため
   // (自己更新の適用後は必ずここを通って新しい index.html + シークレットを取り直す)。
+  // dev (シークレット未注入=Vite:5174) では発火しない: tsx watch の再起動毎に bootId が
+  // 変わり、保護すべきシークレットも無いのに編集中の画面状態を吹き飛ばしてしまう。
   const bootIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const injected = (globalThis as unknown as { __WINNOW_SECRET__?: string }).__WINNOW_SECRET__;
     const id = state?.bootId;
-    if (!id) return;
+    if (!injected || !id) return;
     if (bootIdRef.current === null) bootIdRef.current = id;
     else if (bootIdRef.current !== id) location.reload();
   }, [state?.bootId]);
@@ -152,7 +155,9 @@ export default function App() {
         )}
 
         {/* 自己更新バナー: 新版検知→ワンタップ適用 (server updater.ts)。未提供なら何も出さない。 */}
-        {state.update && <UpdateBanner update={state.update} onChange={refresh} />}
+        {state.update && (
+          <UpdateBanner update={state.update} version={state.version} onChange={refresh} />
+        )}
 
         {error && <div className="cold-banner">通信エラー: {error}</div>}
 
@@ -181,19 +186,31 @@ const APPLY_PHASE_LABEL: Record<string, string> = {
   building: "ビルド中",
   restarting: "再起動中",
 };
-function UpdateBanner({ update, onChange }: { update: UpdateState; onChange: () => void }) {
+function UpdateBanner({
+  update,
+  version,
+  onChange,
+}: {
+  update: UpdateState;
+  version?: string;
+  onChange: () => void;
+}) {
   const live = useLive();
   const [failMsg, setFailMsg] = useState<string | null>(null);
   const phase = update.apply.phase;
   if (phase !== "idle" && phase !== "failed") {
     return (
       <div className="cold-banner" role="status">
-        更新を適用中（{APPLY_PHASE_LABEL[phase] ?? phase}）… 完了するとサーバが再起動し、
-        ページは自動で再読込されます。
+        更新を適用中（{APPLY_PHASE_LABEL[phase] ?? phase}）…
+        完了するとサーバは終了し、常駐(supervisor)運用なら新版で自動再起動→このページも
+        自動再読込されます。手動起動の場合は npm start で上げ直してください。
       </div>
     );
   }
-  if (!update.available) return null;
+  // 適用失敗の痕跡は available と独立に出す (新版が取り下げられて available が false に
+  // 戻っても、直前の失敗を黙って消さない)。
+  const applyError = phase === "failed" ? update.apply.error : null;
+  if (!update.available && !applyError && !failMsg) return null;
   const apply = async () => {
     // 実行中ジョブ・dirty tree 等の最終ゲートはサーバ側 (started:false + reason)。
     if (!window.confirm(`${update.latestTag} に更新してサーバを再起動します。よろしいですか？`))
@@ -211,22 +228,25 @@ function UpdateBanner({ update, onChange }: { update: UpdateState; onChange: () 
       setFailMsg((e as Error).message);
     }
   };
+  // エラー表示は1本に畳む (ローカルの開始拒否 > 直前の適用失敗の順で新しい方)。
+  const errLine = failMsg ?? (applyError ? `前回の適用が失敗: ${applyError}` : null);
   return (
     <div className="cold-banner" role="status">
-      新しいバージョン {update.latestTag}（現在 v{update.currentVersion}）→{" "}
-      <button onClick={apply}>更新して再起動</button>
-      {update.url && (
+      {update.available && (
         <>
-          {" "}
-          <a href={update.url} target="_blank" rel="noreferrer">
-            リリースノート
-          </a>
+          新しいバージョン {update.latestTag}
+          {version ? `（現在 v${version}）` : ""} → <button onClick={apply}>更新して再起動</button>
+          {update.url && (
+            <>
+              {" "}
+              <a href={update.url} target="_blank" rel="noreferrer">
+                リリースノート
+              </a>
+            </>
+          )}
         </>
       )}
-      {phase === "failed" && update.apply.error && (
-        <span className="muted"> 前回の適用が失敗: {update.apply.error}</span>
-      )}
-      {failMsg && <span className="muted"> {failMsg}</span>}
+      {errLine && <span className="muted"> {errLine}</span>}
     </div>
   );
 }
@@ -1897,7 +1917,11 @@ function SettingsView({ state, onChange }: { state: AppState; onChange: () => vo
               api
                 .checkUpdate()
                 .then((u) => {
-                  live(u.available ? `新しいバージョン ${u.latestTag} があります` : "最新です");
+                  // サーバはチェック失敗を throw せず error に畳んで返す。失敗を「最新です」と
+                  // 誤案内しない (エラーを黙って捨てない)。
+                  if (u.error) live(`更新チェックに失敗: ${u.error}`);
+                  else if (u.available) live(`新しいバージョン ${u.latestTag} があります`);
+                  else live("最新です");
                   onChange();
                 })
                 .catch((e) => live(`更新チェックに失敗: ${(e as Error).message}`))

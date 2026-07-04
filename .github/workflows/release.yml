@@ -35,13 +35,10 @@ jobs:
       - name: Install
         run: npm ci --include=dev --no-audit --no-fund
 
-      # ビルドゲート (CLAUDE.md): server tsc / web vite build / smoke。
+      # ビルドゲート (CLAUDE.md と単一真実源の npm run gate: tsc / vite build / smoke)。
       # 壊れたタグから Release を作らない=適用側 (updater.ts) が壊れた版を掴まない最初の防波堤。
       - name: Build gate
-        run: |
-          npx tsc --noEmit
-          npx vite build
-          WINNOW_HOME="$(mktemp -d)" npx tsx scripts-smoke-feedback.ts
+        run: npm run gate
 
       - name: Create GitHub Release
         env:

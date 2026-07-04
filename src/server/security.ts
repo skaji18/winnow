@@ -12,6 +12,11 @@ import { EXTRA_ALLOWED_HOSTS, EXTRA_ALLOWED_PORTS, SERVER_HOST, SERVER_PORT } fr
 /** 起動時に1回だけ生成するエフェメラルなローカルシークレット (プロセス内メモリのみ・DBに置かない)。 */
 export const LOCAL_SECRET = randomBytes(24).toString("hex");
 
+// プロセス毎の起動識別子 (非秘密)。LOCAL_SECRET と同じ寿命を持ち、web は /api/state の
+// bootId 変化=再起動 (シークレット失効) を検知して自動再読込する。自己更新の適用後に限らず、
+// クラッシュ再起動・手動再起動でも同じ経路で古いタブが回復する。
+export const BOOT_ID = randomBytes(8).toString("hex");
+
 /** 本番(webDist 配信)以外は dev とみなし、Vite origin 許容＋シークレット免除。 */
 const IS_DEV = process.env.NODE_ENV !== "production";
 

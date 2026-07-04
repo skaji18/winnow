@@ -95,7 +95,8 @@
 - 検知は **read-only**（GitHub API への GET のみ・DB/ファイル書き込みなし）。`/api/state` の
   背景 sweep に相乗りし、専用の常駐タイマーを作らない。
 - 適用は**人間の明示ワンタップのみ**（自動適用しない）。状態変更系としてローカルシークレットが
-  要求される。実行中ジョブあり / working tree dirty / 適用進行中 / 非 production は拒否。
+  要求される。実行中ジョブあり / working tree dirty / 適用進行中 / 非 production / npm 未解決は
+  拒否。**適用中は新規の自動着火を点火しない**（点火直後の exit でジョブを轢かない）。
 - プロセスは**自前 re-exec しない**。適用後は非0 exit し、再起動は supervisor（systemd 等）に
   委ねる。`bootId`（プロセス毎・非秘密）の変化を web が検知して自動再読込する。
 

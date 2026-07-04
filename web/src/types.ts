@@ -255,12 +255,10 @@ export interface RuntimeState {
   };
 }
 
-// 自己更新 (server updater.ts のミラー)。
+// 自己更新 (server updater.ts のミラー)。現在バージョンは AppState.version が単一の真実源。
 export interface UpdateState {
-  currentVersion: string;
   latestTag: string | null;
   available: boolean;
-  notes: string | null;
   url: string | null;
   checkedAt: number | null;
   error: string | null;

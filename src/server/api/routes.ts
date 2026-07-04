@@ -24,16 +24,16 @@ import { getRuntimeState } from "../runtime-state.js";
 import { decayLearnings } from "../learning.js";
 import { horizonView } from "../horizon.js";
 import { weekly } from "../summary.js";
-import { validateClaudeCmd } from "../security.js";
+import { BOOT_ID, validateClaudeCmd } from "../security.js";
 import { redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
 import { SERVER_PORT } from "../config.js";
 import {
-  BOOT_ID,
   CURRENT_VERSION,
   checkForUpdate,
   getUpdateState,
+  isApplyInProgress,
   startApplyUpdate,
   sweepUpdateCheck,
 } from "../updater.js";
@@ -69,7 +69,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // ポーリングまで待たせる(break)。igniting.size を差し引いて同一ポーリング内の過剰点火を防ぐ。
     const cfg = settings.get();
     const { running } = executor.inFlightCount();
-    let budget = Math.max(0, cfg.maxWorkers - running - igniting.size);
+    // 自己更新の適用中は新規点火を止める (点火→サーバ exit の轢き逃げ防止。適用開始時の
+    // running=0 ガードだけでは npm ci/ビルドの数分間に sweep が点火しうる)。
+    let budget = isApplyInProgress()
+      ? 0
+      : Math.max(0, cfg.maxWorkers - running - igniting.size);
     for (const it of items.all()) {
       if (
         it.status === "classified" &&
@@ -100,11 +104,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // sentinel を書いていれば、再起動を待たず取り込んで succeeded 等へ昇格させる。猶予超過分は
     // failed へ落とす。AI 非起動の read-only/同期処理だが、/api/state 応答を妨げないよう背景発火する。
     background(async () => {
+      // 自己更新の検知 (read-only GET・スロットル付き・throw しない) は先頭で発火する
+      // (後続の同期 sweep が throw しても検知が飢えないように。updater.ts)。
+      sweepUpdateCheck();
       executor.sweepLateExecutions();
       // memory AIゾーンの自動減衰: 未使用・未 pin の AI 学びを薄れさせる (read-only sweep に相乗り)。
       decayLearnings();
-      // 自己更新の検知 (read-only GET・スロットル付き) も同じ sweep に相乗りする (updater.ts)。
-      sweepUpdateCheck();
     });
     return {
       items: items.all(),

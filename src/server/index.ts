@@ -1,10 +1,9 @@
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import { ensureDirs, SERVER_HOST, SERVER_PORT } from "./config.js";
+import { APP_ROOT, ensureDirs, SERVER_HOST, SERVER_PORT } from "./config.js";
 import "./db.js"; // initialize schema (quick_check 失敗時はここで throw して listen 前に落ちる)
 import { registerRoutes } from "./api/routes.js";
 import { registerMcp } from "./mcp/transport.js";
@@ -120,8 +119,7 @@ app.get("/ws/terminal", { websocket: true }, (socket, req) => {
 });
 
 // Serve the built frontend in production.
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const webDist = path.resolve(__dirname, "../../web/dist");
+const webDist = path.join(APP_ROOT, "web/dist");
 if (fs.existsSync(webDist)) {
   // index 配信は自前(シークレット注入)、static は CSS/JS 等のアセット配信に限定。
   await app.register(fastifyStatic, { root: webDist, index: false });

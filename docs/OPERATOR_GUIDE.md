@@ -189,9 +189,9 @@ DB は `~/.winnow/winnow.db`。**SQLite は WAL モードが有効**（`journal_
 
 git clone で配備してあれば（→「2. インストール・ビルド・起動」）、UI からワンタップで最新リリースへ更新できる（`src/server/updater.ts`。設計判断は [DECISIONS.md](./DECISIONS.md)「自己更新」節）。
 
-- **検知**: GitHub Releases の最新版を最大6時間に1回チェックし（`/api/state` ポーリングに相乗り。取得元リポジトリはコード内定数で固定・変更不可）、新しければ画面トップにバナーが出る。設定タブの「バージョン・更新」から手動チェック（`POST /api/update/check`）もできる。
-- **適用**: バナーの「更新して再起動」（`POST /api/update/apply`）。サーバが `git fetch --tags` → 該当タグを checkout → `npm ci --include=dev` → `vite build` を実行し、完了すると**非0 exit する**。再起動は supervisor に委ねるため、**systemd 等での常駐運用が前提**（`Restart=on-failure` または `always`）。フォアグラウンド起動中に適用するとプロセスは終了するだけなので、手で `npm start` し直すこと。適用後はページが自動で再読込される（プロセス毎の `bootId` の変化で再起動を検知する。再起動でローカルシークレットが変わるため）。
-- **ガード**: 実行中ジョブあり / 未コミットの手元変更（dirty tree）/ 適用進行中 / dev 起動（`NODE_ENV !== production`）の場合は適用を開始せず理由を返す。
+- **検知**: GitHub Releases の最新版を最大6時間に1回チェックし（`/api/state` ポーリングに相乗り。取得元リポジトリはコード内定数で固定・変更不可。チェック失敗時は15分後に再試行）、新しければ画面トップにバナーが出る。設定タブの「バージョン・更新」から手動チェック（`POST /api/update/check`）もできる。
+- **適用**: バナーの「更新して再起動」（`POST /api/update/apply`）。サーバが `git fetch --tags` → 該当タグを checkout → `npm ci --include=dev` → `npm run update:build`（`web/dist-next` にビルドしてから瞬時に入れ替える。配信中の UI を数分壊さない）を実行し、完了すると**非0 exit する**。適用中は新規の自動着火を点火しない。再起動は supervisor に委ねるため、**systemd 等での常駐運用が前提**（`Restart=on-failure` または `always`）。フォアグラウンド起動中に適用するとプロセスは終了するだけなので、手で `npm start` し直すこと。適用後はページが自動で再読込される（プロセス毎の `bootId` の変化で再起動を検知する。再起動でローカルシークレットが変わるため）。
+- **ガード**: 実行中ジョブあり / 未コミットの手元変更（dirty tree。未追跡ファイルは対象外）/ 適用進行中 / dev 起動（`NODE_ENV !== production`）/ `npm` がサーバプロセスの PATH から解決できない場合は、適用を開始せず理由を返す。
 - **失敗時**: 元の commit へ checkout + `npm ci` + `vite build` のベストエフォート巻き戻しを試み、エラーは `/api/state` の `update.apply.error` とサーバログに残る。手動復旧は [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)「セルフアップデートが失敗する」を参照。
 - **更新前のバックアップ**は従来どおり推奨（→「6. バックアップ」。特に DB マイグレーションを含むリリースは、失敗＝起動不能が最悪ケース）。
 
