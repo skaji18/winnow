@@ -217,9 +217,9 @@ WantedBy=default.target
 
 ### リリースの作り方（開発側）
 
-1. `package.json` の `version` を上げてコミットする。
-2. `v<version>` タグを push する（例 `git tag v0.2.0 && git push origin v0.2.0`）。
-3. GitHub Actions（`.github/workflows/release.yml`）がビルドゲート（server tsc / web build / smoke）を通してから Release を自動作成する（`--generate-notes`）。タグと `package.json` の version が食い違うと fail する（配備側の semver 比較を壊さないための防波堤）。
+1. `package.json` の `version` を上げる（形式は CalVer 風 `YY.M.月内連番`。例 `26.7.1`、同月内の次は `26.7.2`）。
+2. その変更を main にマージ（push）する。GitHub 上の操作だけで完結し、ローカルの `git tag` は不要。
+3. GitHub Actions（`.github/workflows/release.yml`）が main への push を検知し、ビルドゲートを通してからタグ `v<version>` と Release を自動作成する（`--generate-notes`）。同じ version のタグが既にあれば何もしない（re-run や version 以外の package.json 変更で二重リリースしない）。壊れた commit からはタグも Release も作られない（配備側 updater.ts が壊れた版を掴まない防波堤）。
 
 ### DB スキーマとマイグレーション
 
