@@ -1,6 +1,6 @@
 {
   "name": "winnow",
-  "version": "0.1.0",
+  "version": "26.7.1",
   "private": true,
   "type": "module",
   "description": "AI実行つきタスク管理ツール。希少資源=あなたの判断アテンションを配給する道具。",
