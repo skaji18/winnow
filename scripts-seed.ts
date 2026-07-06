@@ -46,7 +46,15 @@ mk({
   disposition: "escalate", confidence: 0.7, stakes: 0.88, reversibility: 0.15,
   category: "インフラ", reason: "不可逆・高ステークスのため自動着火せず提案で止める。",
   executionStatus: "proposed", priority: "urgent", dueDate: now + DAY,
-  executionResult: "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。",
+  // 計画プレビュー(QueueCard の details)を出すには executionSummary/Output が必要:
+  // gateKind 由来の proposed は worker 成果が無いとペイン自体が抑止される(QueueCard.tsx)。
+  // 注意: executionResult を summary+"\n\n"+output の厳密連結にしない(isNeedsHumanProposed の
+  // 連結一致判定に誤マッチし、バッジが「AI停止」に化ける)。ゲート文言を接頭辞に足して外す。
+  executionSummary: "変更計画: 0042_add_refunds を expand-contract で適用(ダウンタイムなし)。",
+  executionOutput:
+    "- 適用前にスナップショット snap-0706 を取得\n- 旧カラムは読み取り互換を維持(次リリースで削除)\n- 失敗時は 0042_add_refunds.down.sql で巻き戻し",
+  executionResult:
+    "不可逆/高ステークスのため、承認待ち(ワンタップで実行)。\n\n変更計画: 0042_add_refunds を expand-contract で適用(ダウンタイムなし)。\n\n- 適用前にスナップショット snap-0706 を取得\n- 旧カラムは読み取り互換を維持(次リリースで削除)\n- 失敗時は 0042_add_refunds.down.sql で巻き戻し",
 });
 mk({
   title: "経費精算(¥3,200 交通費)を承認",

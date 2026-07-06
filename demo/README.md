@@ -20,7 +20,7 @@ npm run demo
 特定のフローだけ撮り直す:
 
 ```sh
-npm run demo -- 05-terminal-theater
+npm run demo -- 06-terminal-theater
 ```
 
 ## 必要なもの
@@ -33,15 +33,17 @@ npm run demo -- 05-terminal-theater
 | 成果物 (`docs/assets/`) | 撮影フロー (`demo/record.mjs`) | 見せている概念 | 主に参照する画面 |
 |---|---|---|---|
 | `01-capture-to-queue.webp` | `flowCaptureToQueue` | 登録→自動仕分け→要確認で着地 | 上部の登録欄 + キュー |
-| `02-escalation-queue.webp` | `flowEscalationQueue` | 自動分は畳む・要確認だけの短いキュー | キュー一覧 |
+| `02-queue-and-lenses.webp` | `flowQueueAndLenses` | 要確認だけの短いキュー + 俯瞰レンズ(案件/見通し) | キュー一覧 + レンズトグル |
 | `03-disposition-and-undo.webp` | `flowDispositionAndUndo` | 処分＝教師信号・取り消し | キューカードの「分類し直す」「さばきを戻す」 |
-| `04-approve-and-run.webp` | `flowApproveAndRun` | 不可逆はワンタップ承認→実行 | 承認待ちカード |
-| `05-terminal-theater.webp` | `flowTerminalTheater` | AIが動く端末をライブ閲覧 | セッションタブ + 端末ペイン |
+| `04-approve-run-handoff.webp` | `flowApproveRunHandoff` | 承認→実行→引き取り待ち→確認して完了(成功の終端) | 承認待ちカード → 引き取り待ちカード |
+| `05-handoff-fix-loop.webp` | `flowHandoffFixLoop` | 引き取り待ちへの一行指示→やり直し→再提示 | 引き取り待ちカードの「この指示でやり直す」 |
+| `06-terminal-theater.webp` | `flowTerminalTheater` | AIが動く端末をライブ閲覧 | セッションタブ + 端末ペイン |
 
 ## 仕組みと保守のポイント
 
 - **決定性**: 固定シード(`scripts-seed-demo.ts`)＋フェイクAI(`src/server/ai/fake-driver.ts`)＋固定ビューポートで、毎回ほぼ同じ画が撮れる。
 - **モックは本番から疎結合**: フェイクAIは `AiDriver` インターフェース(`src/server/ai/driver.ts`)だけに依存し、`WINNOW_FAKE_AI=1` のときだけ選ばれる(本番経路からは到達しない)。本番ロジックには触れていないので、機能改修の大半では壊れない。
 - **セレクタ**: 操作は製品の安定した日本語ラベル/role を基準にしている。文言を変えたら `demo/record.mjs` の該当フローだけ直す。
-- **端末劇場(05)** は GUI 改修の影響を受けない(台本は `fake-driver.ts` 内)。GUI を変えたときは原則 01〜04 を撮り直せば足りる。
+- **worker の台本は label 分岐**: `fake-driver.ts` の `workerScript()` が `実行: <タイトル先頭30字>` で分岐する。04(本番DBスキーマ)・05(依存パッケージ更新PR) のアイテムタイトルを変えたら分岐条件も合わせる。
+- **端末劇場(06)** は GUI 改修の影響を受けない(台本は `fake-driver.ts` 内)。GUI を変えたときは原則 01〜05 を撮り直せば足りる。
 - **コミットするのは `docs/assets/*.webp` だけ**。中間物(`demo/.home/`・`demo/.rec/`)は `.gitignore` 済み。

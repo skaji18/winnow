@@ -70,6 +70,12 @@ async function click(page, locator) {
   await sleep(400);
 }
 
+// 実行結果ペイン(details)を開く。着地時の再描画で閉じた状態に戻るため、開きたい場面ごとに呼ぶ。
+// ラベル文言はここ1箇所に集約(文言変更時の直し漏れを防ぐ)。
+async function openResultPane(page, card) {
+  await click(page, card.getByText(/実行結果 \/ メモを見る/).first());
+}
+
 // --- 各フロー --------------------------------------------------------------
 
 async function flowCaptureToQueue(page) {
@@ -89,18 +95,31 @@ async function flowCaptureToQueue(page) {
   await sleep(2600);
 }
 
-async function flowEscalationQueue(page) {
+async function flowQueueAndLenses(page) {
   await page.goto(base("/"));
   await page.locator(".card").first().waitFor();
   await sleep(1200);
-  // 「自動で畳んだ N 件」バンド → 短いキューを上から下へゆっくり見せる。
-  for (let y = 0; y <= 700; y += 70) {
+  // 「自動で畳んだ N 件」バンド → 要確認だけの短いキューをざっと見せる。
+  // 降りた分だけ正確に戻す(ずれるとレンズ切替時に補正ジャンプが映る)。
+  let scrolled = 0;
+  for (let i = 0; i < 6; i++) {
     await page.mouse.wheel(0, 70);
-    await sleep(220);
+    scrolled += 70;
+    await sleep(200);
   }
+  await sleep(600);
+  await page.mouse.wheel(0, -scrolled);
   await sleep(800);
-  await page.mouse.wheel(0, -700);
-  await sleep(1000);
+  // 俯瞰レンズ: 同じキューを「案件」レーン → 「見通し」(rung×due) に掛け替える。
+  const lens = page.getByRole("group", { name: "俯瞰レンズ" });
+  await click(page, lens.getByRole("button", { name: "案件" }));
+  await page.locator(".lane-section").first().waitFor();
+  await sleep(2200);
+  await click(page, lens.getByRole("button", { name: "見通し" }));
+  await page.locator(".horizon").waitFor();
+  await sleep(2600);
+  await click(page, lens.getByRole("button", { name: "まとめない" }));
+  await sleep(1200);
 }
 
 async function flowDispositionAndUndo(page) {
@@ -109,19 +128,24 @@ async function flowDispositionAndUndo(page) {
   await card.waitFor();
   await card.scrollIntoViewIfNeeded();
   await sleep(1000);
-  // 「分類し直す…」で要確認→自動へ(普段の一手＝教師信号)。
+  // 「分類し直す…」で要確認→要判断へ(普段の一手＝教師信号)。
+  // auto に倒すとカード自体がキューから畳まれ、undo の手がかりも一緒に消えるため、
+  // カードが残る human 方向で「覆す→戻す」の両方を1カード上で見せる。
   const select = card.getByLabel("分類し直す");
   await moveTo(page, select);
-  await select.selectOption("auto");
-  await sleep(1600);
-  // 直前のさばきを取り消せる(『さばきを戻す』)。
-  const undo = page.getByRole("button", { name: /さばきを戻す/ }).first();
-  await undo.waitFor({ timeout: 8000 });
-  await click(page, undo);
+  await select.selectOption("human");
+  // バッジが「要判断」に変わるのを待ってから見せる。
+  await card.locator(".badge", { hasText: "要判断" }).waitFor({ timeout: 8000 });
+  await sleep(1800);
+  // 直前のさばきを取り消せる(『さばきを戻す』)。必ず同じカード内のリンクを押す
+  // (ページ先頭の .first() は、シード由来の undo リンクを持つ別カードに化ける)。
+  // undo リンクはバッジと同じ再描画で現れるので追加の waitFor は不要(click が可視を待つ)。
+  await click(page, card.getByRole("button", { name: /さばきを戻す/ }));
+  await card.locator(".badge", { hasText: "要確認" }).waitFor({ timeout: 8000 });
   await sleep(2000);
 }
 
-async function flowApproveAndRun(page) {
+async function flowApproveRunHandoff(page) {
   await page.goto(base("/"));
   const card = page.locator(".card", { hasText: "本番DBスキーマ" });
   await card.waitFor();
@@ -133,9 +157,51 @@ async function flowApproveAndRun(page) {
     await click(page, preview.first());
     await sleep(1400);
   }
-  // ワンタップ承認 → 実行中 → 完了。
+  // ワンタップ承認 → 実行中 → 高ステークスなので done に沈まず「引き取り待ち」で戻る。
   await click(page, card.getByRole("button", { name: "承認して実行" }));
-  await sleep(4500); // フェイク実行(~1.6s)+ポーリング反映を見せる
+  const receive = card.getByRole("button", { name: /確認して完了/ });
+  await receive.waitFor({ timeout: 10000 }); // フェイク実行(~1.6s)+ポーリング反映
+  await card.scrollIntoViewIfNeeded();
+  await sleep(800);
+  // markdown の結果(表・巻き戻し手順)を開いて見せる。台本(fake-driver)の label 分岐が
+  // 外れて既定台本に落ちると別タスクの結果が映る=無言で誤った画になるので、内容まで検証する。
+  // ペインは再マウント時だけ閉じて戻るので「閉じていたら開く」(開いたままなら二度押しで閉じない)。
+  const resultText = card.getByText(/マイグレーションを適用しました/).first();
+  await resultText.waitFor({ state: "attached", timeout: 5000 });
+  if (!(await resultText.isVisible())) await openResultPane(page, card);
+  await resultText.waitFor({ timeout: 5000 });
+  await sleep(3200);
+  // 人間が受け取って畳む=成功の終端。採用(本番反映の判断)は人間の側に残る。
+  await click(page, receive);
+  await sleep(2200);
+}
+
+async function flowHandoffFixLoop(page) {
+  await page.goto(base("/"));
+  const card = page.locator(".card", { hasText: "依存パッケージ更新PR" });
+  await card.waitFor();
+  await card.scrollIntoViewIfNeeded();
+  await sleep(1000);
+  // 引き取り待ちの成果物(PR リンク)と実行結果を開いて見せる。
+  await openResultPane(page, card);
+  await sleep(1800);
+  // レビュー指摘が付いた想定で、一行指示 → 同じ実行をやり直させる(最頻ループ)。
+  const input = card.getByLabel("直す方向を一行で指示");
+  await click(page, input);
+  await input.type("レビュー指摘: lockfileの差分を小さくして再push", { delay: 55 });
+  await sleep(500);
+  await click(page, card.getByRole("button", { name: "この指示でやり直す" }));
+  // 再走中はカードがキューからいったん消え、完了すると「引き取り待ち」で再提示される。
+  // 完了の合図は「新しい結果テキストが DOM に載ること」で待つ(attached)。閉じた details 内は
+  // visible にならず、消滅→再出現の2段待ちはポーリング間隔と競合しうるため、これが最も確実。
+  const newText = card.getByText(/PR #482 を更新しました/).first();
+  await newText.waitFor({ state: "attached", timeout: 15000 });
+  await card.scrollIntoViewIfNeeded();
+  await sleep(800);
+  // 指摘対応済みの新しい結果(markdown)を見せる。ペインが閉じていたら開く(04 と同じ理由)。
+  if (!(await newText.isVisible())) await openResultPane(page, card);
+  await newText.waitFor({ timeout: 5000 });
+  await sleep(3400);
 }
 
 async function flowTerminalTheater(page) {
@@ -153,10 +219,11 @@ async function flowTerminalTheater(page) {
 
 const FLOWS = [
   ["01-capture-to-queue", flowCaptureToQueue],
-  ["02-escalation-queue", flowEscalationQueue],
+  ["02-queue-and-lenses", flowQueueAndLenses],
   ["03-disposition-and-undo", flowDispositionAndUndo],
-  ["04-approve-and-run", flowApproveAndRun],
-  ["05-terminal-theater", flowTerminalTheater],
+  ["04-approve-run-handoff", flowApproveRunHandoff],
+  ["05-handoff-fix-loop", flowHandoffFixLoop],
+  ["06-terminal-theater", flowTerminalTheater],
 ];
 
 let BASE = "http://127.0.0.1:8799";
