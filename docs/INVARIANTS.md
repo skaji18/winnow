@@ -28,11 +28,20 @@
 ## キュー可視性の原則（`queue.ts` visible）
 
 - 評価順: cancelled 除外 → **rejected 畳み（人間の処分が勝つ）** → awaiting_handoff →
-  autoDone 取消ハンドル（`receivedAt == null` のみ）→ failed/timed_out/blocked 再浮上 →
-  done 畳み → proposed → 着手中レーン → escalate/human・監査混入。
+  autoDone 取消ハンドル（`receivedAt == null` のみ）→ failed/timed_out 再浮上 →
+  **アーカイブ案件畳み** → blocked 再浮上 → done 畳み → proposed → 着手中レーン →
+  escalate/human・監査混入。
 - 人間が一度も見ていない attention 要求を**黙って引っ込める緩め**（defer-until・時限自動消去）は
   導入しない。前面固定を解くのはスコア逓減（handoffC）まで。**畳むのは人間の明示操作**
-  （receive / reject）だけ。
+  （receive / reject / 締めモーダル経由の案件アーカイブ）だけ。
+- **アーカイブ案件配下の可視性は read 時導出**（アイテムを変異させない＝復元で自動復帰・
+  較正母数に触れない）。畳むのは人間の注意・承認要求（classified escalate/human・監査混入・
+  blocked・proposed・着手中レーン）。**実行系の終端（awaiting_handoff / failed / timed_out /
+  autoDone 未受領の取消ハンドル）は案件の生死と無関係に出し続ける**（§4-4。archive 後に
+  走り切る実行の終端を黙らせない）。バックログ/スプリント未割当/horizon も同じ導出で畳む
+  （バックログはトグルと案件フィルタ明示選択で参照可）。
+- 未完のある案件の**削除は締めモーダル経由**（archive と同じ導線。「未所属で残す」の帰結を
+  明示する）。`projects.remove` は projectId だけ外し **sprintId には触れない**。
 - 監査サンプルは通常項目と見分けのつかない形で混ぜる（§4-3。専用画面・専用枠にしない）。
 - proposed の一行理由（surfaceReason）は **read 時に現在の構造から導出**する
   （`gates.deriveProposedGate`）。保存 `executionResult` はゲート発動時点の痕跡で、

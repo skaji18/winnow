@@ -133,8 +133,10 @@ function ProjectDetail({
   const projectItems = state.items.filter((i) => i.projectId === project.id);
   const setMode = (mode: "board" | "flow") =>
     api.updateProject(project.id, { mode }).then(onChange);
-  const [closing, setClosing] = useState(false);
-  // 締めの対象=未完(done/rejected 以外)。0件なら即アーカイブ、1件以上は締めモーダルを開く。
+  // 締めモーダルは archive/delete 共通の導線 (docs/DECISIONS.md「案件クローズ・バッチ」)。
+  // 差分は器の扱いだけ: archive=器を残す・可逆 / delete=器も消す・不可逆。
+  const [closeMode, setCloseMode] = useState<"archive" | "delete" | null>(null);
+  // 締めの対象=未完(done/rejected 以外)。0件なら即実行、1件以上は締めモーダルを開く。
   const openItems = projectItems.filter((i) => i.status !== "done" && i.status !== "rejected");
 
   return (
@@ -156,7 +158,7 @@ function ProjectDetail({
               if (openItems.length === 0) {
                 api.updateProject(project.id, { status: "archived" }).then(onChange);
               } else {
-                setClosing(true);
+                setCloseMode("archive");
               }
             }}
           >
@@ -165,9 +167,14 @@ function ProjectDetail({
         )}
         <button
           className="danger"
+          title="案件を削除して締める(未完があれば締めモーダルで処分を決めます)"
           onClick={() => {
-            if (confirm("案件を削除? (タスクは残り、案件参照だけ外れます)"))
-              api.deleteProject(project.id).then(onChange);
+            if (openItems.length === 0) {
+              if (confirm("案件を削除? (タスクは残り、案件参照だけ外れます)"))
+                api.deleteProject(project.id).then(onChange);
+            } else {
+              setCloseMode("delete");
+            }
           }}
         >
           案件を削除
@@ -206,12 +213,13 @@ function ProjectDetail({
         />
       </details>
 
-      {closing && (
+      {closeMode && (
         <ArchiveCloseModal
           project={project}
+          mode={closeMode}
           openItems={openItems}
           state={state}
-          onClose={() => setClosing(false)}
+          onClose={() => setCloseMode(null)}
           onChange={onChange}
         />
       )}
@@ -294,19 +302,22 @@ function ProjectBoard({
   );
 }
 
-// 案件 archive 時の締めモーダル (確定2決定 b)。未完を放置せず disposition で締める。
+// 案件を閉じる (archive/delete 共通) 締めモーダル。未完を放置せず disposition で締める。
 // 既存の正規路 (reject/send_back=actions.ts label+recordOutcome+undo / 繰越=updateItem) のみで
 // 自己完結。残数/消化率/達成% は出さない (出すのは判断対象の列挙のみ=処理量メトリクス禁止)。
+// delete モードでは keep の帰結が違う (案件参照が外れ未所属になる) ため文言を変える。
 type CloseChoice = "keep" | "stop" | "send_back" | "carry";
 
 function ArchiveCloseModal({
   project,
+  mode,
   openItems,
   state,
   onClose,
   onChange,
 }: {
   project: Project;
+  mode: "archive" | "delete";
   openItems: Item[];
   state: AppState;
   onClose: () => void;
@@ -330,9 +341,10 @@ function ArchiveCloseModal({
         else if (c.kind === "send_back") await api.action(it.id, "send_back");
         else if (c.kind === "carry" && c.to)
           await api.updateItem(it.id, { projectId: c.to }, it.updatedAt);
-        // keep は何もしない (item を温存)。
+        // keep は何もしない (archive=案件に付けたまま温存 / delete=サーバ側で案件参照が外れる)。
       }
-      await api.updateProject(project.id, { status: "archived" });
+      if (mode === "archive") await api.updateProject(project.id, { status: "archived" });
+      else await api.deleteProject(project.id);
       await onChange();
       onClose();
     } catch (e) {
@@ -350,10 +362,15 @@ function ArchiveCloseModal({
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ marginTop: 0 }}>「{project.name}」を締める</h3>
+        <h3 style={{ marginTop: 0 }}>
+          「{project.name}」を締めて{mode === "archive" ? "アーカイブ" : "削除"}
+        </h3>
         <p className="muted" style={{ fontSize: 12.5 }}>
           未完 {openItems.length}件をどう締めるか決めてください。繰越は別案件へ移すだけ（教師信号を出さない）、
-          止める/問いに戻すはそのまま教師信号になります。何もしなければ「そのまま」で残ります。
+          止める/問いに戻すはそのまま教師信号になります。
+          {mode === "archive"
+            ? "何もしなければ「そのまま」案件に付いたまま畳まれます（復元で戻ります）。"
+            : "何もしなければ「未所属で残す」= 案件参照が外れて横断バックログに残ります。削除は不可逆で、案件名・前提（context）は失われます。"}
         </p>
         <div style={{ maxHeight: 340, overflowY: "auto", margin: "10px 0" }}>
           {openItems.map((it) => {
@@ -374,7 +391,7 @@ function ArchiveCloseModal({
                     setChoice(it.id, { kind: e.target.value as CloseChoice, to: c.to })
                   }
                 >
-                  <option value="keep">そのまま</option>
+                  <option value="keep">{mode === "archive" ? "そのまま" : "未所属で残す"}</option>
                   <option value="stop" disabled={running}>
                     止める
                   </option>
@@ -417,7 +434,7 @@ function ArchiveCloseModal({
             disabled={busy || openItems.some((it) => choiceOf(it.id).kind === "carry" && !choiceOf(it.id).to)}
             onClick={apply}
           >
-            この内容で締めてアーカイブ
+            {mode === "archive" ? "この内容で締めてアーカイブ" : "この内容で締めて削除"}
           </button>
         </div>
       </div>

@@ -24,9 +24,17 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
 
   const sprint = state.sprints.find((s) => s.id === sel) ?? null;
   const inSprint = state.items.filter((i) => i.sprintId === sel);
-  // スプリント未割当（横断バックログ。完了/却下は除く）。
+  // スプリント未割当（横断バックログ。完了/却下とアーカイブ案件配下は除く=閉じた案件の
+  // 未完を引き込み候補に出さない。read 時導出・アイテム非変異）。
+  const archivedIds = new Set(
+    state.projects.filter((p) => p.status === "archived").map((p) => p.id),
+  );
   const backlog = state.items.filter(
-    (i) => !i.sprintId && i.status !== "done" && i.status !== "rejected",
+    (i) =>
+      !i.sprintId &&
+      i.status !== "done" &&
+      i.status !== "rejected" &&
+      !(i.projectId && archivedIds.has(i.projectId)),
   );
 
   return (

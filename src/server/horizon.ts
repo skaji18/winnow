@@ -1,7 +1,7 @@
 // 中長期 horizon (§2.3) — rung × due の読み取り専用ビュー。Gantt(確定日付コミット)ではなく、
 // 上段(霧/戦略)ほど due をぼかし、下段 leaf のみ鋭い due を出す。完了線/残数/消化率/burndown は
 // 一切持たない (背骨: 処理量メトリクス禁止)。較正母数(recordOutcome/labels/category_stats)に触れない。
-import { items } from "./repo.js";
+import { items, projects } from "./repo.js";
 import type { Item, Rung } from "./domain.js";
 import { RUNGS } from "./domain.js";
 import { DAY_MS, DUE_SOON_DAYS, DUE_WEEK_DAYS } from "./queue.js";
@@ -67,12 +67,19 @@ function rollupDue(
 
 export function horizonView(): HorizonCell[] {
   const all = items.all();
+  // アーカイブ案件配下は畳む (queue と同じ read 時導出。アイテム非変異=復元で自動復帰)。
+  const archivedProjects = new Set(
+    projects.all().filter((p) => p.status === "archived").map((p) => p.id),
+  );
+  const visible = (it: Item): boolean =>
+    isOpen(it) && !(it.projectId != null && archivedProjects.has(it.projectId));
   const childrenOf = new Map<string, Item[]>();
   const ownDue = new Map<string, number | null>();
   for (const it of all) {
     // 巻き上げ母数も open のみ: 完了(done)/棄却(rejected)の子の過去 due を親に巻き上げて
     // 「期限超過」に誤表示しない (終わった仕事に判断アテンションを引かせない)。
-    if (!isOpen(it)) continue;
+    // アーカイブ配下も同様に母数から外す (閉じた案件の due を親に染み出させない)。
+    if (!visible(it)) continue;
     ownDue.set(it.id, it.dueDate ?? null);
     if (it.parentId) {
       const arr = childrenOf.get(it.parentId) ?? [];
@@ -82,10 +89,10 @@ export function horizonView(): HorizonCell[] {
   }
   const memo = new Map<string, number | null>();
 
-  // セルを (rung, dueBucket) でバケット化。open な項目のみ。
+  // セルを (rung, dueBucket) でバケット化。open な項目のみ (アーカイブ配下は畳む)。
   const cells = new Map<string, HorizonCell>();
   for (const it of all) {
-    if (!isOpen(it)) continue;
+    if (!visible(it)) continue;
     const effectiveDue = it.dueDate ?? rollupDue(it.id, childrenOf, ownDue, memo, new Set());
     const bucket = bucketOf(effectiveDue);
     const key = `${it.rung}|${bucket}`;
