@@ -693,8 +693,10 @@ export const projects = {
   },
   remove(id: string): void {
     // 案件を消したらアイテムは孤児にせず案件参照だけ外す (タスクは残す)。
-    // スプリントは版1でグローバル化 (projectId 死列除去) されたため案件削除では消さない。
-    db.prepare("UPDATE items SET projectId = NULL, sprintId = NULL WHERE projectId = ?").run(id);
+    // スプリントは版1でグローバル化 (projectId 死列除去) されたため案件削除では消さず、
+    // アイテムの sprintId にも触れない (時間箱への割当は案件に従属しない。
+    // docs/DECISIONS.md「案件クローズ・バッチ」決定2)。
+    db.prepare("UPDATE items SET projectId = NULL WHERE projectId = ?").run(id);
     db.prepare("DELETE FROM projects WHERE id = ?").run(id);
   },
 };

@@ -90,11 +90,15 @@ export function AddItem({ state, onChange }: { state: AppState; onChange: () => 
                 案件:{" "}
                 <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
                   <option value="">なし</option>
-                  {state.projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
+                  {/* アーカイブ案件は登録先に出さない (気づかず登録→全面で畳まれて誰にも
+                      見られない、を防ぐ。復元すれば選べる)。 */}
+                  {state.projects
+                    .filter((p) => p.status !== "archived")
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
                 </select>
               </label>
               <label className="muted">

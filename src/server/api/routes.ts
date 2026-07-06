@@ -74,12 +74,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     let budget = isApplyInProgress()
       ? 0
       : Math.max(0, cfg.maxWorkers - running - igniting.size);
+    // アーカイブ案件配下は自動着火もドレインもしない (閉じた案件の仕事を AI が新規に
+    // 始めない。requestExecution の非 manual ガードと二重の守り。復元すれば従来どおり)。
+    const archivedProjects = new Set(
+      projects.all().filter((p) => p.status === "archived").map((p) => p.id),
+    );
+    const inArchived = (projectId: string | null): boolean =>
+      projectId != null && archivedProjects.has(projectId);
     for (const it of items.all()) {
       if (
         it.status === "classified" &&
         it.kind === "leaf" &&
         it.disposition === "auto" &&
         it.executionStatus === "none" &&
+        !inArchived(it.projectId) &&
         // 一度でも worker が走った項目は自動では再点火しない(他の自動再点火経路
         // resumePausedAuto / 在庫再適用 / 案件割当 sweep と同じガード)。これが無いと、
         // needs_human 提案の「取り消し→undo」で disposition=auto に復元された項目や
@@ -101,7 +109,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // 別ループ・別 Set(classifying)で二重発火を防ぐ。control 直列なので budget は適用しない
     // (失敗=escalate とバックプレッシャ=inbox 保留→開封時 sweep ドレインを区別する §3.4)。
     for (const it of items.all()) {
-      if (it.status === "inbox" && it.disposition === null && !classifying.has(it.id)) {
+      if (
+        it.status === "inbox" &&
+        it.disposition === null &&
+        !inArchived(it.projectId) &&
+        !classifying.has(it.id)
+      ) {
         classifying.add(it.id);
         background(() => classify(it.id).finally(() => classifying.delete(it.id)));
       }

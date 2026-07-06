@@ -1,6 +1,6 @@
 import { clip } from "./context.js";
 import type { Disposition, Item, LabelAction } from "./domain.js";
-import { items, labels, settings } from "./repo.js";
+import { items, labels, projects, settings } from "./repo.js";
 import {
   buildGateSnapshot,
   deriveProposedGate,
@@ -196,6 +196,13 @@ export function queue(): QueueItem[] {
   // ホットパスなので items.all()/children を per-item で呼び直さない)。
   const gateSnap = buildGateSnapshot(all);
   const pauseAuto = settings.get().pauseAuto;
+  // アーカイブ案件の read 時導出畳み (docs/DECISIONS.md「案件クローズ・バッチ」)。
+  // アイテムは変異させない=復元すれば自動で再浮上する。
+  const archivedProjects = new Set(
+    projects.all().filter((p) => p.status === "archived").map((p) => p.id),
+  );
+  const inArchivedProject = (it: Item): boolean =>
+    it.projectId != null && archivedProjects.has(it.projectId);
   const visible = all.filter((it) => {
     // 1) cancelled は常に再浮上させない(cancelExecution は status='rejected' にもするが
     //    executionStatus でも二重に保険)。
@@ -217,6 +224,17 @@ export function queue(): QueueItem[] {
     //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
     if (it.executionStatus === "failed") return true;
     if (it.executionStatus === "timed_out") return true;
+    // 3.5) アーカイブ案件配下は畳む。ここより上の実行系終端 (awaiting_handoff/succeeded
+    //      未受領/failed/timed_out) は案件の生死と無関係に出し続ける (§4-4。締めモーダルは
+    //      running を stop 不可にするため archive 後に走り切る実行が必ずあり、終端を黙らせると
+    //      轢き逃げになる)。worker の終端は succeeded/failed だけでなく needs_human もある —
+    //      needs_human 終端 (proposed=isNeedsHumanProposed / escalate 終端=isEscalateTerminated)
+    //      も同じ理由で畳まない (archive 時のモーダルに存在せず人間が一度も見ていない停止要求)。
+    //      ここより下の人間の注意・承認要求 (blocked/ゲート由来 proposed/着手中レーン/
+    //      escalate/human/監査混入) は、締めモーダルで未完を列挙した上での明示アーカイブで
+    //      成立しなくなったとみなして畳む (黙る時限消去ではない)。
+    if (inArchivedProject(it) && !isNeedsHumanProposed(it) && !isEscalateTerminated(it))
+      return false;
     if (it.status === "blocked") return true;
     // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
     if (it.status === "done") return false;

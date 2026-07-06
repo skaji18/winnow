@@ -8,7 +8,7 @@ import { PATHS } from "./config.js";
 import { buildContextBlock, clip, redactSecrets } from "./context.js";
 import { extractLearning } from "./learning.js";
 import type { ExecutionJob, Item } from "./domain.js";
-import { items, jobs, labels, settings } from "./repo.js";
+import { items, jobs, labels, projects, settings } from "./repo.js";
 import { recordOutcome } from "./calibration.js";
 import { validateProjectDir } from "./paths.js";
 import {
@@ -80,6 +80,10 @@ export async function requestExecution(
   const manual = opts.manual === true;
   const item = items.get(itemId);
   if (!item) return null;
+  // アーカイブ案件配下は自動では着火しない (閉じた案件の仕事を AI が新規に始めない。
+  // docs/DECISIONS.md「案件クローズ・バッチ」)。人間の明示タップ (manual) は通す (§3.4 の非対称)。
+  if (!manual && item.projectId != null && projects.get(item.projectId)?.status === "archived")
+    return item;
   // 二重着火ガード: classify 時の経路とキューopenの掃き出しが同一itemに発火するのを防ぐ。
   // executionStatus は "none" 既定で null にならない (db.ts DEFAULT 'none')。
   // failed / timed_out のみ再試行を許し、running/proposed/succeeded/approved/cancelled は早期return。
@@ -463,10 +467,21 @@ export function inFlightCount(): { running: number; proposed: number; awaitingHa
   let running = 0;
   let proposed = 0;
   let awaitingHandoff = 0;
+  // ヘッダの「承認待ち」はキューの可視ルールと整合させる: アーカイブ案件配下で畳まれる
+  // ゲート由来 proposed を数えると、キュー0件のまま解消できないカウントが永久に残る。
+  // needs_human 終端はキューに出続けるので数える (queue.ts 3.5 と同じ線)。
+  const archivedProjects = new Set(
+    projects.all().filter((p) => p.status === "archived").map((p) => p.id),
+  );
   for (const it of items.all()) {
     if (it.executionStatus === "running") running++;
-    else if (it.executionStatus === "proposed") proposed++;
-    else if (it.executionStatus === "awaiting_handoff") awaitingHandoff++;
+    else if (it.executionStatus === "proposed") {
+      if (
+        !(it.projectId != null && archivedProjects.has(it.projectId)) ||
+        isNeedsHumanProposed(it)
+      )
+        proposed++;
+    } else if (it.executionStatus === "awaiting_handoff") awaitingHandoff++;
   }
   return { running, proposed, awaitingHandoff };
 }
@@ -602,13 +617,19 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
  */
 export function resumePausedAuto(): number {
   let resumed = 0;
+  const archivedProjects = new Set(
+    projects.all().filter((p) => p.status === "archived").map((p) => p.id),
+  );
   for (const it of items.all()) {
     if (
       it.executionStatus === "proposed" &&
       !it.autoExecuted &&
       it.kind === "leaf" &&
       it.disposition === "auto" &&
-      it.status !== "rejected"
+      it.status !== "rejected" &&
+      // アーカイブ案件配下は再投入しない (proposed→none の状態変更もしない。
+      // requestExecution 側ガードだけだと proposed が黙って none に落ちる)。
+      !(it.projectId != null && archivedProjects.has(it.projectId))
     ) {
       items.update(it.id, { executionStatus: "none" });
       void requestExecution(it.id).catch(() => {});
