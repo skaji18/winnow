@@ -14,7 +14,7 @@ const REC = path.join(ROOT, "demo", ".rec"); // 中間 webm(gitignore 済み)
 const ASSETS = path.join(ROOT, "docs", "assets");
 const PORT = process.env.WINNOW_PORT || "8799";
 const BASE = `http://127.0.0.1:${PORT}`;
-const only = process.argv.slice(2); // 例: npm run demo -- 05-terminal-theater
+const only = process.argv.slice(2); // 例: npm run demo -- 06-terminal-theater
 
 const env = { ...process.env, WINNOW_HOME: HOME, WINNOW_FAKE_AI: "1", WINNOW_PORT: PORT };
 
@@ -54,10 +54,12 @@ async function main() {
   spawnSync("bash", ["-c", `fuser -k ${PORT}/tcp 2>/dev/null; sleep 1`], { stdio: "ignore" });
 
   console.log("• サーバ起動(フェイクAI)");
+  // detached: プロセスグループを分け、終了時に npx→tsx→node の木ごと畳めるようにする。
   const server = spawn("npx", ["tsx", "src/server/index.ts"], {
     cwd: ROOT,
     env: { ...env, NODE_ENV: "production" },
     stdio: "inherit",
+    detached: true,
   });
   // 自分のサーバが起動前に落ちたら(EADDRINUSE 等)即中断する。古いサーバに対して録画しないため。
   let serverDied = null;
@@ -69,7 +71,21 @@ async function main() {
     console.log("• 収録(Playwright)");
     await recordAll(BASE, REC, only.length ? only : null);
   } finally {
-    server.kill("SIGTERM");
+    // SIGTERM を直接の子(npx ラッパー)だけに送ると孫の server 本体が生き残り、
+    // spawn ハンドルがイベントループを掴んで npm run demo が永久に終わらない。
+    // detached で分けたプロセスグループごと畳む(取りこぼしは SIGKILL で保険)。
+    try {
+      process.kill(-server.pid, "SIGTERM");
+    } catch {
+      server.kill("SIGTERM");
+    }
+    setTimeout(() => {
+      try {
+        process.kill(-server.pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }, 3000).unref();
   }
 
   console.log("• 変換(webm → webp)");

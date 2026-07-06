@@ -2,6 +2,7 @@
 // 決定的に撮り直せるよう、新規ホーム(WINNOW_HOME)を空にしてから実行する前提(demo/run.mjs)。
 import "./scripts-seed.js"; // 基本デモデータを投入(副作用 import)
 import { items, labels, settings } from "./src/server/repo.js";
+import { DAY_MS } from "./src/server/queue.js";
 
 function mk(patch: Parameters<typeof items.update>[1] & { title: string }) {
   const it = items.create({ title: patch.title });
@@ -32,12 +33,54 @@ mk({
   priority: "normal",
 });
 
+// 「見通し」レンズ(rung×due)が映えるよう、中長期(それ以降バケット)の項目を足す。
+// 基本シードは数日内の due ばかりで、レンズを切り替えても右列(それ以降)が空に見えるため。
+// キューにも2枚のカードとして出る(human/escalate)のは意図した取捨: 見通しに出すには open で
+// ある必要があり、auto に倒すと leaf は pauseAuto 経由で「承認待ち」カード化してかえって騒がしい。
+// 現実的なカードが2枚増えても「要確認だけの短いキュー」の筋は崩れない。
+const now = Date.now();
+mk({
+  title: "決済リニューアルの GA 判定",
+  kind: "node",
+  rung: "strategy",
+  status: "classified",
+  disposition: "human",
+  confidence: 0.4,
+  stakes: 0.85,
+  reversibility: 0.3,
+  category: "戦略",
+  reason: "四半期スコープの判断。二次効果が大きく人間が決める。",
+  priority: "normal",
+  dueDate: now + 40 * DAY_MS,
+});
+mk({
+  title: "返金レポートの月次自動化",
+  kind: "leaf",
+  rung: "execution",
+  status: "classified",
+  domain: "software",
+  disposition: "escalate",
+  confidence: 0.55,
+  stakes: 0.4,
+  reversibility: 0.8,
+  category: "実装",
+  reason: "来月の締めまでに。定型化できる範囲を一度確認したい。",
+  priority: "normal",
+  dueDate: now + 24 * DAY_MS,
+});
+
 // さばきの実績を十分に積んで「学習中(コールドスタート)」バナーを消す(初日表示はGIFのノイズ)。
 // COLD_THRESHOLD=10 を超えるよう過去のさばき(ラベル)を足すが、キューに見えているカードに付けると
 // 「さばきを戻す」リンクが出てノイズになるので、すでに done/review の(キュー非表示の)アイテムに付ける。
+// 引き取り待ち(awaiting_handoff)は status='review' でもキュー最前面に可視なので除外する
+// (flow05 のヒーローカードに filler の undo リンクを露出させない)。
 const terminal = items
   .all()
-  .filter((i) => i.status === "done" || i.status === "review" || i.status === "rejected");
+  .filter(
+    (i) =>
+      (i.status === "done" || i.status === "review" || i.status === "rejected") &&
+      i.executionStatus !== "awaiting_handoff",
+  );
 const fillerActions: ("do" | "reject" | "audit_ok" | "override")[] = [
   "audit_ok",
   "do",

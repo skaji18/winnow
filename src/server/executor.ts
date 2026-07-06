@@ -32,7 +32,7 @@ import { classifyJobError } from "./errors.js";
 // 点火ゲートの述語・閾値・文言は gates.ts が単一真実源 (queue の read 時導出と共有。
 // proposed に倒す新ゲートを足すときは gates.ts へ同時登録する)。
 
-interface ExecuteOut {
+export interface ExecuteOut {
   status: "succeeded" | "failed" | "needs_human";
   summary: string;
   output: string;
