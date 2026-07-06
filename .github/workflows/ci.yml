@@ -1,0 +1,36 @@
+# CI (DECISIONS「CI の導入 — PR/push でビルドゲートを自動実行」節)。
+# PR と main への push でビルドゲート (npm run gate = typecheck → test → build → smoke) を回す。
+# gate の内訳は package.json / CLAUDE.md が単一真実源 (ここに手順を複製しない)。
+# release.yml の gate は「壊れた版からタグ/Release を作らない」防波堤であり役割が別
+# (version bump のマージでは両方走るが、冪等な検証の重複で無害)。
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read # 検証だけなので read で足りる
+
+# 同一 PR/ブランチへの連続 push では古い実行を打ち切る (結果は最新 commit のものだけ意味を持つ)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Build gate
+        run: npm run gate
