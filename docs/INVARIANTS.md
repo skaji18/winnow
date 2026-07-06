@@ -36,10 +36,16 @@
   （receive / reject / 締めモーダル経由の案件アーカイブ）だけ。
 - **アーカイブ案件配下の可視性は read 時導出**（アイテムを変異させない＝復元で自動復帰・
   較正母数に触れない）。畳むのは人間の注意・承認要求（classified escalate/human・監査混入・
-  blocked・proposed・着手中レーン）。**実行系の終端（awaiting_handoff / failed / timed_out /
-  autoDone 未受領の取消ハンドル）は案件の生死と無関係に出し続ける**（§4-4。archive 後に
-  走り切る実行の終端を黙らせない）。バックログ/スプリント未割当/horizon も同じ導出で畳む
-  （バックログはトグルと案件フィルタ明示選択で参照可）。
+  blocked・**ゲート由来** proposed・着手中レーン）。**実行系の終端（awaiting_handoff / failed /
+  timed_out / autoDone 未受領の取消ハンドル / needs_human 終端＝`isNeedsHumanProposed` な
+  proposed と `isEscalateTerminated` な classified）は案件の生死と無関係に出し続ける**（§4-4。
+  archive 後に走り切る実行の終端を黙らせない）。バックログ/スプリント未割当/horizon も同じ
+  導出で畳む（バックログはトグルと案件フィルタ明示選択で参照可）。ヘッダの「承認待ち」
+  （`executor.inFlightCount`）は畳まれる proposed を数えない（キューと恒久不整合にしない）。
+- **アーカイブ案件配下では自動着火しない**（/api/state 点火掃き出し・`resumePausedAuto`・
+  inbox ドレインが見送り、`requestExecution` の非 manual 呼び出しも no-op）。人間の明示タップ
+  （manual / approve / 指示つき再走）は通す（§3.4 の非対称）。AddItem の案件ピッカーは
+  archived を出さない（新規流入が誰にも見られず畳まれる穴を入口で塞ぐ）。
 - 未完のある案件の**削除は締めモーダル経由**（archive と同じ導線。「未所属で残す」の帰結を
   明示する）。`projects.remove` は projectId だけ外し **sprintId には触れない**。
 - 監査サンプルは通常項目と見分けのつかない形で混ぜる（§4-3。専用画面・専用枠にしない）。

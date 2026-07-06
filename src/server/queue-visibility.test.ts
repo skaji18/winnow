@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { queue } from "./queue.js";
 import { horizonView } from "./horizon.js";
+import { inFlightCount } from "./executor.js";
 import { items, projects, sprints } from "./repo.js";
 import type { Item } from "./domain.js";
 
@@ -92,6 +93,62 @@ test("実行系の終端はアーカイブ後も出し続ける (§4-4 轢き逃
   projects.update(p.id, { status: "archived" });
   for (const it of [failed, timedOut, handoff, autoDone])
     assert.ok(inQueue(it.id), `アーカイブ後も可視: ${it.title}`);
+});
+
+test("needs_human 終端もアーカイブ後に出し続ける (worker 終端は failed だけではない)", () => {
+  const p = projects.create({ name: "needs_human終端テスト" });
+  // needs_human → proposed (isNeedsHumanProposed: executionResult = summary\n\noutput の連結一致)。
+  const nhProposed = makeItem({
+    title: "AI停止の承認待ち",
+    projectId: p.id,
+    status: "in_progress",
+    disposition: "auto",
+    autoExecuted: true,
+    executionStatus: "proposed",
+    executionSummary: "判断が要る",
+    executionOutput: "詳細",
+    executionResult: "判断が要る\n\n詳細",
+  });
+  // 承認後 needs_human の escalate 終端 (isEscalateTerminated)。
+  const terminated = makeItem({
+    title: "escalate終端",
+    projectId: p.id,
+    disposition: "escalate",
+    autoExecuted: true,
+    executionStatus: "none",
+    executionSummary: "止まった理由",
+  });
+
+  projects.update(p.id, { status: "archived" });
+  assert.ok(inQueue(nhProposed.id), "needs_human 由来 proposed はアーカイブ後も可視");
+  assert.ok(inQueue(terminated.id), "escalate 終端はアーカイブ後も可視");
+});
+
+test("ヘッダの承認待ちカウントはキューの畳みと同じ線で数える", () => {
+  const before = inFlightCount().proposed;
+  const p = projects.create({ name: "カウントテスト" });
+  // ゲート由来 proposed (worker 未走行) — アーカイブで畳まれるので数えない。
+  makeItem({
+    title: "ゲート由来承認待ち",
+    projectId: p.id,
+    disposition: "auto",
+    executionStatus: "proposed",
+  });
+  // needs_human 由来 proposed — キューに出続けるので数える。
+  makeItem({
+    title: "AI停止承認待ち",
+    projectId: p.id,
+    status: "in_progress",
+    disposition: "auto",
+    autoExecuted: true,
+    executionStatus: "proposed",
+    executionSummary: "判断が要る",
+    executionOutput: "詳細",
+    executionResult: "判断が要る\n\n詳細",
+  });
+  assert.equal(inFlightCount().proposed, before + 2, "active 中は両方数える");
+  projects.update(p.id, { status: "archived" });
+  assert.equal(inFlightCount().proposed, before + 1, "アーカイブでゲート由来だけ落ちる");
 });
 
 test("案件に属さないアイテムはアーカイブ畳みの影響を受けない", () => {

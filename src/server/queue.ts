@@ -227,10 +227,14 @@ export function queue(): QueueItem[] {
     // 3.5) アーカイブ案件配下は畳む。ここより上の実行系終端 (awaiting_handoff/succeeded
     //      未受領/failed/timed_out) は案件の生死と無関係に出し続ける (§4-4。締めモーダルは
     //      running を stop 不可にするため archive 後に走り切る実行が必ずあり、終端を黙らせると
-    //      轢き逃げになる)。ここより下の人間の注意・承認要求 (blocked/proposed/着手中レーン/
+    //      轢き逃げになる)。worker の終端は succeeded/failed だけでなく needs_human もある —
+    //      needs_human 終端 (proposed=isNeedsHumanProposed / escalate 終端=isEscalateTerminated)
+    //      も同じ理由で畳まない (archive 時のモーダルに存在せず人間が一度も見ていない停止要求)。
+    //      ここより下の人間の注意・承認要求 (blocked/ゲート由来 proposed/着手中レーン/
     //      escalate/human/監査混入) は、締めモーダルで未完を列挙した上での明示アーカイブで
     //      成立しなくなったとみなして畳む (黙る時限消去ではない)。
-    if (inArchivedProject(it)) return false;
+    if (inArchivedProject(it) && !isNeedsHumanProposed(it) && !isEscalateTerminated(it))
+      return false;
     if (it.status === "blocked") return true;
     // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
     if (it.status === "done") return false;

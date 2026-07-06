@@ -13,8 +13,10 @@ export function TreeView({ state, onChange }: { state: AppState; onChange: () =>
   const archivedIds = new Set(
     state.projects.filter((p) => p.status === "archived").map((p) => p.id),
   );
+  // pool を素通しにするのは「トグルON」か「archived 案件の明示選択」だけ。active 案件の
+  // フィルタ中はアーカイブ除外を維持する (ツリー跨ぎの子がぶら下がる穴を開けない)。
   const pool =
-    projFilter || showArchived
+    showArchived || (projFilter && archivedIds.has(projFilter))
       ? state.items
       : state.items.filter((i) => !(i.projectId && archivedIds.has(i.projectId)));
   const scope = projFilter ? pool.filter((i) => i.projectId === projFilter) : pool;

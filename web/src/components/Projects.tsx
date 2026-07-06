@@ -360,7 +360,8 @@ function ArchiveCloseModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    // busy 中は backdrop で閉じない: 閉じたように見えて裏で不可逆 delete が完走する
+    <div className="modal-backdrop" onClick={() => { if (!busy) onClose(); }}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3 style={{ marginTop: 0 }}>
           「{project.name}」を締めて{mode === "archive" ? "アーカイブ" : "削除"}
