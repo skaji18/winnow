@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { copyText } from "./Bits.js";
 import { useLive } from "../live.js";
-import type { AppState } from "../types.js";
+import type { AppState, Learning } from "../types.js";
 import { DISPOSITION_LABEL } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -35,6 +35,28 @@ export function SettingsView({ state, onChange }: { state: AppState; onChange: (
           onBlur={(e) => set({ productContext: e.target.value })}
         />
       </div>
+
+      {/* AIゾーンの学び (上の「プロダクトの前提」=人間ゾーンと対の、注入されるもう半分)。
+          veto は可逆 (戻せる)、pin は減衰停止+フル信頼。どちらも較正母数には触れない (サーバ仕様)。
+          PATCH 応答は {ok:true} のみなので反映は onChange(refresh) 経由の再取得に委ねる。
+          サーバ未提供時 undefined=パネルごと非表示 (旧サーバ互換)。 */}
+      {state.learnings && (
+        <div className="panel">
+          <h3>AIの学び（自動蓄積された記憶）</h3>
+          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+            さばき・やり直し指示などから自動で蓄積され、分類/分解/実行の文脈に注入される。
+            間違った学びは「却下」で注入から外せる（戻せる）。「固定」は風化させず常に注入する。
+          </p>
+          {state.learnings.length === 0 ? (
+            <p className="muted">まだ学びはありません。使い込むと自動で蓄積されます。</p>
+          ) : (
+            [...state.learnings]
+              // 生きている学びを先に、却下済みは後方に沈める (元順=サーバ順は群内で保存)。
+              .sort((a, b) => Number(a.vetoed) - Number(b.vetoed))
+              .map((l) => <LearningRow key={l.id} l={l} onChange={onChange} />)
+          )}
+        </div>
+      )}
 
       <div className="panel">
         <h3>再調律スライダー</h3>
@@ -215,6 +237,62 @@ export function SettingsView({ state, onChange }: { state: AppState; onChange: (
         </div>
       )}
     </>
+  );
+}
+
+// 学び1行: テキスト + 由来メタ + カテゴリチップ + pin/veto トグル。
+// トグルの押下状態は aria-pressed の既存慣習 (.pause-toggle / .filter-chip と同型) で表現し、
+// vetoed 行は打ち消し+muted で控えめに沈める (復帰可能なので消さない)。
+function LearningRow({ l, onChange }: { l: Learning; onChange: () => void }) {
+  const live = useLive();
+  const patch = (p: { pinned?: boolean; vetoed?: boolean }, msg: string) =>
+    api
+      .updateLearning(l.id, p)
+      .then(() => {
+        live(msg);
+        onChange();
+      })
+      .catch((e) => live(`操作に失敗しました: ${(e as Error).message}`));
+  return (
+    <div className="tree-row">
+      <span
+        className={l.vetoed ? "muted" : undefined}
+        style={{ flex: 1, ...(l.vetoed ? { textDecoration: "line-through" } : null) }}
+      >
+        {l.text}{" "}
+        <span className="muted" style={{ fontSize: 11 }}>
+          ({l.origin === "ai" ? "AI" : "手動"} /{" "}
+          {new Date(l.createdAt).toLocaleDateString("ja-JP")})
+        </span>
+      </span>
+      {l.category && <span className="badge">{l.category}</span>}
+      <button
+        className="learn-toggle"
+        aria-pressed={l.pinned}
+        title="固定: 風化(減衰)させず常に注入する。もう一度押すと解除"
+        onClick={() =>
+          patch(
+            { pinned: !l.pinned },
+            l.pinned ? "学びの固定を解除しました" : "学びを固定しました",
+          )
+        }
+      >
+        {l.pinned ? "固定中" : "固定"}
+      </button>
+      <button
+        className="learn-toggle"
+        aria-pressed={l.vetoed}
+        title="却下: この学びを注入から外す(戻せる)。もう一度押すと復帰"
+        onClick={() =>
+          patch(
+            { vetoed: !l.vetoed },
+            l.vetoed ? "学びを注入に戻しました" : "学びを却下しました（注入から外れます）",
+          )
+        }
+      >
+        {l.vetoed ? "却下中（戻す）" : "却下"}
+      </button>
+    </div>
   );
 }
 
