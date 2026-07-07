@@ -381,13 +381,23 @@ export const learnings = {
     db.prepare("UPDATE learnings SET pinned = ? WHERE id = ?").run(pinned ? 1 : 0, id);
   },
   setVetoed(id: string, vetoed: boolean): void {
-    db.prepare("UPDATE learnings SET vetoed = ? WHERE id = ?").run(vetoed ? 1 : 0, id);
+    // 解除(復帰)時は lastSeenAt をいまに置き直す: veto 中は注入候補(forCategory)から外れて
+    // touch が走らず lastSeenAt が凍結するため、凍結値のままだと減衰期間を跨いだ復帰が
+    // 「注入候補に戻らない+次の sweep で即削除」になり「戻せる」が実質機能しない。
+    // 人間の明示復帰は新規 record と同じく生存信号の起点を置き直す (プレビュー閲覧のような
+    // 受動的延命ではない)。
+    if (vetoed) db.prepare("UPDATE learnings SET vetoed = 1 WHERE id = ?").run(id);
+    else db.prepare("UPDATE learnings SET vetoed = 0, lastSeenAt = ? WHERE id = ?").run(now(), id);
   },
-  /** AI 由来・未 pin・未使用 (lastSeenAt < cutoff) を物理削除し件数を返す (自動減衰)。 */
+  /** AI 由来・未 pin・未 veto・未使用 (lastSeenAt < cutoff) を物理削除し件数を返す (自動減衰)。
+      veto 済みは対象外: veto は forCategory の注入候補から外す=touch が走らず lastSeenAt が
+      veto 時点で凍結するため、減衰対象に含めると「却下は戻せる」(SettingsView) の約束が
+      減衰期間経過で黙って破れる (行ごと消えて復帰不能)。veto の解除=注入復帰で touch が再開し、
+      通常の減衰サイクルに戻る。 */
   pruneDecayed(cutoff: number): number {
     const info = db
       .prepare(
-        "DELETE FROM learnings WHERE origin = 'ai' AND pinned = 0 AND lastSeenAt < ?",
+        "DELETE FROM learnings WHERE origin = 'ai' AND pinned = 0 AND vetoed = 0 AND lastSeenAt < ?",
       )
       .run(cutoff);
     return info.changes;
