@@ -45,6 +45,31 @@ input, textarea, select {
 }
 input:focus, textarea:focus { outline: 1px solid var(--accent); }
 
+/* 自前 Select (Radix ベース。components/Select.tsx)。トリガーは input/select と同じ見た目に
+   揃える (button のグローバル装飾を上書き)。 */
+button.sel-trigger {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 7px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px;
+}
+button.sel-trigger:hover { background: var(--bg); border-color: #3a4150; }
+button.sel-trigger:focus-visible { outline: 1px solid var(--accent); }
+.sel-icon { color: var(--muted); font-size: 10px; line-height: 1; }
+.sel-content {
+  z-index: 70; /* 確認ダイアログ(60)の上でも開けるように最上段。 */
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  max-height: min(320px, var(--radix-select-content-available-height));
+  min-width: var(--radix-select-trigger-width);
+}
+.sel-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; border-radius: 5px; font-size: 13px; cursor: pointer; user-select: none;
+}
+.sel-item[data-highlighted] { background: var(--panel-2); outline: none; }
+.sel-item[data-disabled] { opacity: 0.45; cursor: default; }
+.sel-check { color: var(--accent); font-size: 11px; }
+
 .app { max-width: 1100px; margin: 0 auto; padding: 18px; }
 header.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 header.top h1 { margin: 0; font-size: 22px; letter-spacing: 0.5px; }
@@ -111,7 +136,7 @@ nav.tabs button.active { background: var(--accent); color: #08111f; border-color
 .board-card:active { cursor: grabbing; }
 .board-card:hover { border-color: #3a4150; }
 .board-card-title { font-size: 13px; margin-bottom: 5px; }
-.board-card select { font-size: 11px; padding: 3px 5px; width: 100%; }
+.board-card select, .board-card button.sel-trigger { font-size: 11px; padding: 3px 5px; width: 100%; }
 .board-empty { font-size: 11px; text-align: center; padding: 16px 4px; border: 1px dashed var(--border); border-radius: 7px; }
 
 .conf-wrap { display: flex; align-items: center; gap: 7px; }
@@ -334,7 +359,7 @@ summary.lane-head { cursor: pointer; }
 @media (max-width: 700px) {
   .app { padding: 10px; }
   /* iOS Safari は 16px 未満の入力欄フォーカスで自動ズームする。 */
-  input, textarea, select { font-size: 16px; }
+  input, textarea, select, button.sel-trigger { font-size: 16px; }
   /* タブは折り返しの壁にせず 1 行横スクロール。 */
   nav.tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
   nav.tabs button { flex: 0 0 auto; white-space: nowrap; }
@@ -366,11 +391,11 @@ summary.lane-head { cursor: pointer; }
    誤タップ・タップ不能を減らす側に倒す。 */
 @media (pointer: coarse) {
   button { min-height: 40px; padding: 8px 12px; }
-  select { min-height: 40px; }
+  select, button.sel-trigger { min-height: 40px; }
   .filter-chip { padding: 8px 12px; font-size: 12px; }
   button.badge { padding: 6px 10px; font-size: 12px; min-height: 30px; }
   .undo-inline { padding: 8px 4px; min-height: 0; }
-  .board-card select { padding: 8px 6px; font-size: 13px; }
+  .board-card select, .board-card button.sel-trigger { padding: 8px 6px; font-size: 13px; }
   .lens-toggle button, .filter-toggle { min-height: 36px; padding: 6px 14px; }
   summary.lane-head, details.exec summary { padding: 6px 0; }
 }

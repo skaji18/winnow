@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { Item } from "../types.js";
+import { Select } from "./Select.js";
 
 // 共通カンバン。ネイティブ HTML5 DnD でカードを列間ドラッグ→status変更。
 // スプリント板・案件板の両方で使う。カード中身は renderCard で差し替える。
@@ -66,18 +67,13 @@ export function Kanban({
               >
                 {renderCard(it)}
                 {onStatusSelect && (
-                  <select
+                  <Select
                     value={col.drop}
-                    aria-label="ステータス変更"
+                    ariaLabel="ステータス変更"
                     title="ステータス変更(ドラッグの代わりにも使えます)"
-                    onChange={(e) => onStatusSelect(it.id, e.target.value)}
-                  >
-                    {COLUMNS.map((c) => (
-                      <option key={c.key} value={c.drop}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(v) => onStatusSelect(it.id, v)}
+                    options={COLUMNS.map((c) => ({ value: c.drop, label: c.label }))}
+                  />
                 )}
               </div>
             ))}

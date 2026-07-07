@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { parseDate, provisionalTitle } from "./Bits.js";
+import { Select } from "./Select.js";
 import type { AppState, Priority } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -88,27 +89,33 @@ export function AddItem({ state, onChange }: { state: AppState; onChange: () => 
             <div className="row">
               <label className="muted">
                 案件:{" "}
-                <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-                  <option value="">なし</option>
-                  {/* アーカイブ案件は登録先に出さない (気づかず登録→全面で畳まれて誰にも
-                      見られない、を防ぐ。復元すれば選べる)。 */}
-                  {state.projects
-                    .filter((p) => p.status !== "archived")
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                </select>
+                <Select
+                  value={projectId}
+                  onChange={setProjectId}
+                  ariaLabel="案件"
+                  options={[
+                    { value: "", label: "なし" },
+                    // アーカイブ案件は登録先に出さない (気づかず登録→全面で畳まれて誰にも
+                    // 見られない、を防ぐ。復元すれば選べる)。
+                    ...state.projects
+                      .filter((p) => p.status !== "archived")
+                      .map((p) => ({ value: p.id, label: p.name })),
+                  ]}
+                />
               </label>
               <label className="muted">
                 優先度:{" "}
-                <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
-                  <option value="urgent">緊急</option>
-                  <option value="high">高</option>
-                  <option value="normal">中</option>
-                  <option value="low">低</option>
-                </select>
+                <Select
+                  value={priority}
+                  onChange={(v) => setPriority(v as Priority)}
+                  ariaLabel="優先度"
+                  options={[
+                    { value: "urgent", label: "緊急" },
+                    { value: "high", label: "高" },
+                    { value: "normal", label: "中" },
+                    { value: "low", label: "低" },
+                  ]}
+                />
               </label>
               <label className="muted">
                 期日: <input type="date" value={due} onChange={(e) => setDue(e.target.value)} />
@@ -117,10 +124,15 @@ export function AddItem({ state, onChange }: { state: AppState; onChange: () => 
             <div className="row">
               <label className="muted">
                 領域:{" "}
-                <select value={domain} onChange={(e) => setDomain(e.target.value as "software" | "general")}>
-                  <option value="general">一般</option>
-                  <option value="software">ソフト開発</option>
-                </select>
+                <Select
+                  value={domain}
+                  onChange={(v) => setDomain(v as "software" | "general")}
+                  ariaLabel="領域"
+                  options={[
+                    { value: "general", label: "一般" },
+                    { value: "software", label: "ソフト開発" },
+                  ]}
+                />
               </label>
               {domain === "software" && (
                 <input

@@ -9,6 +9,7 @@ import {
 } from "./Bits.js";
 import { useConfirm } from "./ConfirmDialog.js";
 import { Markdown } from "./Markdown.js";
+import { Select } from "./Select.js";
 import { MiniScores, ScoreBadges } from "./ScoreBadges.js";
 import { splitExecutionResult } from "../lib/execution-text.js";
 import { undoLabelText } from "../lib/undo-label.js";
@@ -751,27 +752,26 @@ function Reclassify({
 }) {
   // 操作メニュー化: 常に見出し『分類し直す…』を表示し、選んだ段へ覆す(教師信号)。
   // 現在の分類は title に出す(value に束縛して「○○に変更」が現状と一致する誤読を避ける)。
+  // value は "" 固定 = 選択後も見出し表示へ戻る (disabled の "" オプションが表示を担う)。
   const cur = current ? DISPOSITION_LABEL[current] : "未分類";
   return (
-    <select
+    <Select
       value=""
-      aria-label="分類し直す"
+      ariaLabel="分類し直す"
       title={`分類し直す(現在: ${cur})。境界線への明示ナッジ=教師信号になります`}
-      onChange={(e) => {
-        const to = e.target.value;
+      onChange={(to) => {
         if (!to) return;
         run(
           () => api.action(itemId, "reclassify", to as Disposition),
           `「${DISPOSITION_LABEL[to as Disposition]}」に分類し直しました`,
         );
       }}
-    >
-      <option value="" disabled>
-        分類し直す…
-      </option>
-      <option value="auto">自動に変更</option>
-      <option value="escalate">要確認に変更</option>
-      <option value="human">要判断に変更</option>
-    </select>
+      options={[
+        { value: "", label: "分類し直す…", disabled: true },
+        { value: "auto", label: "自動に変更" },
+        { value: "escalate", label: "要確認に変更" },
+        { value: "human", label: "要判断に変更" },
+      ]}
+    />
   );
 }

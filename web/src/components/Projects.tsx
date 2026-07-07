@@ -6,6 +6,7 @@ import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
 import { useConfirm } from "./ConfirmDialog.js";
 import { Kanban } from "./Kanban.js";
+import { Select } from "./Select.js";
 
 // 案件(プロジェクト)ビュー = 案件ごとの状態確認。見せ方は案件ごとに切替:
 // board=状態カンバン(ドラッグで移動) / flow=優先度・期日順リスト。スプリント(期間)は別タブ(横断)。
@@ -111,10 +112,15 @@ function NewProject({
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <div className="row" style={{ gap: 6 }}>
-        <select value={mode} onChange={(e) => setMode(e.target.value as "board" | "flow")}>
-          <option value="board">ボード</option>
-          <option value="flow">フロー</option>
-        </select>
+        <Select
+          value={mode}
+          onChange={(v) => setMode(v as "board" | "flow")}
+          ariaLabel="表示モード"
+          options={[
+            { value: "board", label: "ボード" },
+            { value: "flow", label: "フロー" },
+          ]}
+        />
         <button className="primary" onClick={submit}>
           作成
         </button>
@@ -147,10 +153,15 @@ function ProjectDetail({
     <div>
       <div className="row" style={{ marginBottom: 14 }}>
         <h3 style={{ margin: 0, flex: 1 }}>{project.name}</h3>
-        <select value={project.mode} onChange={(e) => setMode(e.target.value as "board" | "flow")}>
-          <option value="board">ボード表示</option>
-          <option value="flow">フロー表示</option>
-        </select>
+        <Select
+          value={project.mode}
+          onChange={(v) => setMode(v as "board" | "flow")}
+          ariaLabel="表示モード"
+          options={[
+            { value: "board", label: "ボード表示" },
+            { value: "flow", label: "フロー表示" },
+          ]}
+        />
         {project.status === "archived" ? (
           <button onClick={() => api.updateProject(project.id, { status: "active" }).then(onChange)}>
             復元
@@ -299,18 +310,16 @@ function ProjectBoard({
               <PriorityBadge priority={it.priority} />
               <DueBadge due={it.dueDate} />
             </div>
-            <select
+            <Select
               value={it.sprintId ?? ""}
               title="スプリントへ割当"
-              onChange={(e) => api.updateItem(it.id, { sprintId: e.target.value || null }).then(onChange)}
-            >
-              <option value="">スプリント未割当</option>
-              {state.sprints.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
+              ariaLabel="スプリントへ割当"
+              onChange={(v) => api.updateItem(it.id, { sprintId: v || null }).then(onChange)}
+              options={[
+                { value: "", label: "スプリント未割当" },
+                ...state.sprints.map((s) => ({ value: s.id, label: s.name })),
+              ]}
+            />
           </>
         )}
       />
@@ -405,37 +414,29 @@ function ArchiveCloseModal({
                     {STATUS_LABEL[it.status] ?? it.status}
                   </span>
                 </span>
-                <select
+                <Select
                   value={c.kind}
                   title="締め方"
-                  onChange={(e) =>
-                    setChoice(it.id, { kind: e.target.value as CloseChoice, to: c.to })
-                  }
-                >
-                  <option value="keep">{mode === "archive" ? "そのまま" : "未所属で残す"}</option>
-                  <option value="stop" disabled={running}>
-                    止める
-                  </option>
-                  <option value="send_back" disabled={running}>
-                    問いに戻す
-                  </option>
-                  <option value="carry" disabled={targets.length === 0}>
-                    繰越
-                  </option>
-                </select>
+                  ariaLabel="締め方"
+                  onChange={(v) => setChoice(it.id, { kind: v as CloseChoice, to: c.to })}
+                  options={[
+                    { value: "keep", label: mode === "archive" ? "そのまま" : "未所属で残す" },
+                    { value: "stop", label: "止める", disabled: running },
+                    { value: "send_back", label: "問いに戻す", disabled: running },
+                    { value: "carry", label: "繰越", disabled: targets.length === 0 },
+                  ]}
+                />
                 {c.kind === "carry" && (
-                  <select
+                  <Select
                     value={c.to ?? ""}
                     title="繰越先の案件"
-                    onChange={(e) => setChoice(it.id, { kind: "carry", to: e.target.value })}
-                  >
-                    <option value="">— 繰越先 —</option>
-                    {targets.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel="繰越先の案件"
+                    onChange={(v) => setChoice(it.id, { kind: "carry", to: v })}
+                    options={[
+                      { value: "", label: "— 繰越先 —" },
+                      ...targets.map((p) => ({ value: p.id, label: p.name })),
+                    ]}
+                  />
                 )}
               </div>
             );
@@ -486,33 +487,31 @@ function FlowList({ items, onChange }: { items: Item[]; onChange: () => void }) 
             </span>
             <PriorityBadge priority={it.priority} />
             <DueBadge due={it.dueDate} />
-            <select
+            <Select
               value={it.priority}
               title="優先度"
-              onChange={(e) => api.updateItem(it.id, { priority: e.target.value as Item["priority"] }).then(onChange)}
-            >
-              <option value="urgent">緊急</option>
-              <option value="high">高</option>
-              <option value="normal">中</option>
-              <option value="low">低</option>
-            </select>
-            <select
+              ariaLabel="優先度"
+              onChange={(v) => api.updateItem(it.id, { priority: v as Item["priority"] }).then(onChange)}
+              options={[
+                { value: "urgent", label: "緊急" },
+                { value: "high", label: "高" },
+                { value: "normal", label: "中" },
+                { value: "low", label: "低" },
+              ]}
+            />
+            <Select
               value={it.status}
-              onChange={(e) =>
+              ariaLabel="ステータス"
+              onChange={(v) =>
                 api
-                  .updateItem(it.id, { status: e.target.value }, it.updatedAt)
+                  .updateItem(it.id, { status: v }, it.updatedAt)
                   .then(onChange)
                   .catch((err) => {
                     if (String(err.message).startsWith("CONFLICT")) onChange();
                   })
               }
-            >
-              {STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {STATUS_LABEL[s] ?? s}
-                </option>
-              ))}
-            </select>
+              options={STATUSES.map((s) => ({ value: s, label: STATUS_LABEL[s] ?? s }))}
+            />
           </div>
         ))
       )}

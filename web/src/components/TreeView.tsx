@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { useLive } from "../live.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
 import { useConfirm } from "./ConfirmDialog.js";
+import { Select } from "./Select.js";
 import type { AppState, Item } from "../types.js";
 import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "../types.js";
 
@@ -39,15 +40,18 @@ export function TreeView({ state, onChange }: { state: AppState; onChange: () =>
         </label>
         <label className="muted">
           案件:{" "}
-          <select value={projFilter} onChange={(e) => setProjFilter(e.target.value)}>
-            <option value="">すべて</option>
-            {state.projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.status === "archived" ? "（アーカイブ）" : ""}
-              </option>
-            ))}
-          </select>
+          <Select
+            value={projFilter}
+            onChange={setProjFilter}
+            ariaLabel="案件で絞り込む"
+            options={[
+              { value: "", label: "すべて" },
+              ...state.projects.map((p) => ({
+                value: p.id,
+                label: p.name + (p.status === "archived" ? "（アーカイブ）" : ""),
+              })),
+            ]}
+          />
         </label>
       </div>
       {roots.length === 0 ? (
