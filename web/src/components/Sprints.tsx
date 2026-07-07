@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useLive } from "../live.js";
 import type { AppState, Item, Sprint } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DispositionDot, DueBadge, parseDate, PriorityBadge, ProjectChip, toDateInput } from "./Bits.js";
+import { useConfirm } from "./ConfirmDialog.js";
 import { Kanban } from "./Kanban.js";
+import { Select } from "./Select.js";
 
 // スプリント = グローバルな時間箱。カンバンは「その期間の全タスク」を案件横断で
 // 表示する (案件ごとではない)。各カードに所属案件チップを出す。ドラッグで status 変更。
@@ -40,14 +43,18 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
   return (
     <div>
       <div className="row" style={{ marginBottom: 12 }}>
-        <select value={sel ?? ""} onChange={(e) => setSel(e.target.value || null)}>
-          <option value="">— スプリント期間を選択 —</option>
-          {state.sprints.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} ({STATUS_LABEL[s.status] ?? s.status})
-            </option>
-          ))}
-        </select>
+        <Select
+          value={sel ?? ""}
+          onChange={(v) => setSel(v || null)}
+          ariaLabel="スプリント期間を選択"
+          options={[
+            { value: "", label: "— スプリント期間を選択 —" },
+            ...state.sprints.map((s) => ({
+              value: s.id,
+              label: `${s.name} (${STATUS_LABEL[s.status] ?? s.status})`,
+            })),
+          ]}
+        />
         {sprint && <SprintControls sprint={sprint} onChange={onChange} />}
         <span className="spacer" style={{ flex: 1 }} />
         <input
@@ -117,17 +124,21 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
 }
 
 function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => void }) {
+  const live = useLive();
+  const confirmDialog = useConfirm();
   return (
     <>
-      <select
+      <Select
         value={sprint.status}
         title="スプリント状態"
-        onChange={(e) => api.updateSprint(sprint.id, { status: e.target.value as Sprint["status"] }).then(onChange)}
-      >
-        <option value="planned">計画中</option>
-        <option value="active">進行中</option>
-        <option value="completed">完了</option>
-      </select>
+        ariaLabel="スプリント状態"
+        onChange={(v) => api.updateSprint(sprint.id, { status: v as Sprint["status"] }).then(onChange)}
+        options={[
+          { value: "planned", label: "計画中" },
+          { value: "active", label: "進行中" },
+          { value: "completed", label: "完了" },
+        ]}
+      />
       {/* 期間配線 (サーバ updateSprint は startDate/endDate/goal 対応済み=配線漏れだった)。 */}
       <input
         type="date"
@@ -153,9 +164,21 @@ function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => 
       />
       <button
         className="danger"
-        onClick={() => {
-          if (confirm("スプリントを削除? (タスクは残り、割当だけ外れます)"))
-            api.deleteSprint(sprint.id).then(onChange);
+        onClick={async () => {
+          const ok = await confirmDialog({
+            title: "スプリントを削除",
+            body: "タスクは残り、割当だけ外れます。",
+            okLabel: "削除する",
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            await api.deleteSprint(sprint.id);
+            await onChange();
+          } catch (e) {
+            // 失敗を黙って捨てない: 無反応に見える「死んだボタン」を作らない。
+            live(`削除に失敗しました: ${(e as Error).message}`);
+          }
         }}
       >
         削除
@@ -202,18 +225,16 @@ function SprintCard({
         <PriorityBadge priority={item.priority} />
         <DueBadge due={item.dueDate} />
       </div>
-      <select
+      <Select
         value={item.sprintId ?? ""}
         title="スプリント移動"
-        onChange={(e) => api.updateItem(item.id, { sprintId: e.target.value || null }).then(onChange)}
-      >
-        <option value="">スプリントから外す</option>
-        {state.sprints.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.name}
-          </option>
-        ))}
-      </select>
+        ariaLabel="スプリント移動"
+        onChange={(v) => api.updateItem(item.id, { sprintId: v || null }).then(onChange)}
+        options={[
+          { value: "", label: "スプリントから外す" },
+          ...state.sprints.map((s) => ({ value: s.id, label: s.name })),
+        ]}
+      />
     </>
   );
 }

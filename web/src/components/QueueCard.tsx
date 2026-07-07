@@ -7,7 +7,9 @@ import {
   ProjectChip,
   copyText,
 } from "./Bits.js";
+import { useConfirm } from "./ConfirmDialog.js";
 import { Markdown } from "./Markdown.js";
+import { Select } from "./Select.js";
 import { MiniScores, ScoreBadges } from "./ScoreBadges.js";
 import { splitExecutionResult } from "../lib/execution-text.js";
 import { undoLabelText } from "../lib/undo-label.js";
@@ -42,6 +44,17 @@ export function QueueCard({
     if (item.executionStatus === "running") setPreInfo("");
   }, [item.executionStatus]);
   const live = useLive();
+  const confirmDialog = useConfirm();
+  // スコープの広い操作(この1件でなく同じ種類すべての今後を変える)の確認。
+  // 「要確認に固定」は再浮上カードと承認待ちカードの2箇所から使うため文言を共有する。
+  const confirmEscalateCategory = () =>
+    confirmDialog({
+      title: "この種類を今後すべて要確認に",
+      body:
+        "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。" +
+        "このボタンからは取り消せません(解除は設定からのみ)。",
+      okLabel: "要確認に固定する",
+    });
   // run: 操作後にカードを即消ししない(onChange でサーバの可視集合に委ね、Undo を残す)。
   // 楽観ロック競合(409)は専用文言を aria-live に出して強制再取得する。
   const run = async (fn: () => Promise<unknown>, doneMsg?: string) => {
@@ -217,13 +230,8 @@ export function QueueCard({
           <button
             disabled={busy}
             title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
-            onClick={() => {
-              if (
-                !window.confirm(
-                  "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
-                )
-              )
-                return;
+            onClick={async () => {
+              if (!(await confirmEscalateCategory())) return;
               run(() => api.escalateCategory(item.id), "この種類を今後すべて要確認にしました");
             }}
           >
@@ -482,13 +490,15 @@ export function QueueCard({
                   <button
                     disabled={busy}
                     title="同じ種類のタスクを今後すべて自動処理にし、在庫もまとめて自動実行します(設定から解除可)"
-                    onClick={() => {
-                      if (
-                        !window.confirm(
-                          "この種類のタスクを今後すべて自動処理にします。たまっている同種も自動実行されます。よろしいですか?(設定からあとで解除できます)",
-                        )
-                      )
-                        return;
+                    onClick={async () => {
+                      const ok = await confirmDialog({
+                        title: "この種類を今後すべて自動で",
+                        body:
+                          "この種類のタスクを今後すべて自動処理にします。たまっている同種も自動実行されます。" +
+                          "(設定からあとで解除できます)",
+                        okLabel: "自動処理にする",
+                      });
+                      if (!ok) return;
                       run(
                         () => api.action(item.id, "mute_category"),
                         "この種類を今後すべて自動で処理にしました",
@@ -500,13 +510,8 @@ export function QueueCard({
                   <button
                     disabled={busy}
                     title="同じ種類のタスクを今後すべて要確認(エスカレ)に固定。たまっている同種も要確認に戻ります。このボタンからは戻せません(解除は設定から)"
-                    onClick={() => {
-                      if (
-                        !window.confirm(
-                          "この種類のタスクを今後すべて要確認に固定します。たまっている同種も要確認に戻ります。このボタンからは取り消せません(解除は設定からのみ)。よろしいですか?",
-                        )
-                      )
-                        return;
+                    onClick={async () => {
+                      if (!(await confirmEscalateCategory())) return;
                       run(
                         () => api.escalateCategory(item.id),
                         "この種類を今後すべて要確認にしました",
@@ -747,27 +752,26 @@ function Reclassify({
 }) {
   // 操作メニュー化: 常に見出し『分類し直す…』を表示し、選んだ段へ覆す(教師信号)。
   // 現在の分類は title に出す(value に束縛して「○○に変更」が現状と一致する誤読を避ける)。
+  // value は "" 固定 = 選択後も見出し表示へ戻る (disabled の "" オプションが表示を担う)。
   const cur = current ? DISPOSITION_LABEL[current] : "未分類";
   return (
-    <select
+    <Select
       value=""
-      aria-label="分類し直す"
+      ariaLabel="分類し直す"
       title={`分類し直す(現在: ${cur})。境界線への明示ナッジ=教師信号になります`}
-      onChange={(e) => {
-        const to = e.target.value;
+      onChange={(to) => {
         if (!to) return;
         run(
           () => api.action(itemId, "reclassify", to as Disposition),
           `「${DISPOSITION_LABEL[to as Disposition]}」に分類し直しました`,
         );
       }}
-    >
-      <option value="" disabled>
-        分類し直す…
-      </option>
-      <option value="auto">自動に変更</option>
-      <option value="escalate">要確認に変更</option>
-      <option value="human">要判断に変更</option>
-    </select>
+      options={[
+        { value: "", label: "分類し直す…", disabled: true },
+        { value: "auto", label: "自動に変更" },
+        { value: "escalate", label: "要確認に変更" },
+        { value: "human", label: "要判断に変更" },
+      ]}
+    />
   );
 }

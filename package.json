@@ -29,6 +29,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@radix-ui/react-select": "^2.3.3",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.5.0",
     "@types/react": "^18.3.5",

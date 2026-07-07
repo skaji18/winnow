@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api.js";
 import { useLive } from "../live.js";
 import type { UpdateState } from "../types.js";
+import { useConfirm } from "./ConfirmDialog.js";
 
 // 自己更新バナー (DECISIONS「自己更新」節)。検知結果の案内と適用のワンタップだけを持つ。
 // 適用中はフェーズを映す。サーバは vite build 後に exit → supervisor が新版で上げ直し →
@@ -22,6 +23,7 @@ export function UpdateBanner({
   onChange: () => void;
 }) {
   const live = useLive();
+  const confirmDialog = useConfirm();
   const [failMsg, setFailMsg] = useState<string | null>(null);
   const phase = update.apply.phase;
   if (phase !== "idle" && phase !== "failed") {
@@ -39,8 +41,12 @@ export function UpdateBanner({
   if (!update.available && !applyError && !failMsg) return null;
   const apply = async () => {
     // 実行中ジョブ・dirty tree 等の最終ゲートはサーバ側 (started:false + reason)。
-    if (!window.confirm(`${update.latestTag} に更新してサーバを再起動します。よろしいですか？`))
-      return;
+    const ok = await confirmDialog({
+      title: `${update.latestTag} に更新`,
+      body: "更新を適用してサーバを再起動します。よろしいですか？",
+      okLabel: "更新して再起動",
+    });
+    if (!ok) return;
     try {
       const r = await api.applyUpdate();
       if (r.started) {

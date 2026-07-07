@@ -131,9 +131,11 @@ async function flowDispositionAndUndo(page) {
   // 「分類し直す…」で要確認→要判断へ(普段の一手＝教師信号)。
   // auto に倒すとカード自体がキューから畳まれ、undo の手がかりも一緒に消えるため、
   // カードが残る human 方向で「覆す→戻す」の両方を1カード上で見せる。
+  // 自前 Select (Radix) はネイティブ selectOption が効かない: トリガーを開いて option をクリック。
   const select = card.getByLabel("分類し直す");
   await moveTo(page, select);
-  await select.selectOption("human");
+  await select.click();
+  await page.getByRole("option", { name: "要判断に変更" }).click();
   // バッジが「要判断」に変わるのを待ってから見せる。
   await card.locator(".badge", { hasText: "要判断" }).waitFor({ timeout: 8000 });
   await sleep(1800);
