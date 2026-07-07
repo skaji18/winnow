@@ -12,7 +12,7 @@ import { MiniScores, ScoreBadges } from "./ScoreBadges.js";
 import { splitExecutionResult } from "../lib/execution-text.js";
 import { undoLabelText } from "../lib/undo-label.js";
 import { useLive } from "../live.js";
-import type { AppState, Disposition, QueueItem } from "../types.js";
+import type { AppState, ContextPreview, Disposition, QueueItem } from "../types.js";
 import { DISPOSITION_LABEL } from "../types.js";
 
 export function QueueCard({
@@ -160,6 +160,10 @@ export function QueueCard({
           <pre>{item.body}</pre>
         </details>
       )}
+
+      {/* 注入の可視化: AIに実際に渡る文脈ブロック (サーバの buildContextBlock と同一経路=
+          切り詰め・番兵・redactSecrets 通過後) を畳んで見せる。 */}
+      <ContextPreviewDetails itemId={item.id} />
 
       {/* artifacts / sourceUrl のリンクチップ (read-only 痕跡)。 */}
       <ArtifactChips artifacts={item.artifacts} sourceUrl={item.sourceUrl} />
@@ -613,6 +617,62 @@ export function QueueCard({
         </div>
       )}
     </div>
+  );
+}
+
+// AIに渡る文脈の遅延プレビュー:
+// - 初回 open 時のみ fetch し、以後はローカル state にキャッシュ (read-only なので onChange 経路
+//   =AppState には乗せない)。QueueCard は item.id で key され 3 秒ポーリングの再レンダーでは
+//   remount されないため、details の開閉状態もキャッシュも生存する。
+// - 開いたまま文脈が変わっても自動追随しない=スナップショット表示 (summary 文言で開示)。
+// - fetch 失敗は控えめなエラーテキストにし、閉じて開き直せば再試行する。
+// - 文字数は切り詰め・伏字化後=実際に注入される長さの数字だけを出す。グラフ/バーは出さない
+//   (INVARIANTS: 処理量メトリクス禁止の作法に合わせ、計器化しない)。
+function ContextPreviewDetails({ itemId }: { itemId: string }) {
+  const [preview, setPreview] = useState<ContextPreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const load = () => {
+    if (preview || loading) return;
+    setLoading(true);
+    setError(null);
+    api
+      .contextPreview(itemId)
+      .then(setPreview)
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setLoading(false));
+  };
+  return (
+    <details className="exec" onToggle={(e) => e.currentTarget.open && load()}>
+      <summary className="muted">AIに渡る文脈を見る（開いた時点のスナップショット）</summary>
+      {loading && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          読み込み中…
+        </div>
+      )}
+      {error && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          読み込みに失敗しました: {error}
+        </div>
+      )}
+      {preview &&
+        (preview.block === "" ? (
+          <div className="muted" style={{ fontSize: 12 }}>
+            注入される文脈はありません
+          </div>
+        ) : (
+          <>
+            <div className="mini-scores">
+              <span>
+                人間ゾーン <b>{preview.humanZoneChars.toLocaleString("ja-JP")}</b>字 / AIの学び{" "}
+                <b>{preview.aiZoneChars.toLocaleString("ja-JP")}</b>字（上限{" "}
+                {preview.maxChars.toLocaleString("ja-JP")}字）
+              </span>
+            </div>
+            <pre>{preview.block}</pre>
+          </>
+        ))}
+    </details>
   );
 }
 

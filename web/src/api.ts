@@ -1,5 +1,6 @@
 import type {
   AppState,
+  ContextPreview,
   Disposition,
   Item,
   Priority,
@@ -144,6 +145,14 @@ export const api = {
 
   audit: (id: string, ok: boolean) =>
     j<Item>(`/api/items/${id}/audit`, { method: "POST", body: JSON.stringify({ ok }) }),
+
+  // AIに渡る文脈のプレビュー (read-only。サーバ側で learnings.touch の副作用は発火しない)。
+  contextPreview: (id: string) => j<ContextPreview>(`/api/items/${id}/context-preview`),
+
+  // 学び (memory AIゾーン) の veto/pin。応答は {ok:true} のみで learning 本体は返らないため、
+  // 反映は onChange(refresh) 経由の /api/state 再取得に委ねる (deactivateRule と同じ挙動)。
+  updateLearning: (id: string, patch: { vetoed?: boolean; pinned?: boolean }) =>
+    j<{ ok: true }>(`/api/learnings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   attachCommand: (name: string) =>
     j<{ command: string }>(`/api/sessions/${encodeURIComponent(name)}/attach`),

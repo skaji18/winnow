@@ -162,6 +162,18 @@ export interface Learning {
   createdAt: number;
 }
 
+// GET /api/items/:id/context-preview の応答 (server context.ts のミラー。ドリフト禁止)。
+// block は buildContextBlock(item) が実際に注入する文字列と完全一致
+// (切り詰め・番兵・redactSecrets 通過後。learnings.touch の副作用は発火しない)。
+// 文字数は切り詰め・伏字化後=実際に注入される長さ (block 内の区画の実長と一致)。
+// maxChars = MAX_CONTEXT_CHARS。
+export interface ContextPreview {
+  block: string;
+  humanZoneChars: number;
+  aiZoneChars: number;
+  maxChars: number;
+}
+
 // 中長期 horizon (server horizon.ts のミラー)。件数進捗フィールドは持たない。
 export type DueBucket = "over" | "soon" | "week" | "later" | "unknown";
 export interface HorizonEntry {

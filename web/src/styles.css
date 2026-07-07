@@ -244,6 +244,10 @@ nav.tabs button[aria-selected="true"]::before { content: "▸ "; }
 .pause-toggle { font-size: 12px; }
 .pause-toggle[aria-pressed="true"] { border-color: var(--escalate); color: var(--escalate); }
 
+/* 設定: 学び一覧の pin/veto トグル (aria-pressed の慣習 .pause-toggle 等と同型)。 */
+.learn-toggle { font-size: 12px; }
+.learn-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
 /* Undo インライン (控えめ)。 */
 .undo-inline {
   font-size: 11px; color: var(--muted); text-decoration: underline;

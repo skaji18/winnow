@@ -81,6 +81,10 @@
   成果なし＝中立の「補足情報」。
 - 注入総量は `MAX_CONTEXT_CHARS`（16k、ARG_MAX/E2BIG 防御）天井。人間ゾーンを優先で残し、
   残予算を AIゾーンに配分する（切り詰め順を逆転させない）。
+- プレビュー経路（`GET /api/items/:id/context-preview` → `buildContextPreview`）は **read-only**:
+  `learnings.touch`（生存信号）を発火させない（眺めただけの学びを減衰から延命させない）。
+  返すのは `redactSecrets` の最終ゲートを通った**結合後テキストのみ**で、本注入
+  `buildContextBlock` と単一の組み立てを共有する（複製しない＝プレビューが実注入とドリフトしない）。
 
 ## 状態機械と Undo（§4-4 可逆＆可視）
 

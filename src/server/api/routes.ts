@@ -25,7 +25,7 @@ import { decayLearnings } from "../learning.js";
 import { horizonView } from "../horizon.js";
 import { weekly } from "../summary.js";
 import { BOOT_ID, validateClaudeCmd } from "../security.js";
-import { redactSecrets } from "../context.js";
+import { buildContextPreview, redactSecrets } from "../context.js";
 import { validateProjectDir } from "../paths.js";
 import { SCHEMA_VERSION } from "../db.js";
 import { SERVER_PORT } from "../config.js";
@@ -240,6 +240,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/items/:id/labels", async (req) => {
     const { id } = req.params as { id: string };
     return labels.forItem(id);
+  });
+
+  // 注入コンテキストのプレビュー (docs/DECISIONS.md「注入コンテキストの可視化」)。
+  // block は buildContextBlock が実際に注入する文字列と完全一致 (切り詰め・番兵・
+  // redactSecrets 通過後=表示の真実は注入関数そのもの)。read-only: learnings.touch を
+  // 発火させない (眺めただけの学びを減衰から延命させない)。文字数は予算の可視化であって
+  // 処理量メトリクスではない。
+  app.get("/api/items/:id/context-preview", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const item = items.get(id);
+    if (!item) return reply.code(404).send({ error: "not found" });
+    return buildContextPreview(item);
   });
 
   // この項目を案件に昇格 (§3.3 上流の問いを案件の入れ物に格上げ)。
