@@ -180,7 +180,10 @@ export function executePrompt(
   // 承認済み再走 (approveExecution 経由) のみが渡す。humanApproved=承認の事実の伝達
   // (外部送信の解禁は含まない=解禁は externalApproved のみ)。priorPlan=前回の変更計画/成果。
   // 両方空なら出力は従来と一字一句同一 (後方互換)。
-  opts: { humanApproved?: boolean; priorPlan?: string } = {},
+  // hasPriorOutcome=worker 成果の実在 (gates.hasWorkerOutcome を runExecution が発火前の item で
+  // 評価して渡す)。instruction の文言分岐に使う: 成果が無いのに「前回の成果物を踏まえ」と
+  // 存在しない前提を注入しない (priorPlan の偽前提禁止と同じ線)。
+  opts: { humanApproved?: boolean; priorPlan?: string; hasPriorOutcome?: boolean } = {},
 ): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
@@ -218,7 +221,11 @@ export function executePrompt(
       ? `\n\n## レビューにあたっての人間からの前提・観点
 人間から、このレビューのための補足情報・観点が与えられています。以下を前提としてレビューに反映すること:
 ${instr}`
-      : `\n\n## 追加の方向修正(人間の指示)\n前回の成果物を踏まえ、次の方向で直してください:\n${instr}`
+      : opts.hasPriorOutcome
+        ? `\n\n## 追加の方向修正(人間の指示)\n前回の成果物を踏まえ、次の方向で直してください:\n${instr}`
+        : // 成果が無い初回実行(ゲート由来 proposed の承認に人間が補足を添えた等):
+          // 「前回の成果物」は存在しないので、中立の補足情報として渡す。
+          `\n\n## 人間からの補足情報・指示\n実行にあたって、人間から次の補足が与えられています。これを踏まえて実行すること:\n${instr}`
     : "";
   // レビュー leaf: レビュー対象の実行結果を観察対象データとして渡す (§3.5)。
   // worker 自己申告由来のテキストなので fenceBody の低信頼側に置く(高信頼の【文脈】に相乗りさせない)。

@@ -327,7 +327,12 @@ export function QueueCard({
                 <button
                   className="primary"
                   disabled={busy}
-                  onClick={() => run(() => api.approve(item.id), "承認して実行しました")}
+                  title="承認して実行する(下の欄にひとこと書けば添えて渡す。空なら承認のみ)"
+                  onClick={() =>
+                    run(() => api.approve(item.id, preInfo), "承認して実行しました").then(() =>
+                      setPreInfo(""),
+                    )
+                  }
                 >
                   承認して実行
                 </button>
@@ -350,6 +355,17 @@ export function QueueCard({
                       送信まで任せる場合は設定からONにしてください。
                     </div>
                   )}
+                {/* 承認への補足(任意・複数行可): needs_human で止まった実行に情報を足して再開する、
+                    ゲート由来の承認に方針をひとこと添える、の入口。承認の意味論は変えない。 */}
+                <textarea
+                  rows={2}
+                  value={preInfo}
+                  onChange={(e) => setPreInfo(e.target.value)}
+                  disabled={busy}
+                  placeholder="承認にひとこと添える(任意・複数行可。例: この方針でOK / ◯◯は対象外 / 不足していた情報は…)"
+                  aria-label="承認に添える補足"
+                  style={{ width: "100%" }}
+                />
               </>
             )
           ) : (

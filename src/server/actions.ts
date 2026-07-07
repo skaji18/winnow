@@ -219,11 +219,14 @@ export function reject(itemId: string): Item | null {
   return items.update(itemId, { status: "rejected" });
 }
 
-export async function approve(itemId: string): Promise<Item | null> {
+// instruction(任意・複数行可)は「承認にひとこと添える」の人間補足。label には積まない
+// (approve ラベルの意味は従来どおり「承認の事実」のみ。補足の痕跡は worker へのプロンプトと
+// 実行結果に残る=較正/undo の意味論を変えない)。
+export async function approve(itemId: string, instruction = ""): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   labels.record({ itemId, action: "approve", category: item.category });
-  return executor.approveExecution(itemId);
+  return executor.approveExecution(itemId, instruction);
 }
 
 /**

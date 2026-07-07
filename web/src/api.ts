@@ -117,7 +117,15 @@ export const api = {
   // general成果物『この方向で直す』: 指示(複数行可)を渡して同じ execute を再走させる。
   reExecute: (id: string, instruction: string) =>
     j(`/api/items/${id}/execute`, { method: "POST", body: JSON.stringify({ instruction }) }),
-  approve: (id: string) => j(`/api/items/${id}/approve`, { method: "POST" }),
+  // 任意 instruction(複数行可): 「承認にひとこと添える」— needs_human で止まった実行へ
+  // 情報を足して再開する等。承認の意味論(外部送信の解禁は設定オプトインのみ)は変えない。
+  approve: (id: string, instruction?: string) =>
+    instruction && instruction.trim()
+      ? j(`/api/items/${id}/approve`, {
+          method: "POST",
+          body: JSON.stringify({ instruction: instruction.trim() }),
+        })
+      : j(`/api/items/${id}/approve`, { method: "POST" }),
   cancel: (id: string) => j<Item>(`/api/items/${id}/cancel`, { method: "POST" }),
   // 引き取り(handoff)の受領: awaiting_handoff の成果物を確認/採用して完了へ。
   accept: (id: string) => j<Item>(`/api/items/${id}/accept`, { method: "POST" }),
