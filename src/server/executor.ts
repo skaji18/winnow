@@ -320,6 +320,18 @@ export async function runExecution(
     }
   }
 
+  // 人間の追加指示(複数行可・任意)。人間由来=高信頼(プロンプト側で fence しない)だが、
+  // 貼り付け情報に混じる秘密と肥大の防御として、注入経路の作法どおり redactSecrets の
+  // 最終ゲートと clip 天井(番兵つき)をここ一箇所で通す (docs/INVARIANTS.md 注入の信頼境界。
+  // 全経路 — manual execute / reExecute / 承認 — が runExecution に合流するのでここが choke point)。
+  const humanInstruction = instruction.trim()
+    ? clip(
+        redactSecrets(instruction.trim()),
+        4_000,
+        "\n…(追加指示はここで切り詰め。全文は渡っていません)",
+      )
+    : "";
+
   // レビュー leaf: レビュー対象(reviewOfId 先)の実行結果を材料として組む (§3.5)。
   // 旧実装は材料ゼロ(タイトル文字列のみ)で、general の worker は見るものが無かった。
   // worker 自己申告由来のテキストなので信頼境界は fenceBody(観察対象データ)側に置き
@@ -399,7 +411,7 @@ export async function runExecution(
     prompt: executePrompt(
       item,
       buildContextBlock(item),
-      instruction,
+      humanInstruction,
       opts.externalApproved === true,
       reviewMaterial,
       { humanApproved: opts.humanApproved === true, priorPlan },

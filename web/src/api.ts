@@ -105,8 +105,16 @@ export const api = {
       timeoutMs: 60_000 + option.children.length * 100_000,
     }),
 
-  execute: (id: string) => j(`/api/items/${id}/execute`, { method: "POST" }),
-  // general成果物『この方向で直す』: 一行指示を渡して同じ execute を再走させる。
+  // 任意 instruction(複数行可): レビューの前提・観点などの事前情報を添えて点火する。
+  // 空ボディに Content-Type を付けると Fastify が弾くため、あるときだけボディを付ける。
+  execute: (id: string, instruction?: string) =>
+    instruction && instruction.trim()
+      ? j(`/api/items/${id}/execute`, {
+          method: "POST",
+          body: JSON.stringify({ instruction: instruction.trim() }),
+        })
+      : j(`/api/items/${id}/execute`, { method: "POST" }),
+  // general成果物『この方向で直す』: 指示(複数行可)を渡して同じ execute を再走させる。
   reExecute: (id: string, instruction: string) =>
     j(`/api/items/${id}/execute`, { method: "POST", body: JSON.stringify({ instruction }) }),
   approve: (id: string) => j(`/api/items/${id}/approve`, { method: "POST" }),

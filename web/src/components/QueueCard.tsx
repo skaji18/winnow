@@ -29,6 +29,10 @@ export function QueueCard({
   onDecompose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // 事前情報(複数行可): レビュー leaf の「前提・観点を添えてレビューさせる」と、承認待ちの
+  // 「承認にひとこと添える」が使う。両状態は同時に描画されない(classified と proposed は排他)
+  // ため1つで足りる。送信成功時にクリアする。
+  const [preInfo, setPreInfo] = useState("");
   const live = useLive();
   // run: 操作後にカードを即消ししない(onChange でサーバの可視集合に委ね、Undo を残す)。
   // 楽観ロック競合(409)は専用文言を aria-live に出して強制再取得する。
@@ -256,7 +260,7 @@ export function QueueCard({
           run={run}
           busy={busy}
           output={splitOutput || item.executionResult || ""}
-          placeholder="直す方向を一行で指示(例: レビュー指摘の◯◯を修正して再push)"
+          placeholder="直す方向を指示(複数行可。例: レビュー指摘の◯◯を修正して再push)"
         />
       )}
 
@@ -410,10 +414,19 @@ export function QueueCard({
                 <>
                   <button
                     disabled={busy}
-                    title="AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
-                    onClick={() => run(() => api.execute(item.id), "AI に実行を依頼しました")}
+                    title={
+                      item.reviewOfId
+                        ? "AI にレビューさせる(下の欄に前提・観点を書けば添えて渡す。空なら丸投げ)"
+                        : "AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
+                    }
+                    onClick={() =>
+                      run(
+                        () => api.execute(item.id, preInfo),
+                        item.reviewOfId ? "AI にレビューを依頼しました" : "AI に実行を依頼しました",
+                      ).then(() => setPreInfo(""))
+                    }
                   >
-                    AIに実行させる
+                    {item.reviewOfId ? "AIにレビューさせる" : "AIに実行させる"}
                   </button>
                   {/* これは実行可能タスクではなく『問い』だった、と倒して分解に戻す (§2.1 最頻事故の事後是正)。 */}
                   <button
@@ -488,6 +501,19 @@ export function QueueCard({
               >
                 却下
               </button>
+              {/* レビュー leaf の事前情報 (§3.5): レビュー依頼を読んだ人間が持っている前提・観点を
+                  先に与えてから任せる(複数行可)。空のまま『AIにレビューさせる』なら丸投げ。 */}
+              {item.kind === "leaf" && item.reviewOfId && (
+                <textarea
+                  rows={2}
+                  value={preInfo}
+                  onChange={(e) => setPreInfo(e.target.value)}
+                  disabled={busy}
+                  placeholder="レビューの前提・観点があれば(複数行可。例: 仕様は◯◯が正 / △△は今回対象外)。空なら丸投げ"
+                  aria-label="レビューの前提・観点"
+                  style={{ width: "100%" }}
+                />
+              )}
             </>
           )}
           {busy && <span className="spinner">実行中…</span>}
@@ -570,7 +596,7 @@ export function QueueCard({
   );
 }
 
-// general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
+// general 成果物の出口 (§3.4): コピー / この方向で直す(指示・複数行可→同じ execute 再走)。
 // handoff(引き取り待ち)カードにも流用する: PR にレビュー指摘が付いた→指示を添えて直させる、の
 // 最頻ループ (placeholder だけ差し替え)。
 function GeneralOutlet({
@@ -603,18 +629,18 @@ function GeneralOutlet({
       >
         コピー
       </button>
-      <input
-        type="text"
-        placeholder={placeholder ?? "直す方向を一行で指示(例: もっと簡潔に / 表形式で)"}
+      <textarea
+        rows={2}
+        placeholder={placeholder ?? "直す方向を指示(複数行可。例: もっと簡潔に / 表形式で)"}
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         style={{ flex: 1, minWidth: 180 }}
-        aria-label="直す方向を一行で指示"
+        aria-label="直す方向を指示"
       />
       <button
         className="primary"
         disabled={busy || !instruction.trim()}
-        title="左の一行指示を踏まえて、同じ実行をやり直す"
+        title="左の指示を踏まえて、同じ実行をやり直す"
         onClick={() =>
           run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました").then(() =>
             setInstruction(""),
