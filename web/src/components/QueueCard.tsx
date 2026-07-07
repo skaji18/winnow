@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import {
   ArtifactChips,
@@ -31,8 +31,16 @@ export function QueueCard({
   const [busy, setBusy] = useState(false);
   // 事前情報(複数行可): レビュー leaf の「前提・観点を添えてレビューさせる」と、承認待ちの
   // 「承認にひとこと添える」が使う。両状態は同時に描画されない(classified と proposed は排他)
-  // ため1つで足りる。送信成功時にクリアする。
+  // ため1つで足りる。
   const [preInfo, setPreInfo] = useState("");
+  // クリアは「worker に実際に渡った」の観測可能な事実 = executionStatus の running 遷移で行う。
+  // タップ直後の .then でクリアすると (a) run() は失敗も握って resolve するため API 失敗
+  // (電波断/タイムアウト/403)でも入力が消え、(b) ゲート落ち(proposed)ではサーバが instruction を
+  // 破棄するのに入力まで消える。保持しておけば proposed カードの承認 textarea に同じ state が
+  // そのまま引き継がれ、承認時に添えて届けられる(ゲート落ちで前提が失われる残穴の実UI側の緩和)。
+  useEffect(() => {
+    if (item.executionStatus === "running") setPreInfo("");
+  }, [item.executionStatus]);
   const live = useLive();
   // run: 操作後にカードを即消ししない(onChange でサーバの可視集合に委ね、Undo を残す)。
   // 楽観ロック競合(409)は専用文言を aria-live に出して強制再取得する。
@@ -328,11 +336,7 @@ export function QueueCard({
                   className="primary"
                   disabled={busy}
                   title="承認して実行する(下の欄にひとこと書けば添えて渡す。空なら承認のみ)"
-                  onClick={() =>
-                    run(() => api.approve(item.id, preInfo), "承認して実行しました").then(() =>
-                      setPreInfo(""),
-                    )
-                  }
+                  onClick={() => run(() => api.approve(item.id, preInfo), "承認して実行しました")}
                 >
                   承認して実行
                 </button>
@@ -439,7 +443,7 @@ export function QueueCard({
                       run(
                         () => api.execute(item.id, preInfo),
                         item.reviewOfId ? "AI にレビューを依頼しました" : "AI に実行を依頼しました",
-                      ).then(() => setPreInfo(""))
+                      )
                     }
                   >
                     {item.reviewOfId ? "AIにレビューさせる" : "AIに実行させる"}
@@ -630,6 +634,11 @@ function GeneralOutlet({
 }) {
   const live = useLive();
   const [instruction, setInstruction] = useState("");
+  // クリアは running 遷移で行う(preInfo と同型): run() は失敗も握って resolve するため、
+  // タップ直後の .then クリアだと API 失敗時に入力(複数行)が消える。
+  useEffect(() => {
+    if (item.executionStatus === "running") setInstruction("");
+  }, [item.executionStatus]);
   return (
     <div className="actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
       <button
@@ -658,9 +667,7 @@ function GeneralOutlet({
         disabled={busy || !instruction.trim()}
         title="左の指示を踏まえて、同じ実行をやり直す"
         onClick={() =>
-          run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました").then(() =>
-            setInstruction(""),
-          )
+          run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました")
         }
       >
         この指示でやり直す
