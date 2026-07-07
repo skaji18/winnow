@@ -87,12 +87,15 @@ function buildHumanZone(item: Item): string {
   return parts.join("\n\n");
 }
 
-// memory の AIゾーン (自動蓄積された学び) を組む。tighten-only・区画別予算で注入される。
-function buildAiZoneText(item: Item): string {
-  return buildAiZone(item);
-}
-
-export function buildContextBlock(item: Item): string {
+// 注入本文の組み立て (単一の内部関数)。本注入 (buildContextBlock) とプレビュー
+// (buildContextPreview) の分岐は learnings.touch の副作用の有無だけで、切り詰め・番兵・
+// redactSecrets の最終ゲートは完全に共有する。ロジックを複製すると「表示の真実」が
+// 実注入とドリフトする(プレビューが嘘をつく)ため、分岐点は touch フラグ1個に絞る。
+function assemble(item: Item, opts: { touch: boolean }): {
+  block: string;
+  humanZoneChars: number;
+  aiZoneChars: number;
+} {
   // 人間ゾーンを優先予算で残し、AIゾーンを別予算で後段に積む (切り詰め順の逆転バグ回避:
   // 肥大時に node 段メモリや AI の学びが先頭の productContext を押し出さない)。
   const humanZone = clip(
@@ -106,16 +109,49 @@ export function buildContextBlock(item: Item): string {
     0,
     Math.min(settings.get().aiZoneMaxChars ?? MAX_CONTEXT_CHARS, MAX_CONTEXT_CHARS - humanZone.length),
   );
+  // memory の AIゾーン (自動蓄積された学び)。tighten-only・区画別予算で注入される。
+  // touch=false (プレビュー) では学びの生存信号 (lastSeenAt) を更新しない (learning.ts)。
   const aiZone = clip(
-    buildAiZoneText(item),
+    buildAiZone(item, { touch: opts.touch }),
     aiBudget,
     "\n…(学びが多いため一部を省略。不要な学びは veto してください)",
   );
 
-  if (!humanZone && !aiZone) return "";
+  // ゾーン文字数は切り詰め・伏字化後 (番兵込み) = 実際に注入される長さ。予算の可視化であって
+  // 処理量メトリクスではない (INVARIANTS: 件数・処理量の実績は表示しない)。
+  // clip 直後の長さで計上すると、伏字置換 (元より必ず短い) が発火した時に block の実長より
+  // 過大な数字を返して「表示された block と数字が合わない」嘘になるため、計測は区画別に
+  // redactSecrets を通した長さで取る。最終ゲート (結合後テキストへの 1回の redactSecrets) は
+  // 下でそのまま維持する: どの伏字パターンも改行を含まず結合セパレータ "\n\n" を跨いで
+  // マッチしないため、区画別の伏字化結果は結合後伏字化の各区画と正確に一致する (計測専用の
+  // 適用であって新しい注入経路ではない)。
+  const chars = {
+    humanZoneChars: redactSecrets(humanZone).length,
+    aiZoneChars: redactSecrets(aiZone).length,
+  };
+  if (!humanZone && !aiZone) return { block: "", ...chars };
   // 人間ゾーンを先頭・AIゾーンを後段に連結。
   let bodyText = [humanZone, aiZone].filter((z) => z.length > 0).join("\n\n");
   // 注入直前に秘密を伏字化(両ゾーン結合後に1回だけ=最終ゲートの漏れ口を増やさない)。
   bodyText = redactSecrets(bodyText);
-  return `\n## 文脈（必ずこれに沿って判断・分解・実行する）\n${bodyText}\n`;
+  return { block: `\n## 文脈（必ずこれに沿って判断・分解・実行する）\n${bodyText}\n`, ...chars };
+}
+
+export function buildContextBlock(item: Item): string {
+  return assemble(item, { touch: true }).block;
+}
+
+/**
+ * 注入プレビュー (GET /api/items/:id/context-preview)。buildContextBlock と同一の組み立てを
+ * touch なしで実行し、実注入と完全一致する文字列 (redactSecrets 通過後) と区画別の
+ * 切り詰め・伏字化後文字数 (= block 内の実長)・天井を返す。
+ * read-only: 眺めるだけの学びを減衰から延命させない。
+ */
+export function buildContextPreview(item: Item): {
+  block: string;
+  humanZoneChars: number;
+  aiZoneChars: number;
+  maxChars: number;
+} {
+  return { ...assemble(item, { touch: false }), maxChars: MAX_CONTEXT_CHARS };
 }

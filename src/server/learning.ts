@@ -6,7 +6,8 @@
 //  2. 較正母数を汚さない: learnings repo は calibration を import しない=recordOutcome を呼べない。
 //     category_stats / label_events に1行も書かない。
 //  3. 区画予算つき自動減衰: buildAiZone は pinned か未減衰(lastSeenAt>=cutoff)のみ注入し、
-//     context.ts が aiZoneMaxChars で別枠切り詰め。pruneDecayed が未使用 AI 学びを物理削除。
+//     context.ts が aiZoneMaxChars で別枠切り詰め。pruneDecayed が未使用 AI 学びを物理削除
+//     (veto 済みは除外=「却下は戻せる」の約束を減衰が黙って破らない)。
 import type { Item } from "./domain.js";
 import { learnings, settings } from "./repo.js";
 
@@ -31,20 +32,23 @@ export function extractLearning(item: Item, learningText: string | undefined | n
  * memory の AIゾーン文字列を組む。当該 item のカテゴリ (+共通) の学びのうち、pinned か未減衰のものを
  * tighten-only 見出し付きで連結し、注入に使った学びの生存信号 (lastSeenAt) を更新する。
  * 注入の量的上限は context.ts 側 (aiZoneMaxChars) が区画別に担保する。
+ * opts.touch=false は read-only プレビュー専用 (context-preview API): プレビューで「眺めただけ」の
+ * 学びに生存信号を与えると、実際には注入されていない学びが減衰を免れて延命するため、
+ * 生存信号=実注入の事実、という減衰の意味論を守る。既定 (true) は従来挙動と完全に同一。
  */
-export function buildAiZone(item: Item): string {
+export function buildAiZone(item: Item, opts?: { touch?: boolean }): string {
   const cfg = settings.get();
   const cutoff = Date.now() - cfg.learningDecayMs;
   const candidates = learnings
     .forCategory(item.category ?? null)
     .filter((l) => l.pinned || l.lastSeenAt >= cutoff);
   if (candidates.length === 0) return "";
-  learnings.touch(candidates.map((l) => l.id));
+  if (opts?.touch !== false) learnings.touch(candidates.map((l) => l.id));
   const lines = candidates.map((l) => `- ${l.text}`).join("\n");
   return `### AI が観測した学び（品質を上げる注意・知識。自動実行の範囲を緩める根拠にはしない）\n${lines}`;
 }
 
-/** 未使用・未 pin の AI 由来学びを減衰削除する (定期 sweep から呼ぶ)。削除件数を返す。 */
+/** 未使用・未 pin・未 veto の AI 由来学びを減衰削除する (定期 sweep から呼ぶ)。削除件数を返す。 */
 export function decayLearnings(): number {
   const cfg = settings.get();
   return learnings.pruneDecayed(Date.now() - cfg.learningDecayMs);
