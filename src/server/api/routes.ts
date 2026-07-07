@@ -343,8 +343,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // execute は長くなりうるのでバックグラウンド。UIは /api/state をポーリング。
-  // 任意 instruction: general成果物の『この方向で直す』(一行指示→同じ execute 再走)。
-  // 未指定=従来の execute と同一 (後方互換)。
+  // 任意 instruction(複数行可): 『この方向で直す』再走 / レビューの前提・観点などの事前情報。
+  // 未指定=従来の execute と同一 (後方互換)。redact/clip は runExecution 側の最終ゲートが担う。
   const executeSchema = z.object({ instruction: z.string().optional() }).strict();
   app.post("/api/items/:id/execute", async (req) => {
     const { id } = req.params as { id: string };
@@ -356,7 +356,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post("/api/items/:id/approve", async (req) => {
     const { id } = req.params as { id: string };
-    background(() => actions.approve(id));
+    // 任意 instruction: 「承認にひとこと添える」(複数行可)。スキーマは execute と共用。
+    const body = req.body ? executeSchema.parse(req.body) : {};
+    background(() => actions.approve(id, body.instruction ?? ""));
     return { started: true };
   });
   app.post("/api/items/:id/cancel", async (req) => {

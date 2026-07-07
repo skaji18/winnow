@@ -14,6 +14,7 @@ import { validateProjectDir } from "./paths.js";
 import {
   buildGateSnapshot,
   crossRepoSiblingPending,
+  hasWorkerOutcome,
   isNeedsHumanProposed,
   uncertainNodeOrUpstreamPending,
   uncertainGateReason,
@@ -320,6 +321,18 @@ export async function runExecution(
     }
   }
 
+  // 人間の追加指示(複数行可・任意)。人間由来=高信頼(プロンプト側で fence しない)だが、
+  // 貼り付け情報に混じる秘密と肥大の防御として、注入経路の作法どおり redactSecrets の
+  // 最終ゲートと clip 天井(番兵つき)をここ一箇所で通す (docs/INVARIANTS.md 注入の信頼境界。
+  // 全経路 — manual execute / reExecute / 承認 — が runExecution に合流するのでここが choke point)。
+  const humanInstruction = instruction.trim()
+    ? clip(
+        redactSecrets(instruction.trim()),
+        4_000,
+        "\n…(追加指示はここで切り詰め。全文は渡っていません)",
+      )
+    : "";
+
   // レビュー leaf: レビュー対象(reviewOfId 先)の実行結果を材料として組む (§3.5)。
   // 旧実装は材料ゼロ(タイトル文字列のみ)で、general の worker は見るものが無かった。
   // worker 自己申告由来のテキストなので信頼境界は fenceBody(観察対象データ)側に置き
@@ -348,6 +361,10 @@ export async function runExecution(
   // failed/succeeded の残骸を持つ item がゲート経由で proposed に落ちた場合まで「前回 needs_human で
   // 停止」と誤注入し、初回承認の needs_human を誤って escalate 終端させる。
   const approvedRetry = opts.humanApproved === true && isNeedsHumanProposed(item);
+  // instruction の文言分岐用: worker 成果の実在を発火前の item で一度だけ評価する
+  // (running へ倒した後の再取得では判定が汚れる)。成果が無い初回実行(ゲート由来 proposed の
+  // 承認に補足を添えた等)へ「前回の成果物を踏まえ」の偽前提を注入しないための決定論シグナル。
+  const hasPriorOutcome = hasWorkerOutcome(item);
   // 承認済み再走の差分保証: 前回 needs_human で返した変更計画/成果をプロンプトへ注入し、
   // 初回拒否時と同一プロンプトの再投入(worker が同じ判断で needs_human を繰り返す再拒否ループ)を
   // 構造的に無くす。worker 自己申告由来テキストなので redactSecrets を結合後に1回通し、
@@ -399,10 +416,10 @@ export async function runExecution(
     prompt: executePrompt(
       item,
       buildContextBlock(item),
-      instruction,
+      humanInstruction,
       opts.externalApproved === true,
       reviewMaterial,
-      { humanApproved: opts.humanApproved === true, priorPlan },
+      { humanApproved: opts.humanApproved === true, priorPlan, hasPriorOutcome },
     ),
     cwd: item.projectDir ?? undefined,
     expectJson: true,
@@ -639,7 +656,12 @@ export function resumePausedAuto(): number {
   return resumed;
 }
 
-export async function approveExecution(itemId: string): Promise<Item | null> {
+/**
+ * instruction(任意・複数行可)は「承認にひとこと添える」の人間補足。承認の意味論は変えない:
+ * 外部送信の解禁は従来どおり settings オプトインのみ、escalate 終端(approvedRetry)の判定にも
+ * 影響しない。needs_human で止まった実行に情報を足して再開する、が主用途 (§3.4/§3.5)。
+ */
+export async function approveExecution(itemId: string, instruction = ""): Promise<Item | null> {
   const item = items.get(itemId);
   if (!item) return null;
   if (item.executionStatus !== "proposed") return item;
@@ -649,7 +671,7 @@ export async function approveExecution(itemId: string): Promise<Item | null> {
   // 入りの非同一プロンプトになり、needs_human 再返答は applyExecuteResult が escalate 終端する
   // =承認が no-op になる再拒否ループを断つ。
   const externalApproved = settings.get().allowExternalSend === true;
-  return runExecution(itemId, "", { externalApproved, humanApproved: true });
+  return runExecution(itemId, instruction, { externalApproved, humanApproved: true });
 }
 
 /**

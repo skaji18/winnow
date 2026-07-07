@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import {
   ArtifactChips,
@@ -29,6 +29,18 @@ export function QueueCard({
   onDecompose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // 事前情報(複数行可): レビュー leaf の「前提・観点を添えてレビューさせる」と、承認待ちの
+  // 「承認にひとこと添える」が使う。両状態は同時に描画されない(classified と proposed は排他)
+  // ため1つで足りる。
+  const [preInfo, setPreInfo] = useState("");
+  // クリアは「worker に実際に渡った」の観測可能な事実 = executionStatus の running 遷移で行う。
+  // タップ直後の .then でクリアすると (a) run() は失敗も握って resolve するため API 失敗
+  // (電波断/タイムアウト/403)でも入力が消え、(b) ゲート落ち(proposed)ではサーバが instruction を
+  // 破棄するのに入力まで消える。保持しておけば proposed カードの承認 textarea に同じ state が
+  // そのまま引き継がれ、承認時に添えて届けられる(ゲート落ちで前提が失われる残穴の実UI側の緩和)。
+  useEffect(() => {
+    if (item.executionStatus === "running") setPreInfo("");
+  }, [item.executionStatus]);
   const live = useLive();
   // run: 操作後にカードを即消ししない(onChange でサーバの可視集合に委ね、Undo を残す)。
   // 楽観ロック競合(409)は専用文言を aria-live に出して強制再取得する。
@@ -260,7 +272,7 @@ export function QueueCard({
           run={run}
           busy={busy}
           output={splitOutput || item.executionResult || ""}
-          placeholder="直す方向を一行で指示(例: レビュー指摘の◯◯を修正して再push)"
+          placeholder="直す方向を指示(複数行可。例: レビュー指摘の◯◯を修正して再push)"
         />
       )}
 
@@ -327,7 +339,8 @@ export function QueueCard({
                 <button
                   className="primary"
                   disabled={busy}
-                  onClick={() => run(() => api.approve(item.id), "承認して実行しました")}
+                  title="承認して実行する(下の欄にひとこと書けば添えて渡す。空なら承認のみ)"
+                  onClick={() => run(() => api.approve(item.id, preInfo), "承認して実行しました")}
                 >
                   承認して実行
                 </button>
@@ -350,6 +363,17 @@ export function QueueCard({
                       送信まで任せる場合は設定からONにしてください。
                     </div>
                   )}
+                {/* 承認への補足(任意・複数行可): needs_human で止まった実行に情報を足して再開する、
+                    ゲート由来の承認に方針をひとこと添える、の入口。承認の意味論は変えない。 */}
+                <textarea
+                  rows={2}
+                  value={preInfo}
+                  onChange={(e) => setPreInfo(e.target.value)}
+                  disabled={busy}
+                  placeholder="承認にひとこと添える(任意・複数行可。例: この方針でOK / ◯◯は対象外 / 不足していた情報は…)"
+                  aria-label="承認に添える補足"
+                  style={{ width: "100%" }}
+                />
               </>
             )
           ) : (
@@ -414,10 +438,19 @@ export function QueueCard({
                 <>
                   <button
                     disabled={busy}
-                    title="AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
-                    onClick={() => run(() => api.execute(item.id), "AI に実行を依頼しました")}
+                    title={
+                      item.reviewOfId
+                        ? "AI にレビューさせる(下の欄に前提・観点を書けば添えて渡す。空なら丸投げ)"
+                        : "AI に実行させる(可逆なら自動着火、不可逆なら承認待ちに)"
+                    }
+                    onClick={() =>
+                      run(
+                        () => api.execute(item.id, preInfo),
+                        item.reviewOfId ? "AI にレビューを依頼しました" : "AI に実行を依頼しました",
+                      )
+                    }
                   >
-                    AIに実行させる
+                    {item.reviewOfId ? "AIにレビューさせる" : "AIに実行させる"}
                   </button>
                   {/* これは実行可能タスクではなく『問い』だった、と倒して分解に戻す (§2.1 最頻事故の事後是正)。 */}
                   <button
@@ -492,6 +525,19 @@ export function QueueCard({
               >
                 却下
               </button>
+              {/* レビュー leaf の事前情報 (§3.5): レビュー依頼を読んだ人間が持っている前提・観点を
+                  先に与えてから任せる(複数行可)。空のまま『AIにレビューさせる』なら丸投げ。 */}
+              {item.kind === "leaf" && item.reviewOfId && (
+                <textarea
+                  rows={2}
+                  value={preInfo}
+                  onChange={(e) => setPreInfo(e.target.value)}
+                  disabled={busy}
+                  placeholder="レビューの前提・観点があれば(複数行可。例: 仕様は◯◯が正 / △△は今回対象外)。空なら丸投げ"
+                  aria-label="レビューの前提・観点"
+                  style={{ width: "100%" }}
+                />
+              )}
             </>
           )}
           {busy && <span className="spinner">実行中…</span>}
@@ -630,7 +676,7 @@ function ContextPreviewDetails({ itemId }: { itemId: string }) {
   );
 }
 
-// general 成果物の出口 (§3.4): コピー / この方向で直す(一行指示→同じ execute 再走)。
+// general 成果物の出口 (§3.4): コピー / この方向で直す(指示・複数行可→同じ execute 再走)。
 // handoff(引き取り待ち)カードにも流用する: PR にレビュー指摘が付いた→指示を添えて直させる、の
 // 最頻ループ (placeholder だけ差し替え)。
 function GeneralOutlet({
@@ -648,6 +694,11 @@ function GeneralOutlet({
 }) {
   const live = useLive();
   const [instruction, setInstruction] = useState("");
+  // クリアは running 遷移で行う(preInfo と同型): run() は失敗も握って resolve するため、
+  // タップ直後の .then クリアだと API 失敗時に入力(複数行)が消える。
+  useEffect(() => {
+    if (item.executionStatus === "running") setInstruction("");
+  }, [item.executionStatus]);
   return (
     <div className="actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
       <button
@@ -663,22 +714,20 @@ function GeneralOutlet({
       >
         コピー
       </button>
-      <input
-        type="text"
-        placeholder={placeholder ?? "直す方向を一行で指示(例: もっと簡潔に / 表形式で)"}
+      <textarea
+        rows={2}
+        placeholder={placeholder ?? "直す方向を指示(複数行可。例: もっと簡潔に / 表形式で)"}
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         style={{ flex: 1, minWidth: 180 }}
-        aria-label="直す方向を一行で指示"
+        aria-label="直す方向を指示"
       />
       <button
         className="primary"
         disabled={busy || !instruction.trim()}
-        title="左の一行指示を踏まえて、同じ実行をやり直す"
+        title="左の指示を踏まえて、同じ実行をやり直す"
         onClick={() =>
-          run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました").then(() =>
-            setInstruction(""),
-          )
+          run(() => api.reExecute(item.id, instruction.trim()), "この指示でやり直しました")
         }
       >
         この指示でやり直す

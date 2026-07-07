@@ -180,7 +180,10 @@ export function executePrompt(
   // 承認済み再走 (approveExecution 経由) のみが渡す。humanApproved=承認の事実の伝達
   // (外部送信の解禁は含まない=解禁は externalApproved のみ)。priorPlan=前回の変更計画/成果。
   // 両方空なら出力は従来と一字一句同一 (後方互換)。
-  opts: { humanApproved?: boolean; priorPlan?: string } = {},
+  // hasPriorOutcome=worker 成果の実在 (gates.hasWorkerOutcome を runExecution が発火前の item で
+  // 評価して渡す)。instruction の文言分岐に使う: 成果が無いのに「前回の成果物を踏まえ」と
+  // 存在しない前提を注入しない (priorPlan の偽前提禁止と同じ線)。
+  opts: { humanApproved?: boolean; priorPlan?: string; hasPriorOutcome?: boolean } = {},
 ): string {
   // Defense in depth (§ project isolation): even though the dispatcher pins the
   // worker pane to the project dir (tmux-driver の指示プレフィックス)、念のため
@@ -207,10 +210,22 @@ export function executePrompt(
       }
 実行した場合は output の末尾に巻き戻し手順を必ず書くこと: 変更したファイルの一覧と、その変更を元に戻す具体的な git コマンド(例: git checkout -- <file> / git revert <sha> / git stash / リモートに出した場合は git revert + 再push や PR クローズ。force-push はしない)。これは rollbackPlan にも同じ内容を入れること。winnow はこれを自動実行しない。人間が取り消しを押したときの手順として提示するだけ。`
       : `これは一般タスクです。実際の外部副作用は起こさず、成果物の下書き・提案・手順を作成してください。${dirNote}`;
-  // 「この方向で直す」再走: 人間の一行指示(観察対象データ=本文と同格の追加要望)を渡す。
-  // 既存の成果物を踏まえて方向修正させる。未指定なら従来の execute と同一(後方互換)。
-  const redirectNote = instruction.trim()
-    ? `\n\n## 追加の方向修正(人間の一行指示)\n前回の成果物を踏まえ、次の方向で直してください: ${instruction.trim()}`
+  // 人間の追加指示(複数行可・任意)。人間由来=高信頼で fence しない。redactSecrets/clip は
+  // runExecution が一箇所で通した後の値が渡ってくる。未指定なら従来の execute と同一(後方互換)。
+  // 文言はレビュー文脈で分岐する: レビュー leaf(reviewMaterial 非空)への事前情報は「前回の成果物を
+  // 直す」ではなく「レビューの前提・観点」— 未実行のレビューに存在しない「前回の成果物」を
+  // 前提にする誤誘導を消す(レビュー済みの再走でも前提として同じ読みが成立する)。
+  const instr = instruction.trim();
+  const redirectNote = instr
+    ? reviewMaterial.trim()
+      ? `\n\n## レビューにあたっての人間からの前提・観点
+人間から、このレビューのための補足情報・観点が与えられています。以下を前提としてレビューに反映すること:
+${instr}`
+      : opts.hasPriorOutcome
+        ? `\n\n## 追加の方向修正(人間の指示)\n前回の成果物を踏まえ、次の方向で直してください:\n${instr}`
+        : // 成果が無い初回実行(ゲート由来 proposed の承認に人間が補足を添えた等):
+          // 「前回の成果物」は存在しないので、中立の補足情報として渡す。
+          `\n\n## 人間からの補足情報・指示\n実行にあたって、人間から次の補足が与えられています。これを踏まえて実行すること:\n${instr}`
     : "";
   // レビュー leaf: レビュー対象の実行結果を観察対象データとして渡す (§3.5)。
   // worker 自己申告由来のテキストなので fenceBody の低信頼側に置く(高信頼の【文脈】に相乗りさせない)。
