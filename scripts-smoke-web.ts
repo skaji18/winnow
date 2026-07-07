@@ -4,7 +4,9 @@
 //     1) キューにカードが描画される (escalate 2件 / autoDone 取消ハンドル / レビュー束のネスト描画)
 //     2) 「検索 / 絞り込み」トグルが開閉し、テキスト絞り込みが表示集合を絞る
 //     3) 主要な処分ボタン「却下」を1回押すとカードがキューから消える (処分=ラベルの終端)
-//     4) ページの console error / pageerror が 0 件
+//     4) バックログの削除が自前確認ダイアログ(alertdialog)経由で完了する
+//        (ネイティブ confirm 非依存の検証。抑制環境で「無反応」にならない置換の回帰ゲート)
+//     5) ページの console error / pageerror が 0 件
 // シードは API (POST /api/items → フェイク分類が escalate で着地) を正とし、API では作れない形
 // (autoDone の取消ハンドル・reviewOfId のレビュー束) だけサーバ起動前に repo 直書きで用意する
 // (scripts-seed-demo.ts と同じ流儀)。決定論のため待ちはすべて条件+タイムアウト(固定 sleep 非依存)。
@@ -275,14 +277,32 @@ async function main(): Promise<void> {
       "却下後はカードが3枚になる",
     );
 
-    // 4) console error 0件 (pageerror 含む)。
+    // 4) バックログの削除: 自前確認ダイアログ経由で実削除まで通す (ネイティブ confirm 非依存)。
+    //    「やめる」でキャンセルできること(残存)も先に確認する。
+    await page.getByRole("tab", { name: "バックログ" }).click();
+    const rowKeep = page.locator(".tree-row").filter({ hasText: TITLE_KEEP });
+    await rowKeep.waitFor({ timeout: 20_000 });
+    await rowKeep.getByRole("button", { name: "削除" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await dialog.waitFor({ timeout: 20_000 });
+    await dialog.getByRole("button", { name: "やめる" }).click();
+    await dialog.waitFor({ state: "detached", timeout: 20_000 });
+    assert.equal(await rowKeep.count(), 1, "キャンセル後もアイテムは残る");
+    await rowKeep.getByRole("button", { name: "削除" }).click();
+    await dialog.waitFor({ timeout: 20_000 });
+    await dialog.getByRole("button", { name: "削除する" }).click();
+    await rowKeep.waitFor({ state: "detached", timeout: 20_000 });
+
+    // 5) console error 0件 (pageerror 含む)。
     assert.equal(
       consoleErrors.length,
       0,
       `console error は0件のはず: ${consoleErrors.join(" | ")}`,
     );
 
-    console.log("smoke:web OK: キュー描画 / 絞り込みトグル / 却下の処分 / console error 0件");
+    console.log(
+      "smoke:web OK: キュー描画 / 絞り込みトグル / 却下の処分 / ダイアログ経由の削除 / console error 0件",
+    );
   } finally {
     // 終了処理は demo/run.mjs に倣い確実に: ブラウザ → サーバ → 使い捨てホームの順で畳む。
     if (browser) await browser.close().catch(() => {});

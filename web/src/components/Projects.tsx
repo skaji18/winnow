@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useLive } from "../live.js";
 import type { AppState, Item, Project } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
+import { useConfirm } from "./ConfirmDialog.js";
 import { Kanban } from "./Kanban.js";
 
 // 案件(プロジェクト)ビュー = 案件ごとの状態確認。見せ方は案件ごとに切替:
@@ -131,6 +133,8 @@ function ProjectDetail({
   onChange: () => void;
 }) {
   const projectItems = state.items.filter((i) => i.projectId === project.id);
+  const live = useLive();
+  const confirmDialog = useConfirm();
   const setMode = (mode: "board" | "flow") =>
     api.updateProject(project.id, { mode }).then(onChange);
   // 締めモーダルは archive/delete 共通の導線 (docs/DECISIONS.md「案件クローズ・バッチ」)。
@@ -168,12 +172,24 @@ function ProjectDetail({
         <button
           className="danger"
           title="案件を削除して締める(未完があれば締めモーダルで処分を決めます)"
-          onClick={() => {
-            if (openItems.length === 0) {
-              if (confirm("案件を削除? (タスクは残り、案件参照だけ外れます)"))
-                api.deleteProject(project.id).then(onChange);
-            } else {
+          onClick={async () => {
+            if (openItems.length !== 0) {
               setCloseMode("delete");
+              return;
+            }
+            const ok = await confirmDialog({
+              title: "案件を削除",
+              body: "タスクは残り、案件参照だけ外れます。削除は不可逆で、案件名・前提（context）は失われます。",
+              okLabel: "削除する",
+              danger: true,
+            });
+            if (!ok) return;
+            try {
+              await api.deleteProject(project.id);
+              await onChange();
+            } catch (e) {
+              // 失敗を黙って捨てない: 無反応に見える「死んだボタン」を作らない。
+              live(`削除に失敗しました: ${(e as Error).message}`);
             }
           }}
         >
@@ -326,6 +342,7 @@ function ArchiveCloseModal({
   // 既定=keep(締めない・教師信号なしの安全初期値。締めは速く緩めは慎重に)。
   const [choices, setChoices] = useState<Record<string, { kind: CloseChoice; to?: string }>>({});
   const [busy, setBusy] = useState(false);
+  const confirmDialog = useConfirm();
   const targets = state.projects.filter((p) => p.status === "active" && p.id !== project.id);
 
   const choiceOf = (id: string) => choices[id] ?? { kind: "keep" as CloseChoice };
@@ -352,10 +369,13 @@ function ArchiveCloseModal({
       // 必ず再取得して残りの未完だけ再操作できる状態にし、部分適用をユーザーに明示する。
       await onChange();
       setBusy(false);
-      alert(
-        `締めの途中で中断しました(${String((e as Error).message)})。一部の未完は処分済みです。` +
+      await confirmDialog({
+        title: "締めの途中で中断しました",
+        body:
+          `${String((e as Error).message)}\n一部の未完は処分済みです。` +
           `最新の状態に更新したので、残りを確認して締め直してください。`,
-      );
+        infoOnly: true,
+      });
     }
   };
 

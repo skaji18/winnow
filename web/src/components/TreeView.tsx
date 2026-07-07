@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useLive } from "../live.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
+import { useConfirm } from "./ConfirmDialog.js";
 import type { AppState, Item } from "../types.js";
 import { DISPOSITION_LABEL, RUNG_LABEL, STATUS_LABEL } from "../types.js";
 
@@ -59,6 +61,8 @@ export function TreeView({ state, onChange }: { state: AppState; onChange: () =>
 
 function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: () => void }) {
   const children = all.filter((i) => i.parentId === item.id);
+  const live = useLive();
+  const confirmDialog = useConfirm();
   return (
     <div>
       <div className="tree-row">
@@ -93,9 +97,20 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
           onClick={async () => {
             // 折り返しの多い狭幅レイアウトでの誤タップが即削除にならないよう確認を挟む
             // (削除は UNDOABLE 外の不可逆操作)。
-            if (!window.confirm(`「${item.title}」を削除しますか？`)) return;
-            await api.deleteItem(item.id);
-            await onChange();
+            const ok = await confirmDialog({
+              title: "アイテムを削除",
+              body: `「${item.title}」を削除します。子アイテムも一緒に消えます。削除は取り消せません。`,
+              okLabel: "削除する",
+              danger: true,
+            });
+            if (!ok) return;
+            try {
+              await api.deleteItem(item.id);
+              await onChange();
+            } catch (e) {
+              // 失敗を黙って捨てない: 無反応に見える「死んだボタン」を作らない。
+              live(`削除に失敗しました: ${(e as Error).message}`);
+            }
           }}
         >
           削除

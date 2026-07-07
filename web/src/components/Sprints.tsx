@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { useLive } from "../live.js";
 import type { AppState, Item, Sprint } from "../types.js";
 import { RUNG_LABEL, STATUS_LABEL } from "../types.js";
 import { DispositionDot, DueBadge, parseDate, PriorityBadge, ProjectChip, toDateInput } from "./Bits.js";
+import { useConfirm } from "./ConfirmDialog.js";
 import { Kanban } from "./Kanban.js";
 
 // スプリント = グローバルな時間箱。カンバンは「その期間の全タスク」を案件横断で
@@ -117,6 +119,8 @@ export function SprintsView({ state, onChange }: { state: AppState; onChange: ()
 }
 
 function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => void }) {
+  const live = useLive();
+  const confirmDialog = useConfirm();
   return (
     <>
       <select
@@ -153,9 +157,21 @@ function SprintControls({ sprint, onChange }: { sprint: Sprint; onChange: () => 
       />
       <button
         className="danger"
-        onClick={() => {
-          if (confirm("スプリントを削除? (タスクは残り、割当だけ外れます)"))
-            api.deleteSprint(sprint.id).then(onChange);
+        onClick={async () => {
+          const ok = await confirmDialog({
+            title: "スプリントを削除",
+            body: "タスクは残り、割当だけ外れます。",
+            okLabel: "削除する",
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            await api.deleteSprint(sprint.id);
+            await onChange();
+          } catch (e) {
+            // 失敗を黙って捨てない: 無反応に見える「死んだボタン」を作らない。
+            live(`削除に失敗しました: ${(e as Error).message}`);
+          }
         }}
       >
         削除

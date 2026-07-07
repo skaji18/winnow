@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
 import { AddItem } from "./components/AddItem.js";
+import { ConfirmHost } from "./components/ConfirmDialog.js";
 import { HeaderCounts } from "./components/HeaderCounts.js";
 import { ProjectsView } from "./components/Projects.js";
 import { QueueView } from "./components/QueueView.js";
@@ -65,6 +66,7 @@ export default function App() {
 
   return (
     <LiveContext.Provider value={setLiveMsg}>
+      <ConfirmHost>
       <div className="app">
         <a className="skip-link" href="#main">
           本文へスキップ
@@ -149,6 +151,7 @@ export default function App() {
           {tab === "settings" && <SettingsView state={state} onChange={refresh} />}
         </main>
       </div>
+      </ConfirmHost>
     </LiveContext.Provider>
   );
 }

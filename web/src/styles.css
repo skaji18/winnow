@@ -156,6 +156,10 @@ label.field input[type="range"] { width: 100%; }
 }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
   padding: 20px; max-width: 720px; width: 92%; max-height: 85vh; overflow: auto; }
+/* 確認ダイアログ: 他のモーダル(締めモーダル等)の上にも出るため一段高い z-index。 */
+.confirm-backdrop { z-index: 60; }
+.modal.confirm { max-width: 440px; }
+.confirm-body { font-size: 13px; white-space: pre-wrap; }
 .option-card { border: 1px solid var(--border); border-radius: 9px; padding: 12px; margin-bottom: 10px; }
 .option-card:hover { border-color: var(--accent); }
 .spinner { color: var(--accent); font-size: 12px; }
