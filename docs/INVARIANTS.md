@@ -73,6 +73,12 @@
   worker 由来テキストを ctx 側に相乗りさせない。
 - `redactSecrets` は**結合後テキストへ1回だけの最終ゲート**（漏れ口を増やさない）。
   新しい注入経路・export 経路は必ずこのゲートを通す。
+- `instruction`（人間の追加指示・複数行可。manual execute / 再走 / 承認の補足が同じ経路）は
+  人間由来＝高信頼で fence しないが、`redactSecrets` + `clip`（4,000字・番兵）を
+  **runExecution の一箇所**（全経路の合流点）で通す。文言は偽前提を注入しない:
+  レビュー leaf（reviewMaterial 非空）＝「前提・観点」、worker 成果の実在
+  （`gates.hasWorkerOutcome`、発火前の item で評価）がある再走のみ「前回の成果物を踏まえ」、
+  成果なし＝中立の「補足情報」。
 - 注入総量は `MAX_CONTEXT_CHARS`（16k、ARG_MAX/E2BIG 防御）天井。人間ゾーンを優先で残し、
   残予算を AIゾーンに配分する（切り詰め順を逆転させない）。
 
@@ -96,6 +102,8 @@
   gates.ts に述語・GateKind・文言を**同時登録**する（登録漏れは read 時導出が
   「解消済み」を誤表示する）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
+  承認は任意の人間補足（instruction）を運べるが、承認の意味論は変えない: 外部送信の解禁は
+  settings オプトインのみ・escalate 終端（approvedRetry）の判定に非関与・approve ラベルにも積まない。
 - 外部送信の解禁は `allowExternalSend` オプトイン時の承認・明示再走のみ（既定 OFF＝緩めは慎重）。
 - **承認経由の再実行プロンプトは初回 needs_human 時と同一にならない**（`humanApproved`＝承認の事実
   ＋needs_human 起源のときのみ `priorPlan`＝前回計画を注入。同一プロンプト再投入は再拒否ループの
