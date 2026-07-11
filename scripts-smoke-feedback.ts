@@ -3,7 +3,7 @@
 // AI 非起動(repo/queue/actions/executor の決定論部分のみ)で検証する。
 // 実行: WINNOW_HOME=$(mktemp -d) npx tsx scripts-smoke-feedback.ts
 import assert from "node:assert/strict";
-import { db } from "./src/server/db.js";
+import { db, SCHEMA_VERSION } from "./src/server/db.js";
 import { items, labels } from "./src/server/repo.js";
 import { queue, UNDOABLE } from "./src/server/queue.js";
 import * as actions from "./src/server/actions.js";
@@ -11,13 +11,19 @@ import * as executor from "./src/server/executor.js";
 
 const inQueue = (id: string) => queue().some((q) => q.id === id);
 
-// --- 1) migration: 版4 + 新列 ---------------------------------------------
-assert.equal(Number(db.pragma("user_version", { simple: true })), 4, "user_version=4");
+// --- 1) migration: コードの期待版 + 新列 -----------------------------------
+// 版番号は db.ts の単一真実源に追随する(版繰り上げのたびに smoke が偽陽性で落ちない)。
+assert.equal(
+  Number(db.pragma("user_version", { simple: true })),
+  SCHEMA_VERSION,
+  `user_version=${SCHEMA_VERSION}`,
+);
 const itemCols = (db.prepare("PRAGMA table_info(items)").all() as { name: string }[]).map(
   (c) => c.name,
 );
 assert.ok(itemCols.includes("receivedAt"), "items.receivedAt");
 assert.ok(itemCols.includes("reviewOfId"), "items.reviewOfId");
+assert.ok(itemCols.includes("resolution"), "items.resolution (v5)");
 const jobCols = (db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map(
   (c) => c.name,
 );
