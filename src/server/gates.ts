@@ -130,6 +130,30 @@ export function isPendingUpstreamSibling(item: Item, o: Item): boolean {
 }
 
 /**
+ * 「resolution を下流へ注入すべき完了済み上流兄弟」判定 (context.buildHumanZone の
+ * 「完了済み上流の結果」節と queue の read 時導出が共有する単一の真実源 —
+ * DECISIONS.md「人間実施の結果の下流受け渡し」)。isPendingUpstreamSibling と対をなすが
+ * 否定の流用 (!isPending) はしない: pending の否定≠完了 — awaiting_handoff は人間未受領で
+ * 取消されうる「[完了]」詐称になり、reject が executionStatus を残す仕様上
+ * rejected×succeeded も拾ってしまう。**status='done' のみ**を完了と数えることで却下済みは
+ * 定義から外れ、done を解いて in_progress に戻せば注入も自動で止まる＝撤回が状態機械と
+ * 自己整合する (resolution は残るが status≠done の間は注入されない)。レビュー leaf
+ * (reviewOfId 非null) は観察タスクであって下流の前提物ではないので除外
+ * (isPendingUpstreamSibling と同じ線)。
+ */
+export function isResolvedUpstreamSibling(item: Item, o: Item): boolean {
+  return (
+    item.parentId != null &&
+    o.parentId === item.parentId &&
+    o.id !== item.id &&
+    o.reviewOfId == null &&
+    o.orderIndex < item.orderIndex &&
+    o.status === "done" &&
+    (o.resolution ?? "").trim() !== ""
+  );
+}
+
+/**
  * 「何がこの item を塞いでいるか」の構造化導出 — 点火ゲート判定 (uncertainNodeOrUpstreamPending)・
  * 発動時文言 (uncertainGateReason)・read 時導出 (deriveProposedGate) の三者が共有する
  * 単一の真実源。why の判定順は点火ゲート (a)(b)(c) と同一:

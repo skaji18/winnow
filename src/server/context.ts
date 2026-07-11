@@ -2,6 +2,7 @@ import type { Item } from "./domain.js";
 import { RUNG_LABEL } from "./domain.js";
 import { items, projects, settings } from "./repo.js";
 import { buildAiZone } from "./learning.js";
+import { isResolvedUpstreamSibling } from "./gates.js";
 
 // 文脈の組み立て (REQUIREMENTS §2.2). 上段の鋭いスペックを下段に渡すための配管。
 // プロダクト全体の前提 + 案件の前提 + 親チェーン(ルート→親) を1つのブロックにする。
@@ -43,8 +44,15 @@ export function clip(text: string, max: number, sentinel: string): string {
   return cut + sentinel;
 }
 
+// 完了済み上流の結果 (resolution) 節の予算 (DECISIONS.md「人間実施の結果の下流受け渡し」。
+// 値の調整は defer)。1件 400字・近い上流優先で最大5件 — 節自体が人間ゾーン最後尾なので、
+// 全体溢れ時は productContext/親チェーンでなくこの節から欠ける安全側。
+const RESOLUTION_CLIP_CHARS = 400;
+const RESOLUTION_MAX_SIBLINGS = 5;
+
 /**
- * memory の人間ゾーンを組む (productContext + 案件前提 + node 段メモリ + 親チェーン)。
+ * memory の人間ゾーンを組む (productContext + 案件前提 + node 段メモリ + 親チェーン +
+ * 完了済み上流兄弟の resolution)。
  * いずれも人間が書く/AI 注入される高信頼の前提。AIゾーン (学び) とは予算も信頼度も分ける。
  */
 function buildHumanZone(item: Item): string {
@@ -82,6 +90,33 @@ function buildHumanZone(item: Item): string {
       return `${pad}- [${RUNG_LABEL[a.rung]}] ${a.title}${body}${ctx}`;
     });
     parts.push(`### この項目が属する上位の意図(ルート→親)\n${lines.join("\n")}`);
+  }
+
+  // 完了済み上流兄弟の resolution (人間の実施結果) を下流へ運ぶ (§2.2 上段の決定を下段へ)。
+  // 対象判定は gates.isResolvedUpstreamSibling の1本 (status='done' × resolution 非空のみ。
+  // 述語の資格条件・撤回の自己整合はそちらのコメント参照)。parentId=null は節ごと不発 —
+  // items.children(null) が全ルート項目を返す罠を踏まない (upstreamBlockerOf の早期 return と対称)。
+  // resolution は人間専有列なので高信頼 ctx 側に fence なしで注入する (instruction と同じ線)。
+  // redactSecrets は assemble の結合後1回の最終ゲートで掛かる (節内で個別に redact しない)。
+  // プレビュー (buildContextPreview) は assemble 共有なのでこの節にも自動追随する。
+  if (item.parentId != null) {
+    const resolved = items
+      .children(item.parentId) // orderIndex ASC
+      .filter((o) => isResolvedUpstreamSibling(item, o))
+      .reverse(); // 近い上流優先 (orderIndex 降順) — 予算超過時に直近の決定から残す
+    if (resolved.length) {
+      const lines = resolved.slice(0, RESOLUTION_MAX_SIBLINGS).map((o) => {
+        // 1行1件 (親チェーンの様式)。改行は空白に潰し、長文は番兵付きで切る (黙って欠落させない)。
+        const oneLine = (o.resolution ?? "").trim().replace(/\n/g, " ");
+        return `- ${o.title}: ${clip(oneLine, RESOLUTION_CLIP_CHARS, "…(結果が長いため以下省略)")}`;
+      });
+      if (resolved.length > RESOLUTION_MAX_SIBLINGS)
+        lines.push(
+          `…(さらに遠い上流の完了済み結果 ${resolved.length - RESOLUTION_MAX_SIBLINGS} 件を省略)`,
+        );
+      parts.push(`### 完了済み上流の結果（人間の記録）\n${lines.join("\n")}`);
+    }
+    // 1件も無ければ節ごと省略 (偽前提を注入しない — 案件前提の空省略と対称)。
   }
 
   return parts.join("\n\n");
