@@ -442,6 +442,21 @@ test("deriveProposedGate: cross_repo — 完了側(succeeded/cancelled/awaiting_
   assert.equal(g.kind, "clear");
 });
 
+test("deriveProposedGate: cross_repo — 人間が完了/却下した兄弟 (status done/rejected) は引かない", () => {
+  // 人間が引き取って完了 (doIt→done) / 却下した auto 項目は executionStatus が none のまま
+  // 残る — executionStatus だけ見る判定だと完了済みの兄弟が同一案件・別 projectDir の leaf を
+  // 永久に塞ぐ。status の done/rejected も「完了側」に数える。
+  const mk = (id: string, over: Partial<Item>) =>
+    makeItem({ id, projectId: "prj4", projectDir: "/somewhere/else", disposition: "auto", ...over });
+  const others = [
+    mk("x-done", { status: "done", executionStatus: "none" }),
+    mk("x-rej", { status: "rejected", executionStatus: "none" }),
+  ];
+  const it = makeItem({ executionStatus: "proposed", projectId: "prj4", projectDir: realDir });
+  const g = mustGate(deriveProposedGate(it, buildGateSnapshot([...others, it]), { pauseAuto: false }));
+  assert.equal(g.kind, "clear");
+});
+
 test("deriveProposedGate: pause_auto — 一時停止×disposition auto のみで発火(他ゲート無し)", () => {
   const auto = makeItem({ executionStatus: "proposed", disposition: "auto" });
   const g = mustGate(deriveProposedGate(auto, buildGateSnapshot([auto]), { pauseAuto: true }));

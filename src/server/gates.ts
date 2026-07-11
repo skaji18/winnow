@@ -91,6 +91,11 @@ function isCrossRepoPendingSibling(item: Item, o: Item): boolean {
     // (古い成功が延々とガードを引かないように)。proposed(auto)同士は互いに
     // マッチし続けるので、同時バーストは両方そろって承認待ちに倒れ対称性が保たれる。
     // awaiting_handoff は実行成功済み(人間の引き取り待ち)なので「完了側」に数え、下流を塞がない。
+    // status の done/rejected も「完了側」: 人間が引き取って完了 (doIt→done。disposition=auto・
+    // executionStatus=none のまま) / 却下した auto 項目が executionStatus だけ見る旧判定に
+    // マッチし続け、同一案件・別 projectDir の leaf を永久に塞いでいた穴を閉じる。
+    o.status !== "done" &&
+    o.status !== "rejected" &&
     o.executionStatus !== "succeeded" &&
     o.executionStatus !== "cancelled" &&
     o.executionStatus !== "awaiting_handoff" &&
