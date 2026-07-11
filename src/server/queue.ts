@@ -33,6 +33,13 @@ export interface QueueItem extends Item {
   // gates.isNeedsHumanProposed の単一真実源をサーバで計算して届ける(クライアントに複製しない)。
   // UI はこれと settings.allowExternalSend で「押した先」を正直に出し分ける。
   needsHuman: boolean;
+  // 「同一親に未完 (status not done/rejected) の下流兄弟 (reviewOfId=null・orderIndex 大) が
+  // 居る」の read 時導出 (docs/DECISIONS.md「人間実施の結果の下流受け渡し」)。UI はこれが真の
+  // ときだけ「完了にする」に resolution textarea を出す — 親も下流兄弟も無い単独タスクに
+  // 「下流へ渡る」と約束する偽アフォーダンスを出さない。3秒ポーリング毎に再計算できる導出値
+  // なので永続化しない。gates.isResolvedUpstreamSibling (上流×done×resolution 非空) とは
+  // 別式であり流用しない — こちらは「これから受け取る側が居るか」の未完×下流判定。
+  hasDownstreamSiblings: boolean;
   // stale 検知 (in_progress のみ非null・STALE_DAYS 以上の粗い経年)。
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
@@ -291,6 +298,18 @@ export function queue(): QueueItem[] {
         : null;
     // ゲート由来 proposed の live 導出 (needs_human 由来と非 proposed は null)。
     const gate = deriveProposedGate(it, gateSnap, { pauseAuto });
+    // 未完の下流兄弟の実在 (resolution textarea の可視条件)。gateSnap.childrenOf を再利用し
+    // per-item の items.children 呼び直しを避ける (ホットパス)。レビュー leaf は観察タスクで
+    // あって resolution の受け手ではないので数えない (isPendingUpstreamSibling と同じ線)。
+    const hasDownstreamSiblings =
+      it.parentId != null &&
+      (gateSnap.childrenOf.get(it.parentId) ?? []).some(
+        (o) =>
+          o.reviewOfId == null &&
+          o.orderIndex > it.orderIndex &&
+          o.status !== "done" &&
+          o.status !== "rejected",
+      );
     return {
       ...it,
       isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
@@ -302,6 +321,7 @@ export function queue(): QueueItem[] {
       // 起源判別(isNeedsHumanProposed)を使う: 成果の実在だけだと、実行済み item がゲート経由で
       // proposed に落ちた場合まで「AI停止」と誤ラベルし、送信OFF警告も誤発火する。
       needsHuman: gate == null && isNeedsHumanProposed(it),
+      hasDownstreamSiblings,
       staleDays,
       ageDays,
       undoableLabel,

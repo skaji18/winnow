@@ -92,7 +92,8 @@
   削除しない（no-op で返す）。
 - 逆適用先が状態依存で分かれる場合は `label.note` の**決定論マーカー**で分岐する
   （send_back の着手前/後、receive の3種）。推論はしない。
-- 人間の処分（rejected）を sweep / reconcile が上書きしない。
+- 人間の処分（rejected / done）を sweep / reconcile が上書きしない（job は決着させ、item への
+  反映だけスキップ。timed_out 経由の done を解けば late sentinel から従来どおり回収される）。
 - `cancelled` は「実行済みの取り消し」専用。未実行 proposed の取り消しは reject 経路（undo 可能）。
 - winnow は巻き戻し・採用（マージ/送信/デプロイ/削除）を**能動実行しない**。rollbackPlan は提示のみ。
   PR作成＝可逆な提示 / マージ＝不可逆な採用、の非対称を堅持。

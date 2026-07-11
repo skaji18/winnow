@@ -545,6 +545,9 @@ function tryTakeInSentinel(job: ExecutionJob): boolean {
  * 古い sentinel を誤って当てることもない: latestExecuteForItem が常に最新ジョブを返す)。
  * 却下(reject)は status='rejected' のみで executionStatus は timed_out のまま残るため、
  * ここで明示に skip する=人間の処分を sweep が黙って上書きしない(queue 側も rejected を畳む)。
+ * 完了(done)も同様に skip する: timed_out を人間が手で done+resolution にした後、遅れて届いた
+ * worker 応答が applyExecuteResult で status/成果列を全面上書きすると「結果は書いてあるのに
+ * 承認待ち」の矛盾レコードになる(docs/DECISIONS.md「人間実施の結果の下流受け渡し」の終端保護)。
  */
 export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   let recovered = 0;
@@ -552,10 +555,11 @@ export function sweepLateExecutions(): { recovered: number; agedOut: number } {
   const graceMs = settings.get().timedOutGraceMs || 1_800_000;
   for (const it of items.all()) {
     if (it.executionStatus !== "timed_out") continue;
-    // 人間が却下済み: 回収も期限切れ倒しもしない(人間の処分が勝つ)。job は runExecution が
-    // 既に failed で閉じている。late sentinel が残っても取り込まない(undo で classified に
-    // 戻れば timed_out として再び対象になり、そこで回収される=成果は失われない)。
-    if (it.status === "rejected") continue;
+    // 人間が処分済み(却下/完了): 回収も期限切れ倒しもしない(人間の処分が勝つ)。job は
+    // runExecution が既に failed で閉じている=決着済み。late sentinel が残っても取り込まない
+    // (undo/事後編集で status が rejected/done を離れれば timed_out として再び対象になり、
+    // そこで回収される=成果は失われない)。
+    if (it.status === "rejected" || it.status === "done") continue;
     const job = jobs.latestExecuteForItem(it.id);
     if (job && tryTakeInSentinel(job)) {
       recovered++;
@@ -595,9 +599,16 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   const stranded = jobs.runningExecuteJobs();
   for (const job of stranded) {
     const item = items.get(job.itemId);
-    // item が無い / 既に running 以外で決着済み / 人間が却下済み なら job だけ決着させて skip
-    // (rejected の上書き禁止は sweepLateExecutions と対称)。
-    if (!item || item.executionStatus !== "running" || item.status === "rejected") {
+    // item が無い / 既に running 以外で決着済み / 人間が処分済み(却下/完了) なら job だけ
+    // 決着させて skip (rejected/done の上書き禁止は sweepLateExecutions と対称。done は
+    // 人間が手で完了+resolution を書いた項目を遅着応答で上書きしない終端保護。sentinel は
+    // 消さずに残す=取り込まないだけで、成果ファイル自体は失われない)。
+    if (
+      !item ||
+      item.executionStatus !== "running" ||
+      item.status === "rejected" ||
+      item.status === "done"
+    ) {
       jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
       continue;
     }

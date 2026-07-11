@@ -169,6 +169,36 @@ test("horizon もアーカイブ案件配下を畳む (復元で戻る)", () => 
   assert.ok(inHorizon(), "復元で horizon に戻る");
 });
 
+test("hasDownstreamSiblings: 未完の下流兄弟が居るときだけ真 (read 時導出・resolution textarea の可視条件)", () => {
+  const q = (id: string) => queue().find((x) => x.id === id);
+  const parent = items.create({ title: "分解親", kind: "node", status: "classified" });
+  // 着手中レーン (in_progress × executionStatus none) でキューに出す。
+  const mkDoing = (title: string, orderIndex: number) =>
+    makeItem({ title, parentId: parent.id, orderIndex, status: "in_progress" });
+
+  // 下流に未完 (classified) の兄弟が居る → 真。
+  const withDownstream = mkDoing("下流あり", 1);
+  makeItem({ title: "未完の下流", parentId: parent.id, orderIndex: 2 });
+  assert.equal(q(withDownstream.id)?.hasDownstreamSiblings, true);
+
+  // 下流が全部 done/rejected → 偽 (受け手が居ないのに「渡る」と約束しない)。
+  const parent2 = items.create({ title: "分解親2", kind: "node", status: "classified" });
+  const allSettled = makeItem({ title: "下流完了済み", parentId: parent2.id, orderIndex: 1, status: "in_progress" });
+  makeItem({ title: "完了済み下流", parentId: parent2.id, orderIndex: 2, status: "done" });
+  makeItem({ title: "却下済み下流", parentId: parent2.id, orderIndex: 3, status: "rejected" });
+  assert.equal(q(allSettled.id)?.hasDownstreamSiblings, false);
+
+  // レビュー leaf は観察タスクであって resolution の受け手ではない → 数えない。
+  const parent3 = items.create({ title: "分解親3", kind: "node", status: "classified" });
+  const src = makeItem({ title: "レビュー元", parentId: parent3.id, orderIndex: 1, status: "in_progress" });
+  makeItem({ title: "レビュー", parentId: parent3.id, orderIndex: 2, reviewOfId: src.id });
+  assert.equal(q(src.id)?.hasDownstreamSiblings, false);
+
+  // parentId=null (単独タスク) は常に偽。
+  const orphanDoing = makeItem({ title: "単独着手中", status: "in_progress" });
+  assert.equal(q(orphanDoing.id)?.hasDownstreamSiblings, false);
+});
+
 test("projects.remove は projectId だけ外し sprintId に触れない", () => {
   const p = projects.create({ name: "削除テスト" });
   const s = sprints.create({ name: "SP" });
