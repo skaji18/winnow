@@ -120,6 +120,25 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
           削除
         </button>
       </div>
+      {/* 事後編集の2枠 (DECISIONS「人間実施の結果の下流受け渡し」): done 項目はキューから消える
+          ため、全項目が出るこの俯瞰面が resolution/context 編集の家。閉じた details 2つの薄い
+          一行に収め、ツリーの密度を壊さない。 */}
+      <div style={{ display: "flex", gap: 12, margin: "0 0 2px 22px" }}>
+        <InlineItemText
+          item={item}
+          field="context"
+          label="前提(メモ)"
+          placeholder="着手前の前提 (AI に効く: この項目と配下の分類/分解/実行に注入される)"
+          onChange={onChange}
+        />
+        <InlineItemText
+          item={item}
+          field="resolution"
+          label="実施の結果"
+          placeholder="完了時の結果・決定 (完了済みなら下流の兄弟タスクの AI 実行に前提として渡る)"
+          onChange={onChange}
+        />
+      </div>
       {children.length > 0 && (
         <div className="tree-node">
           {children.map((c) => (
@@ -128,5 +147,65 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
         </div>
       )}
     </div>
+  );
+}
+
+// context(着手前の前提)/resolution(完了後の実施結果)のインライン編集。案件前提
+// (Projects.tsx) と同じ details+非制御 textarea+onBlur 型だが、items には楽観ロックが
+// あるので expectedUpdatedAt を必ず送る (blur 全文上書きが他所の更新を黙って巻き戻す穴を
+// 409 で塞ぐ)。409/失敗時: 非制御 textarea は TreeNode が item.id で key され remount
+// されないため、onChange 再取得後も DOM の入力値が残る=入力保持。通知は既存様式の
+// aria-live (ネイティブダイアログ禁止)。
+function InlineItemText({
+  item,
+  field,
+  label,
+  placeholder,
+  onChange,
+}: {
+  item: Item;
+  field: "context" | "resolution";
+  label: string;
+  placeholder: string;
+  onChange: () => void;
+}) {
+  const live = useLive();
+  const saved = item[field] ?? "";
+  return (
+    <details style={{ flex: 1, minWidth: 0 }}>
+      <summary className="muted" style={{ fontSize: 11.5, cursor: "pointer" }}>
+        {label}
+        {saved.trim() ? "（記入あり）" : ""}
+      </summary>
+      <textarea
+        rows={3}
+        style={{ width: "100%", marginTop: 4 }}
+        placeholder={placeholder}
+        defaultValue={saved}
+        aria-label={`${label}: ${item.title}`}
+        onBlur={async (e) => {
+          const v = e.target.value;
+          // 変更なしの blur は送らない: 無用な PATCH は updatedAt を洗い、滞留表示 (ageDays/
+          // staleDays) を偽リセットする。
+          if (v === saved) return;
+          try {
+            await api.updateItem(
+              item.id,
+              field === "context" ? { context: v } : { resolution: v },
+              item.updatedAt,
+            );
+            await onChange();
+          } catch (err) {
+            const msg = (err as Error).message;
+            if (msg.startsWith("CONFLICT")) {
+              live("他所で更新されました。最新に更新します。入力は欄に残っています。");
+              await onChange();
+            } else {
+              live(`保存に失敗しました: ${msg}`);
+            }
+          }
+        }}
+      />
+    </details>
   );
 }

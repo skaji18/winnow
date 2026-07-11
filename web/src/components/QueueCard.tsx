@@ -12,6 +12,7 @@ import { Markdown } from "./Markdown.js";
 import { Select } from "./Select.js";
 import { MiniScores, ScoreBadges } from "./ScoreBadges.js";
 import { splitExecutionResult } from "../lib/execution-text.js";
+import { buildDonePatch } from "../lib/resolution-patch.js";
 import { undoLabelText } from "../lib/undo-label.js";
 import { useLive } from "../live.js";
 import type { AppState, ContextPreview, Disposition, QueueItem } from "../types.js";
@@ -43,6 +44,11 @@ export function QueueCard({
   useEffect(() => {
     if (item.executionStatus === "running") setPreInfo("");
   }, [item.executionStatus]);
+  // 実施の結果・決定(任意・複数行可): 着手中レーンの「完了にする」に相乗りし、下流の兄弟タスクの
+  // AI 実行へ前提として渡す (DECISIONS「人間実施の結果の下流受け渡し」)。クリア規則:
+  // 成功時はカードが done で畳まれ unmount=クリア不要。失敗/409 時は保持する
+  // (run() の CONFLICT 分岐は onChange 再取得のみで入力 state に触れない)。
+  const [resolutionDraft, setResolutionDraft] = useState("");
   const live = useLive();
   const confirmDialog = useConfirm();
   // スコープの広い操作(この1件でなく同じ種類すべての今後を変える)の確認。
@@ -292,7 +298,14 @@ export function QueueCard({
             className="primary"
             disabled={busy}
             title="自分で対応し終えた。完了にする"
-            onClick={() => run(() => api.updateItem(item.id, { status: "done" }), "完了にしました")}
+            onClick={() =>
+              run(() => {
+                // 非空なら {status:'done', resolution} の単一 PATCH (set 意味論・楽観ロック付き)。
+                // 空なら resolution キー自体を送らない=従来の完了経路と一字一句同一 (完全縮退)。
+                const p = buildDonePatch(resolutionDraft, item.updatedAt);
+                return api.updateItem(item.id, p.patch, p.expectedUpdatedAt);
+              }, "完了にしました")
+            }
           >
             完了にする
           </button>
@@ -304,6 +317,28 @@ export function QueueCard({
             手放す（キューに戻す）
           </button>
           {busy && <span className="spinner">実行中…</span>}
+          {/* 実施の結果 textarea は「受け取る下流が実在する」ときだけ出す (hasDownstreamSiblings=
+              サーバの read 時導出)。親も下流兄弟も無い単独タスクに「下流へ渡る」と約束する
+              偽アフォーダンスを出さない。details 折り畳み=レーンの薄さ(寄生表示)を守る。 */}
+          {item.hasDownstreamSiblings === true && (
+            <details style={{ width: "100%" }}>
+              <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>
+                実施の結果・決定（任意）— 下流の兄弟タスクの AI 実行に前提として渡る
+              </summary>
+              <textarea
+                rows={3}
+                value={resolutionDraft}
+                onChange={(e) => setResolutionDraft(e.target.value)}
+                disabled={busy}
+                placeholder={
+                  "何をどう決めた/やったか(複数行可。例: ベンダAで契約。予算は据え置き)。" +
+                  "空なら従来どおりの完了。コミット等のハッシュは伏字化されるため短縮形で"
+                }
+                aria-label="実施の結果・決定"
+                style={{ width: "100%", marginTop: 6 }}
+              />
+            </details>
+          )}
         </div>
       )}
 
@@ -626,10 +661,11 @@ export function QueueCard({
 }
 
 // AIに渡る文脈の遅延プレビュー:
-// - 初回 open 時のみ fetch し、以後はローカル state にキャッシュ (read-only なので onChange 経路
-//   =AppState には乗せない)。QueueCard は item.id で key され 3 秒ポーリングの再レンダーでは
-//   remount されないため、details の開閉状態もキャッシュも生存する。
-// - 開いたまま文脈が変わっても自動追随しない=スナップショット表示 (summary 文言で開示)。
+// - open のたびに再 fetch する (read-only なので onChange 経路=AppState には乗せない)。
+//   初回 open のみのキャッシュだと「上流兄弟の resolution を書く→下流カードのプレビューで
+//   届いたのを見る」の確認ループが成立しない (DECISIONS「人間実施の結果の下流受け渡し」)。
+//   再読込中は前回結果を出したままにする (ちらつかせない)。
+// - 開いたまま文脈が変わっても自動追随しない=開いた時点のスナップショット (summary 文言で開示)。
 // - fetch 失敗は控えめなエラーテキストにし、閉じて開き直せば再試行する。
 // - 文字数は切り詰め・伏字化後=実際に注入される長さの数字だけを出す。グラフ/バーは出さない
 //   (INVARIANTS: 処理量メトリクス禁止の作法に合わせ、計器化しない)。
@@ -638,7 +674,7 @@ function ContextPreviewDetails({ itemId }: { itemId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const load = () => {
-    if (preview || loading) return;
+    if (loading) return;
     setLoading(true);
     setError(null);
     api

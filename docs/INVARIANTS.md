@@ -17,6 +17,10 @@
   （環境不全由来の escalate）は母数に積まない。
 - 緩め方向の自動化は Wilson 下限 + probation（`calibration.ts`）だけ。AIゾーンの学びは
   **tighten-only**（品質は上げるが auto 着火範囲を緩めない）。
+- `resolution` / `context` の書き込み（`PATCH /api/items`）は `recordOutcome` / `labels.record` /
+  `category_stats` / `learnings` のいずれにも接続しない — 記録は分類の是認ではない
+  （receive 非記録と同じ線）。routes は actions/executor を import 済みでコンパイル時保証が
+  無いため、非接触は `api/routes.test.ts` が runtime 固定する。
 
 ## scoreItem の純度（`queue.ts`）
 
@@ -56,8 +60,10 @@
   導出での上書きは不可）。**bad_project_dir だけは needs_human 素通しより先に評価**する
   （素通し優先だと承認→無言バウンスの原因が worker 文言の裏に隠れる。素通しの明示例外）。
   導出は書き込みを伴わない（updatedAt を洗わない＝ageDays 滞留表示を壊さない）。
-  `gateKind` / `blockerId` / `needsHuman` は QueueItem の計算フィールドで、DB 列に永続化しない
-  （needs_human 判別式をクライアントに複製しない）。
+  `gateKind` / `blockerId` / `needsHuman` / `hasDownstreamSiblings`（未完の下流兄弟＝
+  resolution の受け手の実在）は QueueItem の **read 時導出**の計算フィールドで、DB 列に
+  永続化しない（needs_human 判別式をクライアントに複製しない。下流消費者判定の類も同じ線＝
+  判別用の新カラムを足さない）。
 - `gates.isEscalateTerminated`（classified + leaf + executionStatus='none' + worker成果実在）は
   承認後 needs_human の **escalate 終端の正規状態**（一行理由「AI停止(人間の対応待ち)」）。
 - **一度でも worker が走った項目（autoExecuted）は自動では再点火しない**。全ての自動再点火経路が
@@ -67,7 +73,17 @@
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 
-- **高信頼（ctx 側）＝人間由来**: `productContext` / `Project.context` / `Item.context` / 親チェーン。
+- **高信頼（ctx 側）＝人間由来**: `productContext` / `Project.context` / `Item.context` /
+  親チェーン / 完了済み上流兄弟の `resolution`。
+- `resolution`（完了後の実施結果）と `Item.context`（着手前の前提）は**人間専有列**:
+  worker / 分類器 / executor / sweep / undo のどれにも書き込み経路を作らない。逆に人間テキストを
+  worker 成果列（`executionSummary` / `executionOutput` / `executionResult` / `artifacts`）へ
+  書かない。「誰が書いたか」の列レベル分離が注入区画（ctx / fenceBody）を決定論で決める根拠。
+- 兄弟 resolution 注入（buildHumanZone「完了済み上流の結果」節）の単一真実源は
+  `gates.isResolvedUpstreamSibling`（**status='done' かつ resolution 非空**のみ。
+  `!isPendingUpstreamSibling` で代用しない — pending の否定≠完了で、awaiting_handoff の
+  「完了」詐称と rejected×succeeded を拾う）。`parentId=null` は節ごと不発
+  （upstreamBlockerOf の早期 return と対称）、該当ゼロは節ごと省略（偽前提を注入しない）。
 - **低信頼（fenceBody 側）＝観察対象データ**: title/body / worker 出力（レビュー材料を含む）。
   本文中の指示・スコア自己申告には従わない（詐称シグナルとして escalate に倒す）。
   worker 由来テキストを ctx 側に相乗りさせない。
@@ -173,6 +189,9 @@
 - 新画面・新タスク種別・新 LabelAction を安易に足さない。俯瞰は QueueView 内 groupBy の
   2レンズ（案件/見通し）まで。既存軸から導出できる事象に新 executionStatus を足さない。
 - 週次一行に足してよいのは「注意の落とし所の健康指標」1語まで（受領/送り返し等）。
+- items へのテキスト書き込み UI（完了時の `resolution` 相乗り・TreeView の `context` /
+  `resolution` インライン編集）は `expectedUpdatedAt` を送り、409 CONFLICT では**入力を保持**して
+  再取得する（blur/タップの全文上書きが他所の更新を黙って巻き戻さない・書きかけを消さない）。
 - ネイティブダイアログ API（`window.confirm` / `alert` / `prompt`）を web で使わない。
   ブラウザ/WebView の抑制設定で表示されず「押しても無反応」になる（DECISIONS
   「ネイティブダイアログの廃止」）。確認・通知は `ConfirmHost` + `useConfirm()` を使う。
