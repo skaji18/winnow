@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "../api.js";
 import { useLive } from "../live.js";
 import { DueBadge, PriorityBadge } from "./Bits.js";
@@ -156,6 +156,14 @@ function TreeNode({ item, all, onChange }: { item: Item; all: Item[]; onChange: 
 // 409 で塞ぐ)。409/失敗時: 非制御 textarea は TreeNode が item.id で key され remount
 // されないため、onChange 再取得後も DOM の入力値が残る=入力保持。通知は既存様式の
 // aria-live (ネイティブダイアログ禁止)。
+//
+// 楽観ロックの基準版は「表示中の本文が基づく版」= mount 時の {value, updatedAt} スナップショット
+// (base ref)。最新レンダの item.updatedAt を送ると、3秒ポーリングがロックトークンだけを最新化し、
+// 陳腐化した defaultValue との組で他所の編集を 409 なしで黙って巻き戻す (無編集 blur でも
+// v !== 最新 saved で発火する)。無変更ガードの比較対象も base.value — 最新 saved と比べると
+// 他所更新後の無入力 blur が逆発火する。item.updatedAt で key して remount する代替は採らない:
+// 無関係フィールドの更新 (update は常に updatedAt を洗う) でも書きかけ入力が消え、
+// INVARIANTS の「409/失敗時に入力を保持」を破る。
 function InlineItemText({
   item,
   field,
@@ -171,6 +179,14 @@ function InlineItemText({
 }) {
   const live = useLive();
   const saved = item[field] ?? "";
+  // mount 時スナップショット (defaultValue と同一レンダ由来)。保存成功時はサーバ応答で更新。
+  const base = useRef<{ value: string; updatedAt: number }>({
+    value: saved,
+    updatedAt: item.updatedAt,
+  });
+  // 409 後は「ユーザが通知を見て明示的に再編集する」まで再送しない (自動で基準版を洗うと
+  // 保護が一発しか効かず、再 blur が他所の編集を黙って上書きする状態に戻る)。
+  const conflicted = useRef(false);
   return (
     <details style={{ flex: 1, minWidth: 0 }}>
       <summary className="muted" style={{ fontSize: 11.5, cursor: "pointer" }}>
@@ -183,22 +199,38 @@ function InlineItemText({
         placeholder={placeholder}
         defaultValue={saved}
         aria-label={`${label}: ${item.title}`}
+        onInput={() => {
+          conflicted.current = false;
+        }}
         onBlur={async (e) => {
           const v = e.target.value;
           // 変更なしの blur は送らない: 無用な PATCH は updatedAt を洗い、滞留表示 (ageDays/
-          // staleDays) を偽リセットする。
-          if (v === saved) return;
+          // staleDays) を偽リセットする。比較は基準版 (表示本文の由来) と。
+          if (v === base.current.value) return;
+          if (conflicted.current) return; // 409 後・再編集前は再送しない
           try {
-            await api.updateItem(
+            const updated = await api.updateItem(
               item.id,
               field === "context" ? { context: v } : { resolution: v },
-              item.updatedAt,
+              base.current.updatedAt,
             );
+            base.current = { value: v, updatedAt: updated.updatedAt };
             await onChange();
           } catch (err) {
             const msg = (err as Error).message;
             if (msg.startsWith("CONFLICT")) {
-              live("他所で更新されました。最新に更新します。入力は欄に残っています。");
+              // 409 応答の current で基準版を最新化する (再編集後の保存を可能にする)。
+              // 解析できなければ基準版は据え置き = 次の blur も 409 (安全側)。
+              try {
+                const cur = JSON.parse(msg.slice("CONFLICT ".length)).current as Item;
+                base.current = { value: cur[field] ?? "", updatedAt: cur.updatedAt };
+              } catch {
+                /* 据え置き */
+              }
+              conflicted.current = true;
+              live(
+                "他所で更新されました。最新に更新します。入力は欄に残っています。上書き保存するには欄を編集し直してください。",
+              );
               await onChange();
             } else {
               live(`保存に失敗しました: ${msg}`);

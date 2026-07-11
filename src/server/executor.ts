@@ -180,6 +180,30 @@ export async function requestExecution(
 }
 
 /**
+ * 終端保護 (人間の処分が勝つ) の単一判定: worker 応答を item に反映する全経路
+ * (applyExecuteResult / runExecution の失敗系 / sweepLateExecutions / reconcileOnBoot) が共有する。
+ * status done/rejected は人間の処分 — worker 応答/失敗で status・resolution・成果列を上書きしない
+ * (docs/INVARIANTS.md「人間の処分（rejected / done）を worker 応答の item 反映が上書きしない」)。
+ */
+function isHumanFinalized(item: Item): boolean {
+  return item.status === "done" || item.status === "rejected";
+}
+
+/**
+ * 人間処分済み (done/rejected) の item に対する worker 応答の決着: status/resolution/成果列には
+ * 一切書かず、executionStatus だけを running から timed_out へ降ろす。running を残すと
+ * inFlightCount の幽霊 in-flight が点火予算 (maxWorkers)・自己更新の実行中ガード・/healthz を
+ * 恒久的に汚し、requestExecution の二重着火ガードで再実行も塞がる。timed_out なら
+ * done/rejected を解いた瞬間に sweepLateExecutions が sentinel から従来どおり回収できる
+ * (=「done を解けば回収される」が全経路で成立する)。running 以外は既に決着済みなので触らない。
+ */
+function settleHumanFinalized(item: Item): Item | null {
+  if (item.executionStatus === "running")
+    return items.update(item.id, { executionStatus: "timed_out" });
+  return item;
+}
+
+/**
  * ExecuteOut を解釈して item を更新し、必要ならレビュータスクを戻す共通ヘルパ。
  * runExecution の成功パスと起動時 reconcile の done sentinel 取り込みパスの両方から
  * 呼ぶ(挙動一致・重複排除)。Batch4 はこのヘルパ内に新カラム(executionSummary/
@@ -187,14 +211,23 @@ export async function requestExecution(
  *
  * blocked語義整理: 失敗(out.status==='failed')は status を blocked にせず in_progress に
  * 保ち、再浮上は executionStatus==='failed' で表す(queue の visible が拾う)。
+ *
+ * export はテスト用 (終端保護の固定)。本番の呼び出し元は runExecution / tryTakeInSentinel のみ。
  */
-function applyExecuteResult(
+export function applyExecuteResult(
   itemId: string,
   out: Partial<ExecuteOut>,
   opts: { externalApproved?: boolean; approvedRetry?: boolean } = {},
 ): Item | null {
   const item = items.get(itemId);
   if (!item) return null;
+  // 終端保護: 実行中 (最長 executeTimeoutMs) に人間が done+resolution / rejected にした項目へ、
+  // worker の正常完了応答が status/成果列を全面上書きすると「結果は書いてあるのに承認待ち
+  // (review×awaiting_handoff)」の矛盾レコードが再起動なしで生まれ、下流兄弟への resolution 注入
+  // (isResolvedUpstreamSibling は status==='done' 必須) も黙って消える。sweep/reconcile と同じ
+  // 線で item への反映をスキップし、実行軸のみ決着させる (レビュー leaf 生成・extractLearning も
+  // 発火させない。worker 生出力は jobs.output に残る=成果は失われない)。
+  if (isHumanFinalized(item)) return settleHumanFinalized(item);
   // worker JSON は無検証の Partial (parseJson は形を強制しない)。needs_human で summary/output が
   // 両方欠落すると hasWorkerOutcome が立たず、承認再走の注入・escalate 終端・UI の needs_human
   // 判別が全て不発になり「ゲートは解消済み」の逆信号まで出る。最低限の停止理由を合成して
@@ -436,6 +469,12 @@ export async function runExecution(
   });
 
   if (!res.ok) {
+    // 終端保護 (人間の処分が勝つ): 実行中に人間が done/rejected にした項目は、失敗系でも
+    // status を in_progress へ巻き戻さず、実行軸のみ timed_out へ降ろして決着する
+    // (applyExecuteResult 先頭のガードと同じ線。undo で done/rejected を解けば
+    // sweepLateExecutions の timed_out 経路 = sentinel 回収/猶予超過 failed に自然合流する)。
+    const cur = items.get(itemId);
+    if (cur && isHumanFinalized(cur)) return settleHumanFinalized(cur);
     // blocked語義整理: 実行失敗は status を blocked にせず in_progress に保つ。
     // 可視性は queue の executionStatus フィルタ(failed/timed_out)が担保する。
     //
@@ -559,7 +598,7 @@ export function sweepLateExecutions(): { recovered: number; agedOut: number } {
     // runExecution が既に failed で閉じている=決着済み。late sentinel が残っても取り込まない
     // (undo/事後編集で status が rejected/done を離れれば timed_out として再び対象になり、
     // そこで回収される=成果は失われない)。
-    if (it.status === "rejected" || it.status === "done") continue;
+    if (isHumanFinalized(it)) continue;
     const job = jobs.latestExecuteForItem(it.id);
     if (job && tryTakeInSentinel(job)) {
       recovered++;
@@ -599,16 +638,16 @@ export function reconcileOnBoot(): { recovered: number; failedOver: number } {
   const stranded = jobs.runningExecuteJobs();
   for (const job of stranded) {
     const item = items.get(job.itemId);
-    // item が無い / 既に running 以外で決着済み / 人間が処分済み(却下/完了) なら job だけ
+    // item が無い / 既に running 以外で決着済み / 人間が処分済み(却下/完了) なら job を
     // 決着させて skip (rejected/done の上書き禁止は sweepLateExecutions と対称。done は
     // 人間が手で完了+resolution を書いた項目を遅着応答で上書きしない終端保護。sentinel は
     // 消さずに残す=取り込まないだけで、成果ファイル自体は失われない)。
-    if (
-      !item ||
-      item.executionStatus !== "running" ||
-      item.status === "rejected" ||
-      item.status === "done"
-    ) {
+    // 人間処分済み × executionStatus='running' は、status/resolution/成果列に触れず実行軸だけを
+    // timed_out へ降ろす (settleHumanFinalized) — running を残すと inFlightCount の幽霊 in-flight
+    // が点火予算/自己更新/healthz を恒久的に汚し、done を解いても sweep (timed_out 限定走査) に
+    // 回収経路が無い。timed_out なら解いた瞬間に sentinel から従来どおり回収される。
+    if (!item || item.executionStatus !== "running" || isHumanFinalized(item)) {
+      if (item && item.executionStatus === "running") settleHumanFinalized(item);
       jobs.update(job.id, { status: "failed", finishedAt: Date.now() });
       continue;
     }

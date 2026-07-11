@@ -32,8 +32,10 @@
 ## キュー可視性の原則（`queue.ts` visible）
 
 - 評価順: cancelled 除外 → **rejected 畳み（人間の処分が勝つ）** → awaiting_handoff →
-  autoDone 取消ハンドル（`receivedAt == null` のみ）→ failed/timed_out 再浮上 →
-  **アーカイブ案件畳み** → blocked 再浮上 → done 畳み → proposed → 着手中レーン →
+  autoDone 取消ハンドル（`receivedAt == null` のみ）→ **done 畳み（人間の処分が勝つ。
+  autoDone 取消ハンドルの後＝§4-4 の取消の手を消さない・failed/timed_out 再浮上の前＝
+  人間が完了済みにしたタスクを再浮上カード/再実行導線にしない）** → failed/timed_out 再浮上 →
+  **アーカイブ案件畳み** → blocked 再浮上 → proposed → 着手中レーン →
   escalate/human・監査混入。
 - 人間が一度も見ていない attention 要求を**黙って引っ込める緩め**（defer-until・時限自動消去）は
   導入しない。前面固定を解くのはスコア逓減（handoffC）まで。**畳むのは人間の明示操作**
@@ -108,8 +110,12 @@
   削除しない（no-op で返す）。
 - 逆適用先が状態依存で分かれる場合は `label.note` の**決定論マーカー**で分岐する
   （send_back の着手前/後、receive の3種）。推論はしない。
-- 人間の処分（rejected / done）を sweep / reconcile が上書きしない（job は決着させ、item への
-  反映だけスキップ。timed_out 経由の done を解けば late sentinel から従来どおり回収される）。
+- 人間の処分（rejected / done）を **worker 応答の item 反映の全経路**（applyExecuteResult /
+  runExecution の失敗系 / sweep / reconcile）が上書きしない（job は決着させ、status/resolution/
+  成果列への反映をスキップ。単一判定は executor の `isHumanFinalized` / `settleHumanFinalized`）。
+  人間処分済み × `executionStatus='running'` に出会った経路は**実行軸のみ timed_out へ降格**する
+  （running 残留＝幽霊 in-flight が点火予算・自己更新ガード・/healthz を恒久汚染し、再着火も
+  塞がる）。done/rejected を解けば timed_out として late sentinel から従来どおり回収される。
 - `cancelled` は「実行済みの取り消し」専用。未実行 proposed の取り消しは reject 経路（undo 可能）。
 - winnow は巻き戻し・採用（マージ/送信/デプロイ/削除）を**能動実行しない**。rollbackPlan は提示のみ。
   PR作成＝可逆な提示 / マージ＝不可逆な採用、の非対称を堅持。
@@ -122,6 +128,10 @@
   queue＝read 時の表示、の双方が import する）。proposed に倒す新ゲートを足すときは
   gates.ts に述語・GateKind・文言を**同時登録**する（登録漏れは read 時導出が
   「解消済み」を誤表示する）。
+- cross_repo ガードの「完了側」除外（status done/rejected・succeeded/cancelled/awaiting_handoff）
+  は**物理的に走っていない兄弟に限る** — `executionStatus` running/queued は status に関わらず
+  pending 側（実走中の worker との横断同時変更を防ぐ）。timed_out は in-flight 例外に含めない
+  （done/rejected×timed_out は sweep が skip して永久に解けず、永久ブロックになる）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
   承認は任意の人間補足（instruction）を運べるが、承認の意味論は変えない: 外部送信の解禁は
   settings オプトインのみ・escalate 終端（approvedRetry）の判定に非関与・approve ラベルにも積まない。
@@ -192,6 +202,11 @@
 - items へのテキスト書き込み UI（完了時の `resolution` 相乗り・TreeView の `context` /
   `resolution` インライン編集）は `expectedUpdatedAt` を送り、409 CONFLICT では**入力を保持**して
   再取得する（blur/タップの全文上書きが他所の更新を黙って巻き戻さない・書きかけを消さない）。
+  非制御 textarea の `expectedUpdatedAt` は**表示中の本文が基づく基準版**（mount 時に ref へ
+  固定した {value, updatedAt} スナップショット。保存成功時のみサーバ応答で更新）を送る —
+  最新ポーリングの `item.updatedAt` を送るとロックトークンだけが最新化され、陳腐化した
+  defaultValue の全文上書きが 409 を素通りする。無変更ガードの比較も基準版と行い、409 後は
+  ユーザの明示的な再編集（input）まで再送しない（保護を一発で剥がさない）。
 - ネイティブダイアログ API（`window.confirm` / `alert` / `prompt`）を web で使わない。
   ブラウザ/WebView の抑制設定で表示されず「押しても無反応」になる（DECISIONS
   「ネイティブダイアログの廃止」）。確認・通知は `ConfirmHost` + `useConfirm()` を使う。

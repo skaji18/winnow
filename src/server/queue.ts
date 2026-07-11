@@ -226,6 +226,14 @@ export function queue(): QueueItem[] {
     //    取消ハンドル自体はバックログ/ツリーから引き続き届く(可視の場所が変わるだけ)。
     if (it.autoExecuted && it.executionStatus === "succeeded" && it.receivedAt == null)
       return true;
+    // 2.5) 人間の処分(完了)が勝つ: done は failed/timed_out の再浮上より先に畳む (1.2 の
+    //      rejected と対称)。timed_out を人間が手で done+resolution にした項目は sweep が
+    //      done を skip して executionStatus が残るため、ここで畳まないと完了済みタスクが
+    //      「止まった項目の再浮上」カード(再実行ボタンつき)として永久に出続ける。位置が重要:
+    //      2) の autoDone 取消ハンドルは status='done' で成立する (applyExecuteResult は
+    //      成功時 done を書く) ので、その後に置く — 先に畳むと §4-4 の取消ハンドルが消える。
+    //      undo/事後編集で done を解けば failed/timed_out として従来どおり再浮上する。
+    if (it.status === "done") return false;
     // 3) 【最優先】止まった項目の再浮上: 実行失敗・タイムアウト超過・人手保留は必ず出す
     //    (cancelled は 1) で除外済み)。timed_out は失敗確定ではないが、人間が待たず再実行/却下
     //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
@@ -243,8 +251,7 @@ export function queue(): QueueItem[] {
     if (inArchivedProject(it) && !isNeedsHumanProposed(it) && !isEscalateTerminated(it))
       return false;
     if (it.status === "blocked") return true;
-    // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
-    if (it.status === "done") return false;
+    // 4) done は 2.5) で畳み済み (rejected は 1.2)。ここに done は到達しない)。
     // 5) 提案待ち(不可逆実行のワンタップ承認)は必ず出す。
     if (it.executionStatus === "proposed") return true;
     // 6) 【寄生表示】人手で着手中(doIt)はキュー内『着手中』レーンに薄く出す。判別子は

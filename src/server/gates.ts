@@ -94,8 +94,14 @@ function isCrossRepoPendingSibling(item: Item, o: Item): boolean {
     // status の done/rejected も「完了側」: 人間が引き取って完了 (doIt→done。disposition=auto・
     // executionStatus=none のまま) / 却下した auto 項目が executionStatus だけ見る旧判定に
     // マッチし続け、同一案件・別 projectDir の leaf を永久に塞いでいた穴を閉じる。
-    o.status !== "done" &&
-    o.status !== "rejected" &&
+    // ただし物理的に走行中 (running/queued) の兄弟は status に関わらず pending 側に残す —
+    // 実行中に人間が board で done/rejected にしても worker は他 repo を現に変更し続けており、
+    // ここで完了側に数えると横断同時変更の暴発防止が貫通する。timed_out は含めない
+    // (done/rejected×timed_out は sweep が skip するため永久に解けず、永久ブロック穴が再発する。
+    //  走行追跡は sentinel 回収に委ねる現行設計と整合)。
+    ((o.status !== "done" && o.status !== "rejected") ||
+      o.executionStatus === "running" ||
+      o.executionStatus === "queued") &&
     o.executionStatus !== "succeeded" &&
     o.executionStatus !== "cancelled" &&
     o.executionStatus !== "awaiting_handoff" &&
@@ -136,8 +142,10 @@ export function isPendingUpstreamSibling(item: Item, o: Item): boolean {
 
 /**
  * 「resolution を下流へ注入すべき完了済み上流兄弟」判定 (context.buildHumanZone の
- * 「完了済み上流の結果」節と queue の read 時導出が共有する単一の真実源 —
- * DECISIONS.md「人間実施の結果の下流受け渡し」)。isPendingUpstreamSibling と対をなすが
+ * 「完了済み上流の結果」節が使う注入対象判定の単一の真実源 —
+ * DECISIONS.md「人間実施の結果の下流受け渡し」)。queue の hasDownstreamSiblings は
+ * 「受け手が実在するか」の別式 (未完×下流) であり共有しない (queue.ts 側のコメントと対)。
+ * isPendingUpstreamSibling と対をなすが
  * 否定の流用 (!isPending) はしない: pending の否定≠完了 — awaiting_handoff は人間未受領で
  * 取消されうる「[完了]」詐称になり、reject が executionStatus を残す仕様上
  * rejected×succeeded も拾ってしまう。**status='done' のみ**を完了と数えることで却下済みは

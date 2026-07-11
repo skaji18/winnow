@@ -457,6 +457,30 @@ test("deriveProposedGate: cross_repo — 人間が完了/却下した兄弟 (sta
   assert.equal(g.kind, "clear");
 });
 
+test("deriveProposedGate: cross_repo — done/rejected でも実走中 (running/queued) の兄弟はガードを引く", () => {
+  // 実行中に人間が board の status セレクトで done/rejected にしても worker は他 repo を
+  // 現に変更し続けている — status だけで完了側に数えると横断同時変更の暴発防止が貫通する。
+  // 物理的に走っていない (executionStatus=none) done/rejected は従来どおり除外 (上のテスト)。
+  const mk = (id: string, over: Partial<Item>) =>
+    makeItem({ id, projectId: "prj5", projectDir: "/somewhere/else", disposition: "auto", ...over });
+  const it = makeItem({ executionStatus: "proposed", projectId: "prj5", projectDir: realDir });
+
+  const doneRunning = mk("x-done-run", { status: "done", executionStatus: "running" });
+  const g1 = mustGate(deriveProposedGate(it, buildGateSnapshot([doneRunning, it]), { pauseAuto: false }));
+  assert.equal(g1.kind, "cross_repo");
+  assert.equal(g1.blockerId, "x-done-run");
+
+  const rejQueued = mk("x-rej-q", { status: "rejected", executionStatus: "queued" });
+  const g2 = mustGate(deriveProposedGate(it, buildGateSnapshot([rejQueued, it]), { pauseAuto: false }));
+  assert.equal(g2.kind, "cross_repo");
+
+  // timed_out は in-flight 例外に含めない: done/rejected×timed_out は sweep が skip するため
+  // 永久に解けず、pending 側に残すと完了済み兄弟が別 repo leaf を永久に塞ぐ穴が再発する。
+  const doneTimedOut = mk("x-done-to", { status: "done", executionStatus: "timed_out" });
+  const g3 = mustGate(deriveProposedGate(it, buildGateSnapshot([doneTimedOut, it]), { pauseAuto: false }));
+  assert.equal(g3.kind, "clear");
+});
+
 test("deriveProposedGate: pause_auto — 一時停止×disposition auto のみで発火(他ゲート無し)", () => {
   const auto = makeItem({ executionStatus: "proposed", disposition: "auto" });
   const g = mustGate(deriveProposedGate(auto, buildGateSnapshot([auto]), { pauseAuto: true }));
