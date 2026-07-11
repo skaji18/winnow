@@ -71,6 +71,7 @@ function mapItem(r: Row): Item {
     projectId: (r.projectId as string) ?? null,
     sprintId: (r.sprintId as string) ?? null,
     context: (r.context as string) ?? null,
+    resolution: (r.resolution as string) ?? null,
     dueDate: r.dueDate === null || r.dueDate === undefined ? null : (r.dueDate as number),
     priority: (r.priority as Item["priority"]) ?? "normal",
     createdAt: r.createdAt as number,
@@ -170,14 +171,15 @@ export const items = {
       projectId: input.projectId ?? null,
       sprintId: input.sprintId ?? null,
       context: input.context ?? null,
+      resolution: input.resolution ?? null,
       dueDate: input.dueDate ?? null,
       priority: input.priority ?? "normal",
       createdAt: ts,
       updatedAt: ts,
     };
     db.prepare(
-      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,receivedAt,reviewOfId,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,context,dueDate,priority,createdAt,updatedAt)
-       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@receivedAt,@reviewOfId,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@context,@dueDate,@priority,@createdAt,@updatedAt)`,
+      `INSERT INTO items (id,title,body,kind,rung,parentId,orderIndex,status,disposition,confidence,reason,stakes,reversibility,category,rawDisposition,rawConfidence,envEscalated,process,uncertaintyResolved,autoExecuted,humanOverrode,auditSampled,executionStatus,executionResult,receivedAt,reviewOfId,decomposeStatus,decomposeOptions,executionSummary,executionOutput,rollbackPlan,declaredReversible,artifacts,sourceUrl,externalKey,domain,projectDir,projectId,sprintId,context,resolution,dueDate,priority,createdAt,updatedAt)
+       VALUES (@id,@title,@body,@kind,@rung,@parentId,@orderIndex,@status,@disposition,@confidence,@reason,@stakes,@reversibility,@category,@rawDisposition,@rawConfidence,@envEscalated,@process,@uncertaintyResolved,@autoExecuted,@humanOverrode,@auditSampled,@executionStatus,@executionResult,@receivedAt,@reviewOfId,@decomposeStatus,@decomposeOptions,@executionSummary,@executionOutput,@rollbackPlan,@declaredReversible,@artifacts,@sourceUrl,@externalKey,@domain,@projectDir,@projectId,@sprintId,@context,@resolution,@dueDate,@priority,@createdAt,@updatedAt)`,
     ).run({
       ...item,
       envEscalated: item.envEscalated ? 1 : 0,
@@ -196,7 +198,7 @@ export const items = {
     if (!current) return null;
     const merged = { ...current, ...patch, id, updatedAt: now() };
     db.prepare(
-      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,receivedAt=@receivedAt,reviewOfId=@reviewOfId,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,context=@context,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
+      `UPDATE items SET title=@title,body=@body,kind=@kind,rung=@rung,parentId=@parentId,orderIndex=@orderIndex,status=@status,disposition=@disposition,confidence=@confidence,reason=@reason,stakes=@stakes,reversibility=@reversibility,category=@category,rawDisposition=@rawDisposition,rawConfidence=@rawConfidence,envEscalated=@envEscalated,process=@process,uncertaintyResolved=@uncertaintyResolved,autoExecuted=@autoExecuted,humanOverrode=@humanOverrode,auditSampled=@auditSampled,executionStatus=@executionStatus,executionResult=@executionResult,receivedAt=@receivedAt,reviewOfId=@reviewOfId,decomposeStatus=@decomposeStatus,decomposeOptions=@decomposeOptions,executionSummary=@executionSummary,executionOutput=@executionOutput,rollbackPlan=@rollbackPlan,declaredReversible=@declaredReversible,artifacts=@artifacts,sourceUrl=@sourceUrl,externalKey=@externalKey,domain=@domain,projectDir=@projectDir,projectId=@projectId,sprintId=@sprintId,context=@context,resolution=@resolution,dueDate=@dueDate,priority=@priority,updatedAt=@updatedAt WHERE id=@id`,
     ).run({
       ...merged,
       envEscalated: merged.envEscalated ? 1 : 0,

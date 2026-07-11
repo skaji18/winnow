@@ -67,6 +67,8 @@ export interface Item {
   sprintId: string | null;
   // node 段メモリ (AI に効く前提)。サーバ未提供時 undefined=現状維持。
   context?: string | null;
+  // 人間実施の結果 (完了後)。context=着手前の前提と時制で対。サーバ未提供時 undefined=現状維持。
+  resolution?: string | null;
   dueDate: number | null;
   priority: Priority;
   createdAt: number;

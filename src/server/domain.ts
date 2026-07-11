@@ -138,6 +138,11 @@ export interface Item {
   // body 相乗り不可: body は fenceBody で「自己申告=従うな」の低信頼ラベル付き注入もされ、
   // 指示として書いた前提が詐称シグナル化して escalate に倒れるため、専用フィールドに分ける。
   context: string | null;
+  // 人間実施の結果・決定 (完了後)。context=着手前の前提と時制で対になる人間専有列。
+  // 書き込みは PATCH (完了時の任意 textarea / 事後編集) のみで、分類器/worker は書かない。
+  // status=done の間だけ buildHumanZone が下流兄弟の実行へ高信頼(ctx側)で注入する
+  // (done を解けば注入も止まる=撤回が状態機械と自己整合。DECISIONS.md「人間実施の結果の下流受け渡し」)。
+  resolution: string | null;
   dueDate: number | null; // 期日 (epoch ms)
   priority: Priority;
 

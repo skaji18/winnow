@@ -13,7 +13,7 @@ db.pragma("foreign_keys = ON");
 // CODE_SCHEMA_VERSION = コードが期待する版。DB の user_version がこれより小さければ
 // 版数順に MIGRATIONS の up を適用、大きければ (ダウングレード) 起動停止。
 // ---------------------------------------------------------------------------
-const CODE_SCHEMA_VERSION = 4;
+const CODE_SCHEMA_VERSION = 5;
 /** export/import ペイロードのメタに使う版数 (DDLには使わない)。 */
 export const SCHEMA_VERSION = CODE_SCHEMA_VERSION;
 
@@ -434,11 +434,30 @@ function migrateV3toV4(d: Database.Database): void {
   d.exec("CREATE INDEX IF NOT EXISTS idx_items_reviewof ON items(reviewOfId)");
 }
 
+/**
+ * 版4→版5 の up (human handoff)。
+ * - items.resolution: 人間実施の結果・決定 (nullable)。context=着手前の前提に対する
+ *   完了後の結果 (時制で分ける)。人間専有列 — 分類器/worker に書き込み経路が無いことで
+ *   注入の信頼境界 (高信頼 ctx 側) を列レベルで守る
+ *   (DECISIONS.md「人間実施の結果の下流受け渡し」)。nullable=撤退は無視するだけ。
+ * 列追加のみで FK/PK 再構築は無い。新規DBも版0→5 を順に踏むためここで冪等に足りる。
+ */
+function migrateV4toV5(d: Database.Database): void {
+  function ensureColumn(table: string, column: string, ddl: string): void {
+    const has = (
+      d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    ).some((c) => c.name === column);
+    if (!has) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+  ensureColumn("items", "resolution", "resolution TEXT");
+}
+
 const MIGRATIONS: { v: number; up: (d: Database.Database) => void }[] = [
   { v: 1, up: migrateV0toV1 },
   { v: 2, up: migrateV1toV2 },
   { v: 3, up: migrateV2toV3 },
   { v: 4, up: migrateV3toV4 },
+  { v: 5, up: migrateV4toV5 },
 ];
 
 // 版数順に適用。foreign_keys=OFF を要する table-rebuild を含むため db.transaction を使わず
