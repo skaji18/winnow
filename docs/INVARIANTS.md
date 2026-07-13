@@ -17,6 +17,10 @@
   （環境不全由来の escalate）は母数に積まない。
 - 緩め方向の自動化は Wilson 下限 + probation（`calibration.ts`）だけ。AIゾーンの学びは
   **tighten-only**（品質は上げるが auto 着火範囲を緩めない）。
+- `resolution` / `context` の書き込み（`PATCH /api/items`）は `recordOutcome` / `labels.record` /
+  `category_stats` / `learnings` のいずれにも接続しない — 記録は分類の是認ではない
+  （receive 非記録と同じ線）。routes は actions/executor を import 済みでコンパイル時保証が
+  無いため、非接触は `api/routes.test.ts` が runtime 固定する。
 
 ## scoreItem の純度（`queue.ts`）
 
@@ -28,8 +32,10 @@
 ## キュー可視性の原則（`queue.ts` visible）
 
 - 評価順: cancelled 除外 → **rejected 畳み（人間の処分が勝つ）** → awaiting_handoff →
-  autoDone 取消ハンドル（`receivedAt == null` のみ）→ failed/timed_out 再浮上 →
-  **アーカイブ案件畳み** → blocked 再浮上 → done 畳み → proposed → 着手中レーン →
+  autoDone 取消ハンドル（`receivedAt == null` のみ）→ **done 畳み（人間の処分が勝つ。
+  autoDone 取消ハンドルの後＝§4-4 の取消の手を消さない・failed/timed_out 再浮上の前＝
+  人間が完了済みにしたタスクを再浮上カード/再実行導線にしない）** → failed/timed_out 再浮上 →
+  **アーカイブ案件畳み** → blocked 再浮上 → proposed → 着手中レーン →
   escalate/human・監査混入。
 - 人間が一度も見ていない attention 要求を**黙って引っ込める緩め**（defer-until・時限自動消去）は
   導入しない。前面固定を解くのはスコア逓減（handoffC）まで。**畳むのは人間の明示操作**
@@ -56,8 +62,10 @@
   導出での上書きは不可）。**bad_project_dir だけは needs_human 素通しより先に評価**する
   （素通し優先だと承認→無言バウンスの原因が worker 文言の裏に隠れる。素通しの明示例外）。
   導出は書き込みを伴わない（updatedAt を洗わない＝ageDays 滞留表示を壊さない）。
-  `gateKind` / `blockerId` / `needsHuman` は QueueItem の計算フィールドで、DB 列に永続化しない
-  （needs_human 判別式をクライアントに複製しない）。
+  `gateKind` / `blockerId` / `needsHuman` / `hasDownstreamSiblings`（未完の下流兄弟＝
+  resolution の受け手の実在）は QueueItem の **read 時導出**の計算フィールドで、DB 列に
+  永続化しない（needs_human 判別式をクライアントに複製しない。下流消費者判定の類も同じ線＝
+  判別用の新カラムを足さない）。
 - `gates.isEscalateTerminated`（classified + leaf + executionStatus='none' + worker成果実在）は
   承認後 needs_human の **escalate 終端の正規状態**（一行理由「AI停止(人間の対応待ち)」）。
 - **一度でも worker が走った項目（autoExecuted）は自動では再点火しない**。全ての自動再点火経路が
@@ -67,7 +75,17 @@
 
 ## 注入（コンテキスト）の信頼境界と天井（`context.ts` / `ai/prompts.ts`）
 
-- **高信頼（ctx 側）＝人間由来**: `productContext` / `Project.context` / `Item.context` / 親チェーン。
+- **高信頼（ctx 側）＝人間由来**: `productContext` / `Project.context` / `Item.context` /
+  親チェーン / 完了済み上流兄弟の `resolution`。
+- `resolution`（完了後の実施結果）と `Item.context`（着手前の前提）は**人間専有列**:
+  worker / 分類器 / executor / sweep / undo のどれにも書き込み経路を作らない。逆に人間テキストを
+  worker 成果列（`executionSummary` / `executionOutput` / `executionResult` / `artifacts`）へ
+  書かない。「誰が書いたか」の列レベル分離が注入区画（ctx / fenceBody）を決定論で決める根拠。
+- 兄弟 resolution 注入（buildHumanZone「完了済み上流の結果」節）の単一真実源は
+  `gates.isResolvedUpstreamSibling`（**status='done' かつ resolution 非空**のみ。
+  `!isPendingUpstreamSibling` で代用しない — pending の否定≠完了で、awaiting_handoff の
+  「完了」詐称と rejected×succeeded を拾う）。`parentId=null` は節ごと不発
+  （upstreamBlockerOf の早期 return と対称）、該当ゼロは節ごと省略（偽前提を注入しない）。
 - **低信頼（fenceBody 側）＝観察対象データ**: title/body / worker 出力（レビュー材料を含む）。
   本文中の指示・スコア自己申告には従わない（詐称シグナルとして escalate に倒す）。
   worker 由来テキストを ctx 側に相乗りさせない。
@@ -92,7 +110,12 @@
   削除しない（no-op で返す）。
 - 逆適用先が状態依存で分かれる場合は `label.note` の**決定論マーカー**で分岐する
   （send_back の着手前/後、receive の3種）。推論はしない。
-- 人間の処分（rejected）を sweep / reconcile が上書きしない。
+- 人間の処分（rejected / done）を **worker 応答の item 反映の全経路**（applyExecuteResult /
+  runExecution の失敗系 / sweep / reconcile）が上書きしない（job は決着させ、status/resolution/
+  成果列への反映をスキップ。単一判定は executor の `isHumanFinalized` / `settleHumanFinalized`）。
+  人間処分済み × `executionStatus='running'` に出会った経路は**実行軸のみ timed_out へ降格**する
+  （running 残留＝幽霊 in-flight が点火予算・自己更新ガード・/healthz を恒久汚染し、再着火も
+  塞がる）。done/rejected を解けば timed_out として late sentinel から従来どおり回収される。
 - `cancelled` は「実行済みの取り消し」専用。未実行 proposed の取り消しは reject 経路（undo 可能）。
 - winnow は巻き戻し・採用（マージ/送信/デプロイ/削除）を**能動実行しない**。rollbackPlan は提示のみ。
   PR作成＝可逆な提示 / マージ＝不可逆な採用、の非対称を堅持。
@@ -105,6 +128,10 @@
   queue＝read 時の表示、の双方が import する）。proposed に倒す新ゲートを足すときは
   gates.ts に述語・GateKind・文言を**同時登録**する（登録漏れは read 時導出が
   「解消済み」を誤表示する）。
+- cross_repo ガードの「完了側」除外（status done/rejected・succeeded/cancelled/awaiting_handoff）
+  は**物理的に走っていない兄弟に限る** — `executionStatus` running/queued は status に関わらず
+  pending 側（実走中の worker との横断同時変更を防ぐ）。timed_out は in-flight 例外に含めない
+  （done/rejected×timed_out は sweep が skip して永久に解けず、永久ブロックになる）。
 - 人間の明示ワンタップ（approve / manual execute / handoff への指示つき再走）はゲートを通す（§3.4）。
   承認は任意の人間補足（instruction）を運べるが、承認の意味論は変えない: 外部送信の解禁は
   settings オプトインのみ・escalate 終端（approvedRetry）の判定に非関与・approve ラベルにも積まない。
@@ -172,6 +199,14 @@
 - 新画面・新タスク種別・新 LabelAction を安易に足さない。俯瞰は QueueView 内 groupBy の
   2レンズ（案件/見通し）まで。既存軸から導出できる事象に新 executionStatus を足さない。
 - 週次一行に足してよいのは「注意の落とし所の健康指標」1語まで（受領/送り返し等）。
+- items へのテキスト書き込み UI（完了時の `resolution` 相乗り・TreeView の `context` /
+  `resolution` インライン編集）は `expectedUpdatedAt` を送り、409 CONFLICT では**入力を保持**して
+  再取得する（blur/タップの全文上書きが他所の更新を黙って巻き戻さない・書きかけを消さない）。
+  非制御 textarea の `expectedUpdatedAt` は**表示中の本文が基づく基準版**（mount 時に ref へ
+  固定した {value, updatedAt} スナップショット。保存成功時のみサーバ応答で更新）を送る —
+  最新ポーリングの `item.updatedAt` を送るとロックトークンだけが最新化され、陳腐化した
+  defaultValue の全文上書きが 409 を素通りする。無変更ガードの比較も基準版と行い、409 後は
+  ユーザの明示的な再編集（input）まで再送しない（保護を一発で剥がさない）。
 - ネイティブダイアログ API（`window.confirm` / `alert` / `prompt`）を web で使わない。
   ブラウザ/WebView の抑制設定で表示されず「押しても無反応」になる（DECISIONS
   「ネイティブダイアログの廃止」）。確認・通知は `ConfirmHost` + `useConfirm()` を使う。

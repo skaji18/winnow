@@ -21,6 +21,7 @@ import {
   hasWorkerOutcome,
   isNeedsHumanProposed,
   isEscalateTerminated,
+  isResolvedUpstreamSibling,
   buildGateSnapshot,
   deriveProposedGate,
   type GateDerivation,
@@ -80,6 +81,7 @@ function makeItem(over: Partial<Item> = {}): Item {
     projectId: null,
     sprintId: null,
     context: null,
+    resolution: null,
     dueDate: null,
     priority: "normal",
     createdAt: 0,
@@ -216,6 +218,54 @@ test("isEscalateTerminated: classified × leaf × executionStatus none × worker
     isEscalateTerminated(makeItem({ ...base, autoExecuted: false })), // 成果非実在
     false,
   );
+});
+
+// --- isResolvedUpstreamSibling: resolution 注入対象の判定 ---------------------
+
+test("isResolvedUpstreamSibling: 同一親 × 上流(orderIndex 前) × done × resolution 非空で真", () => {
+  const it = makeItem({ parentId: "p-res", orderIndex: 5 });
+  const done = makeItem({ parentId: "p-res", orderIndex: 1, status: "done", resolution: "方式Aで確定" });
+  assert.equal(isResolvedUpstreamSibling(it, done), true);
+});
+
+test("isResolvedUpstreamSibling: status='done' のみ完了扱い — pending の否定を流用しない", () => {
+  const it = makeItem({ parentId: "p-res2", orderIndex: 5 });
+  const base = { parentId: "p-res2", orderIndex: 1, resolution: "決定メモ" } as const;
+  // awaiting_handoff は実行成功済みでも人間未受領 (取消されうる) → 「完了の詐称」をしない。
+  assert.equal(
+    isResolvedUpstreamSibling(
+      it,
+      makeItem({ ...base, status: "review", executionStatus: "awaiting_handoff" }),
+    ),
+    false,
+  );
+  // reject は executionStatus を残す仕様 → rejected×succeeded も拾わない。
+  assert.equal(
+    isResolvedUpstreamSibling(it, makeItem({ ...base, status: "rejected", executionStatus: "succeeded" })),
+    false,
+  );
+  // done を解いて in_progress に戻せば注入も止まる (撤回の自己整合。resolution は残ってよい)。
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...base, status: "in_progress" })), false);
+});
+
+test("isResolvedUpstreamSibling: 別親・自分自身・レビュー leaf・下流・resolution 空白は偽", () => {
+  const it = makeItem({ id: "self-res", parentId: "p-res3", orderIndex: 5 });
+  const ok = { parentId: "p-res3", orderIndex: 1, status: "done", resolution: "決定" } as const;
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, parentId: "other" })), false);
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, id: "self-res" })), false);
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, reviewOfId: "x" })), false);
+  // 下流 (orderIndex 大) と同順は上流ではない。
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, orderIndex: 6 })), false);
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, orderIndex: 5 })), false);
+  // resolution null / 空白のみは「記録なし」= 注入する中身が無い。
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, resolution: null })), false);
+  assert.equal(isResolvedUpstreamSibling(it, makeItem({ ...ok, resolution: "  \n " })), false);
+});
+
+test("isResolvedUpstreamSibling: item.parentId が null なら常に偽 (ルート項目に上流兄弟は無い)", () => {
+  const it = makeItem({ parentId: null, orderIndex: 5 });
+  const o = makeItem({ parentId: null, orderIndex: 1, status: "done", resolution: "決定" });
+  assert.equal(isResolvedUpstreamSibling(it, o), false);
 });
 
 // --- deriveProposedGate: 発火条件と判定順 -------------------------------------
@@ -390,6 +440,45 @@ test("deriveProposedGate: cross_repo — 完了側(succeeded/cancelled/awaiting_
   const it = makeItem({ executionStatus: "proposed", projectId: "prj3", projectDir: realDir });
   const g = mustGate(deriveProposedGate(it, buildGateSnapshot([...others, it]), { pauseAuto: false }));
   assert.equal(g.kind, "clear");
+});
+
+test("deriveProposedGate: cross_repo — 人間が完了/却下した兄弟 (status done/rejected) は引かない", () => {
+  // 人間が引き取って完了 (doIt→done) / 却下した auto 項目は executionStatus が none のまま
+  // 残る — executionStatus だけ見る判定だと完了済みの兄弟が同一案件・別 projectDir の leaf を
+  // 永久に塞ぐ。status の done/rejected も「完了側」に数える。
+  const mk = (id: string, over: Partial<Item>) =>
+    makeItem({ id, projectId: "prj4", projectDir: "/somewhere/else", disposition: "auto", ...over });
+  const others = [
+    mk("x-done", { status: "done", executionStatus: "none" }),
+    mk("x-rej", { status: "rejected", executionStatus: "none" }),
+  ];
+  const it = makeItem({ executionStatus: "proposed", projectId: "prj4", projectDir: realDir });
+  const g = mustGate(deriveProposedGate(it, buildGateSnapshot([...others, it]), { pauseAuto: false }));
+  assert.equal(g.kind, "clear");
+});
+
+test("deriveProposedGate: cross_repo — done/rejected でも実走中 (running/queued) の兄弟はガードを引く", () => {
+  // 実行中に人間が board の status セレクトで done/rejected にしても worker は他 repo を
+  // 現に変更し続けている — status だけで完了側に数えると横断同時変更の暴発防止が貫通する。
+  // 物理的に走っていない (executionStatus=none) done/rejected は従来どおり除外 (上のテスト)。
+  const mk = (id: string, over: Partial<Item>) =>
+    makeItem({ id, projectId: "prj5", projectDir: "/somewhere/else", disposition: "auto", ...over });
+  const it = makeItem({ executionStatus: "proposed", projectId: "prj5", projectDir: realDir });
+
+  const doneRunning = mk("x-done-run", { status: "done", executionStatus: "running" });
+  const g1 = mustGate(deriveProposedGate(it, buildGateSnapshot([doneRunning, it]), { pauseAuto: false }));
+  assert.equal(g1.kind, "cross_repo");
+  assert.equal(g1.blockerId, "x-done-run");
+
+  const rejQueued = mk("x-rej-q", { status: "rejected", executionStatus: "queued" });
+  const g2 = mustGate(deriveProposedGate(it, buildGateSnapshot([rejQueued, it]), { pauseAuto: false }));
+  assert.equal(g2.kind, "cross_repo");
+
+  // timed_out は in-flight 例外に含めない: done/rejected×timed_out は sweep が skip するため
+  // 永久に解けず、pending 側に残すと完了済み兄弟が別 repo leaf を永久に塞ぐ穴が再発する。
+  const doneTimedOut = mk("x-done-to", { status: "done", executionStatus: "timed_out" });
+  const g3 = mustGate(deriveProposedGate(it, buildGateSnapshot([doneTimedOut, it]), { pauseAuto: false }));
+  assert.equal(g3.kind, "clear");
 });
 
 test("deriveProposedGate: pause_auto — 一時停止×disposition auto のみで発火(他ゲート無し)", () => {

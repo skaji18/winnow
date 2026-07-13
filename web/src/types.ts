@@ -67,6 +67,8 @@ export interface Item {
   sprintId: string | null;
   // node 段メモリ (AI に効く前提)。サーバ未提供時 undefined=現状維持。
   context?: string | null;
+  // 人間実施の結果 (完了後)。context=着手前の前提と時制で対。サーバ未提供時 undefined=現状維持。
+  resolution?: string | null;
   dueDate: number | null;
   priority: Priority;
   createdAt: number;
@@ -117,6 +119,10 @@ export interface QueueItem extends Item {
   // サーバ計算 (gates.hasWorkerOutcome) — クライアントに判別式を複製しない。
   // サーバ未提供時 undefined=従来表示 (旧サーバ互換)。
   needsHuman?: boolean;
+  // 「同一親に未完 (status not done/rejected) の下流兄弟が居る」の read 時導出 (server queue.ts)。
+  // 真のときだけ「完了にする」に resolution textarea を出す (単独タスクへの偽アフォーダンス防止)。
+  // サーバ未提供時 undefined=非表示 (旧サーバ互換)。
+  hasDownstreamSiblings?: boolean;
   staleDays: number | null;
   ageDays: number | null;
   // 直近1手の逆適用情報 (処分=ラベルの Undo)。無ければ null。サーバ未提供時 undefined=非表示。

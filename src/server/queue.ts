@@ -33,6 +33,13 @@ export interface QueueItem extends Item {
   // gates.isNeedsHumanProposed の単一真実源をサーバで計算して届ける(クライアントに複製しない)。
   // UI はこれと settings.allowExternalSend で「押した先」を正直に出し分ける。
   needsHuman: boolean;
+  // 「同一親に未完 (status not done/rejected) の下流兄弟 (reviewOfId=null・orderIndex 大) が
+  // 居る」の read 時導出 (docs/DECISIONS.md「人間実施の結果の下流受け渡し」)。UI はこれが真の
+  // ときだけ「完了にする」に resolution textarea を出す — 親も下流兄弟も無い単独タスクに
+  // 「下流へ渡る」と約束する偽アフォーダンスを出さない。3秒ポーリング毎に再計算できる導出値
+  // なので永続化しない。gates.isResolvedUpstreamSibling (上流×done×resolution 非空) とは
+  // 別式であり流用しない — こちらは「これから受け取る側が居るか」の未完×下流判定。
+  hasDownstreamSiblings: boolean;
   // stale 検知 (in_progress のみ非null・STALE_DAYS 以上の粗い経年)。
   staleDays: number | null;
   // proposed/classified の滞留経過 (日数)。
@@ -219,6 +226,14 @@ export function queue(): QueueItem[] {
     //    取消ハンドル自体はバックログ/ツリーから引き続き届く(可視の場所が変わるだけ)。
     if (it.autoExecuted && it.executionStatus === "succeeded" && it.receivedAt == null)
       return true;
+    // 2.5) 人間の処分(完了)が勝つ: done は failed/timed_out の再浮上より先に畳む (1.2 の
+    //      rejected と対称)。timed_out を人間が手で done+resolution にした項目は sweep が
+    //      done を skip して executionStatus が残るため、ここで畳まないと完了済みタスクが
+    //      「止まった項目の再浮上」カード(再実行ボタンつき)として永久に出続ける。位置が重要:
+    //      2) の autoDone 取消ハンドルは status='done' で成立する (applyExecuteResult は
+    //      成功時 done を書く) ので、その後に置く — 先に畳むと §4-4 の取消ハンドルが消える。
+    //      undo/事後編集で done を解けば failed/timed_out として従来どおり再浮上する。
+    if (it.status === "done") return false;
     // 3) 【最優先】止まった項目の再浮上: 実行失敗・タイムアウト超過・人手保留は必ず出す
     //    (cancelled は 1) で除外済み)。timed_out は失敗確定ではないが、人間が待たず再実行/却下
     //    できるよう前面に出す(自動取り込みされれば succeeded 等に遷移して下の畳みに入る)。
@@ -236,8 +251,7 @@ export function queue(): QueueItem[] {
     if (inArchivedProject(it) && !isNeedsHumanProposed(it) && !isEscalateTerminated(it))
       return false;
     if (it.status === "blocked") return true;
-    // 4) done を畳む(3) の後なので失敗/blocked が優先。rejected は 1.2) で先に畳み済み)。
-    if (it.status === "done") return false;
+    // 4) done は 2.5) で畳み済み (rejected は 1.2)。ここに done は到達しない)。
     // 5) 提案待ち(不可逆実行のワンタップ承認)は必ず出す。
     if (it.executionStatus === "proposed") return true;
     // 6) 【寄生表示】人手で着手中(doIt)はキュー内『着手中』レーンに薄く出す。判別子は
@@ -291,6 +305,18 @@ export function queue(): QueueItem[] {
         : null;
     // ゲート由来 proposed の live 導出 (needs_human 由来と非 proposed は null)。
     const gate = deriveProposedGate(it, gateSnap, { pauseAuto });
+    // 未完の下流兄弟の実在 (resolution textarea の可視条件)。gateSnap.childrenOf を再利用し
+    // per-item の items.children 呼び直しを避ける (ホットパス)。レビュー leaf は観察タスクで
+    // あって resolution の受け手ではないので数えない (isPendingUpstreamSibling と同じ線)。
+    const hasDownstreamSiblings =
+      it.parentId != null &&
+      (gateSnap.childrenOf.get(it.parentId) ?? []).some(
+        (o) =>
+          o.reviewOfId == null &&
+          o.orderIndex > it.orderIndex &&
+          o.status !== "done" &&
+          o.status !== "rejected",
+      );
     return {
       ...it,
       isAudit: (it.disposition === "auto" || it.rawDisposition === "auto") && it.auditSampled,
@@ -302,6 +328,7 @@ export function queue(): QueueItem[] {
       // 起源判別(isNeedsHumanProposed)を使う: 成果の実在だけだと、実行済み item がゲート経由で
       // proposed に落ちた場合まで「AI停止」と誤ラベルし、送信OFF警告も誤発火する。
       needsHuman: gate == null && isNeedsHumanProposed(it),
+      hasDownstreamSiblings,
       staleDays,
       ageDays,
       undoableLabel,

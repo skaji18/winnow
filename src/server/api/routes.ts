@@ -199,6 +199,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       sprintId: z.string().nullable().optional(),
       dueDate: z.number().nullable().optional(),
       priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
+      // context(着手前の前提)/resolution(完了後の実施結果)はどちらも人間専有の編集系フィールド —
+      // 分類器/worker に書き込み経路が無く、除外リスト(口はバカ・分類器が賢い)の趣旨に反しない。
+      context: z.string().optional(),
+      resolution: z.string().optional(),
       // 楽観ロック (If-Unmodified-Since 相当)。未指定=チェックしない=現状維持(後方互換)。
       expectedUpdatedAt: z.number().optional(),
     })
@@ -513,6 +517,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       body: typeof it.body === "string" ? redactSecrets(it.body) : it.body,
       // node 段メモリも body 同様に export 経路で伏字化 (注入時の最終ゲートと対称)。
       context: typeof it.context === "string" ? redactSecrets(it.context) : it.context,
+      // 人間実施の結果も同列に伏字化 (新しい export 経路は必ず最終ゲートを通す)。
+      resolution:
+        typeof it.resolution === "string" ? redactSecrets(it.resolution) : it.resolution,
     }));
     const redactedLearnings = learnings.all().map((l) => ({
       ...l,

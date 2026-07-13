@@ -75,6 +75,7 @@ function base(over: Partial<Item> = {}): Item {
     projectId: null,
     sprintId: null,
     context: null,
+    resolution: null,
     dueDate: null,
     priority: "normal",
     createdAt: NOW - DAY_MS,
